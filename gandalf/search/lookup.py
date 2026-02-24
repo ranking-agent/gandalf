@@ -488,6 +488,15 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                             response["message"]["knowledge_graph"]["edges"][sc_kg_id] = sc_edge
                             subclass_edge_kg_ids.append(sc_kg_id)
 
+                            # Ensure subclass edge endpoint nodes are in KG nodes.
+                            # Child nodes from subclass expansion may not have been
+                            # added above (only first_idx path nodes are added).
+                            for ep_id in (sc_edge["subject"], sc_edge["object"]):
+                                if ep_id not in response["message"]["knowledge_graph"]["nodes"]:
+                                    ep_idx = graph.get_node_idx(ep_id)
+                                    if ep_idx is not None and ep_idx in node_cache:
+                                        response["message"]["knowledge_graph"]["nodes"][ep_id] = node_cache[ep_idx]
+
                         # Get superclass node ID for endpoint override
                         if sc_qnode_id in qnode_to_col:
                             sc_col = qnode_to_col[sc_qnode_id]
