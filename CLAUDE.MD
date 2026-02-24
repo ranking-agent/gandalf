@@ -48,7 +48,16 @@ pytest --cov=gandalf
 gandalf/
 ├── graph.py          # CSRGraph class (core data structure)
 ├── loader.py         # JSONL to graph conversion
-├── search.py         # Path finding algorithms
+├── search/           # Search & path finding (package)
+│   ├── __init__.py       # Re-exports public API
+│   ├── lookup.py         # Main TRAPI lookup entry point
+│   ├── expanders.py      # PredicateExpander, QualifierExpander
+│   ├── qualifiers.py     # Qualifier constraint matching
+│   ├── query_edge.py     # Edge query with predicate/qualifier filtering
+│   ├── reconstruct.py    # Path reconstruction & join ordering
+│   ├── path_arrays.py    # Compact numpy path representation
+│   ├── path_finder.py    # 3-hop path finding functions
+│   └── gc_utils.py       # GC monitoring & control
 ├── query_planner.py  # Query optimization
 ├── diagnostics.py    # Path explosion analysis
 ├── server.py         # FastAPI application
