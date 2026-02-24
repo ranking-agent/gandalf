@@ -284,6 +284,14 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
     pa_num_edges = path_data.num_edges
     lightweight = path_data.lightweight
 
+    # --- DEBUG: Summary of path array structure ---
+    if verbose:
+        print(f"\n  [DEBUG] Path array shape: {pa_nodes.shape[0]} paths, "
+              f"{pa_num_node_cols} node cols, {pa_num_edges} edge cols")
+        print(f"  [DEBUG] qnode_to_col: {qnode_to_col}")
+        print(f"  [DEBUG] qedge_to_col: {qedge_to_col}")
+        print(f"  [DEBUG] lightweight mode: {lightweight}")
+
     # Pre-compute subclass metadata for result building
     superclass_qnodes = {
         qnode_id for qnode_id, qnode in query_graph["nodes"].items()
@@ -411,6 +419,43 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                 subj_id = node_cache[actual_subj_idx]["id"]
                 obj_id = node_cache[actual_obj_idx]["id"]
 
+                # --- DEBUG: Validate edge endpoints against result node bindings ---
+                # Collect all node IDs bound in this result for cross-check
+                result_node_ids = set()
+                for _nc in range(pa_num_node_cols):
+                    _qn = col_to_qnode.get(_nc)
+                    if _qn and _qn not in superclass_qnodes:
+                        _nidx = int(pa_nodes[path_idx, _nc])
+                        result_node_ids.add(node_cache[_nidx]["id"])
+
+                if subj_id not in result_node_ids or obj_id not in result_node_ids:
+                    print(f"  [DEBUG] *** DISCONNECTED EDGE DETECTED ***")
+                    print(f"  [DEBUG]   result idx={path_idx}, qedge={qedge_id}, col={col}")
+                    print(f"  [DEBUG]   edge: {subj_id} --[{predicate}]--> {obj_id}")
+                    print(f"  [DEBUG]   is_inverse={is_inverse}, fwd_eidx={fwd_eidx}")
+                    print(f"  [DEBUG]   query_subj_idx={query_subj_idx}, query_obj_idx={query_obj_idx}")
+                    print(f"  [DEBUG]   actual_subj_idx={actual_subj_idx}, actual_obj_idx={actual_obj_idx}")
+                    print(f"  [DEBUG]   result node IDs: {result_node_ids}")
+                    # Also check what the CSR arrays say about this fwd_eidx
+                    if fwd_eidx >= 0:
+                        csr_target = int(graph.fwd_targets[fwd_eidx])
+                        csr_pred_id = int(graph.fwd_predicates[fwd_eidx])
+                        csr_pred_str = graph.id_to_predicate[csr_pred_id]
+                        # Find source node from CSR offsets
+                        csr_src = None
+                        for _nid in range(len(graph.fwd_offsets) - 1):
+                            _s = int(graph.fwd_offsets[_nid])
+                            _e = int(graph.fwd_offsets[_nid + 1])
+                            if _s <= fwd_eidx < _e:
+                                csr_src = _nid
+                                break
+                        csr_src_id = graph.get_node_id(csr_src) if csr_src is not None else "?"
+                        csr_tgt_id = graph.get_node_id(csr_target)
+                        print(f"  [DEBUG]   CSR edge at fwd_eidx={fwd_eidx}: "
+                              f"{csr_src_id} --[{csr_pred_str}]--> {csr_tgt_id}")
+                        orig_edge_id = graph.get_edge_id(fwd_eidx)
+                        print(f"  [DEBUG]   original edge ID from JSONL: {orig_edge_id}")
+
                 # Compute dedup key
                 if lightweight or fwd_eidx < 0:
                     edge_key = (subj_id, predicate, obj_id, (), ())
@@ -455,6 +500,24 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                             edge_props["_edge_id"] = orig_id
 
                     edge_bindings_by_qedge[qedge_id].append(edge_props)
+
+        # --- DEBUG: Log edge dedup summary per result ---
+        if verbose:
+            _bound_nodes_for_result = set()
+            for _nc in range(pa_num_node_cols):
+                _qn = col_to_qnode.get(_nc)
+                if _qn and _qn not in superclass_qnodes:
+                    _nidx = int(pa_nodes[first_idx, _nc])
+                    _bound_nodes_for_result.add(node_cache[_nidx]["id"])
+            for _qeid, _edges in edge_bindings_by_qedge.items():
+                for _edge in _edges:
+                    _es = _edge.get("subject", "?")
+                    _eo = _edge.get("object", "?")
+                    if _es not in _bound_nodes_for_result or _eo not in _bound_nodes_for_result:
+                        print(f"  [DEBUG] *** EDGE IN RESULT NOT CONNECTED TO BOUND NODES ***")
+                        print(f"  [DEBUG]   qedge={_qeid}, edge: {_es} --[{_edge.get('predicate', '?')}]--> {_eo}")
+                        print(f"  [DEBUG]   bound nodes: {_bound_nodes_for_result}")
+                        print(f"  [DEBUG]   _edge_id={_edge.get('_edge_id', 'none')}")
 
         # Add edges to knowledge graph and result bindings
         for edge_id, edges in edge_bindings_by_qedge.items():

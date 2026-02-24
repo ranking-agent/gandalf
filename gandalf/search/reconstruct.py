@@ -110,6 +110,14 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
 
     if verbose:
         print(f"  Starting with {num_paths:,} paths from edge '{first_edge_id}'")
+        # --- DEBUG: Sample first edge data to verify node placement ---
+        _sample_size = min(3, num_paths)
+        for _si in range(_sample_size):
+            _s, _p, _o, _vi, _fe = first_results[_si]
+            print(f"  [DEBUG] First edge sample [{_si}]: subj_idx={_s}, obj_idx={_o}, "
+                  f"pred={_p}, via_inv={_vi}, fwd_eidx={_fe}")
+            print(f"  [DEBUG]   -> placed in path: col0(subj_qnode={subj_qnode})={int(paths_nodes[_si, 0])}, "
+                  f"col1(obj_qnode={obj_qnode})={int(paths_nodes[_si, 1])}")
 
     # Iteratively join with remaining edges using two-pass approach:
     # Pass 1: count output rows, Pass 2: fill pre-allocated arrays.
@@ -133,13 +141,27 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
         edge_data = edge_results[edge_id]
 
         # Normalize edge data to query-aligned direction
+        # When via_inverse=True, the stored edge is subj_idx->obj_idx but the
+        # query direction is reversed, so we swap to (obj_idx, pred, subj_idx)
+        # to align with the query's (subject, object) semantics.
         normalized_edge_data = []
+        _inv_count = 0
         for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
             if via_inverse:
+                _inv_count += 1
                 normalized_edge_data.append((obj_idx, predicate, subj_idx, via_inverse, fwd_edge_idx))
             else:
                 normalized_edge_data.append((subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx))
         edge_data = normalized_edge_data
+
+        if verbose and _inv_count > 0:
+            print(f"\n    [DEBUG] Normalized {_inv_count}/{len(edge_data)} inverse edges for '{edge_id}'")
+            # Show a sample of normalized edges
+            _sample_size = min(3, len(edge_data))
+            for _si in range(_sample_size):
+                _ns, _np, _no, _nvi, _nfe = edge_data[_si]
+                print(f"    [DEBUG]   sample[{_si}]: query-aligned ({_ns}, {_np}, {_no}), "
+                      f"via_inv={_nvi}, fwd_eidx={_nfe}")
 
         if subj_in_paths and obj_in_paths:
             paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = _join_both_in_paths(
@@ -188,6 +210,47 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
         t_join_end = time.perf_counter()
         if verbose:
             print(f" -> {len(paths_nodes):,} paths ({t_join_end - t_join_start:.2f}s)")
+
+        # --- DEBUG: Validate path integrity after join ---
+        if verbose and len(paths_nodes) > 0:
+            _check_count = min(50, len(paths_nodes))
+            _mismatches = 0
+            for _ci in range(_check_count):
+                for _ej in range(join_idx + 1):
+                    _ej_id = join_order[_ej]
+                    _ej_def = query_graph["edges"][_ej_id]
+                    _ej_scol = qnode_to_col[_ej_def["subject"]]
+                    _ej_ocol = qnode_to_col[_ej_def["object"]]
+                    _ej_sidx = int(paths_nodes[_ci, _ej_scol])
+                    _ej_oidx = int(paths_nodes[_ci, _ej_ocol])
+                    _ej_feidx = int(paths_fwd_edge_idx[_ci, _ej])
+                    _ej_vi = bool(paths_via_inverse[_ci, _ej])
+
+                    if _ej_feidx >= 0:
+                        _csr_tgt = int(graph.fwd_targets[_ej_feidx])
+                        # If via_inverse: stored edge is (actual_subj -> actual_obj) in CSR
+                        # but query-aligned direction is reversed.
+                        # The path stores query-aligned nodes: subj_col = query_subj, obj_col = query_obj
+                        # If via_inverse: actual_subj = query_obj, actual_obj = query_subj
+                        # So CSR target should equal the query_subj (paths_nodes[subj_col])
+                        if _ej_vi:
+                            _expected_target = _ej_sidx  # CSR target = query subject when inverse
+                        else:
+                            _expected_target = _ej_oidx  # CSR target = query object when forward
+
+                        if _csr_tgt != _expected_target:
+                            _mismatches += 1
+                            if _mismatches <= 5:
+                                print(f"    [DEBUG] *** PATH INTEGRITY ERROR after join {join_idx} ***")
+                                print(f"    [DEBUG]   path[{_ci}] edge_col={_ej} ({_ej_id}): "
+                                      f"subj_col={_ej_scol}(idx={_ej_sidx}), obj_col={_ej_ocol}(idx={_ej_oidx})")
+                                print(f"    [DEBUG]   fwd_eidx={_ej_feidx}, via_inv={_ej_vi}")
+                                print(f"    [DEBUG]   CSR target={_csr_tgt}, expected={_expected_target}")
+                                print(f"    [DEBUG]   subj_node={graph.get_node_id(_ej_sidx)}, "
+                                      f"obj_node={graph.get_node_id(_ej_oidx)}, "
+                                      f"csr_tgt_node={graph.get_node_id(_csr_tgt)}")
+            if _mismatches > 0:
+                print(f"    [DEBUG] Total path integrity errors in sample: {_mismatches}/{_check_count}")
 
         if len(paths_nodes) == 0:
             if verbose:
@@ -238,6 +301,35 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
     # Build reverse mappings
     col_to_qnode = {v: k for k, v in qnode_to_col.items()}
     col_to_qedge = {v: k for k, v in qedge_to_col.items()}
+
+    # --- DEBUG: Final path connectivity check ---
+    if verbose:
+        _total_disconnected = 0
+        _check_final = min(200, num_paths)
+        for _fi in range(_check_final):
+            _path_node_set = set()
+            for _nc in range(num_node_cols):
+                _path_node_set.add(int(paths_nodes[_fi, _nc]))
+            for _ec in range(num_edges):
+                _e_feidx = int(paths_fwd_edge_idx[_fi, _ec])
+                _e_vi = bool(paths_via_inverse[_fi, _ec])
+                _eid = col_to_qedge[_ec]
+                _edef = query_graph["edges"][_eid]
+                _e_scol = qnode_to_col[_edef["subject"]]
+                _e_ocol = qnode_to_col[_edef["object"]]
+                _e_sidx = int(paths_nodes[_fi, _e_scol])
+                _e_oidx = int(paths_nodes[_fi, _e_ocol])
+                if _e_sidx not in _path_node_set or _e_oidx not in _path_node_set:
+                    _total_disconnected += 1
+                    if _total_disconnected <= 3:
+                        print(f"  [DEBUG] *** FINAL CHECK: edge col {_ec} ({_eid}) has node not in path ***")
+                        print(f"  [DEBUG]   path[{_fi}]: nodes={_path_node_set}, "
+                              f"edge subj={_e_sidx}, edge obj={_e_oidx}")
+        if _total_disconnected > 0:
+            print(f"  [DEBUG] Total disconnected edges in final check: "
+                  f"{_total_disconnected} (checked {_check_final} paths)")
+        else:
+            print(f"  [DEBUG] Final connectivity check passed ({_check_final} paths sampled)")
 
     return PathArrays(
         paths_nodes=paths_nodes,
