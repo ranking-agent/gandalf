@@ -46,8 +46,9 @@ ENV/
 *.ipynb
 
 # Data files (large)
-data/raw/*.jsonl
-data/processed/*.pkl
+*.jsonl
+*.pkl
+*.tar.gz
 
 # OS
 .DS_Store

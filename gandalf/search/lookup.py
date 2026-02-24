@@ -454,6 +454,13 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                         if orig_id is not None:
                             edge_props["_edge_id"] = orig_id
 
+                    # Store query-aligned subject/object for building
+                    # inferred composite edges.  edge["subject"]/["object"]
+                    # follow stored direction (swapped for inverse edges),
+                    # but superclass_node_overrides uses query direction.
+                    edge_props["_query_subject"] = node_cache[query_subj_idx]["id"]
+                    edge_props["_query_object"] = node_cache[query_obj_idx]["id"]
+
                     edge_bindings_by_qedge[qedge_id].append(edge_props)
 
         # Add edges to knowledge graph and result bindings
@@ -481,6 +488,15 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                             response["message"]["knowledge_graph"]["edges"][sc_kg_id] = sc_edge
                             subclass_edge_kg_ids.append(sc_kg_id)
 
+                            # Ensure subclass edge endpoint nodes are in KG nodes.
+                            # Child nodes from subclass expansion may not have been
+                            # added above (only first_idx path nodes are added).
+                            for ep_id in (sc_edge["subject"], sc_edge["object"]):
+                                if ep_id not in response["message"]["knowledge_graph"]["nodes"]:
+                                    ep_idx = graph.get_node_idx(ep_id)
+                                    if ep_idx is not None and ep_idx in node_cache:
+                                        response["message"]["knowledge_graph"]["nodes"][ep_id] = node_cache[ep_idx]
+
                         # Get superclass node ID for endpoint override
                         if sc_qnode_id in qnode_to_col:
                             sc_col = qnode_to_col[sc_qnode_id]
@@ -499,10 +515,14 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                             }
 
                         if composite_edge_id not in response["message"]["knowledge_graph"]["edges"]:
+                            # Use query-aligned IDs so the override maps to the
+                            # correct endpoint regardless of stored edge direction.
+                            qs = edge.get("_query_subject", edge["subject"])
+                            qo = edge.get("_query_object", edge["object"])
                             inferred_edge = {
-                                "subject": superclass_node_overrides.get("subject", edge["subject"]),
+                                "subject": superclass_node_overrides.get("subject", qs),
                                 "predicate": edge["predicate"],
-                                "object": superclass_node_overrides.get("object", edge["object"]),
+                                "object": superclass_node_overrides.get("object", qo),
                                 "attributes": [
                                     {
                                         "attribute_type_id": "biolink:knowledge_level",
@@ -543,10 +563,12 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
     # Free path arrays now that results are built
     del path_data
 
-    # Strip internal _edge_id markers from KG edges so they don't leak
+    # Strip internal markers from KG edges so they don't leak
     # into the TRAPI response.
     for edge in response["message"]["knowledge_graph"]["edges"].values():
         edge.pop("_edge_id", None)
+        edge.pop("_query_subject", None)
+        edge.pop("_query_object", None)
 
     t_built = time.perf_counter()
     if verbose:
