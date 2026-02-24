@@ -284,14 +284,6 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
     pa_num_edges = path_data.num_edges
     lightweight = path_data.lightweight
 
-    # --- DEBUG: Summary of path array structure ---
-    if verbose:
-        print(f"\n  [DEBUG] Path array shape: {pa_nodes.shape[0]} paths, "
-              f"{pa_num_node_cols} node cols, {pa_num_edges} edge cols")
-        print(f"  [DEBUG] qnode_to_col: {qnode_to_col}")
-        print(f"  [DEBUG] qedge_to_col: {qedge_to_col}")
-        print(f"  [DEBUG] lightweight mode: {lightweight}")
-
     # Pre-compute subclass metadata for result building
     superclass_qnodes = {
         qnode_id for qnode_id, qnode in query_graph["nodes"].items()
@@ -419,44 +411,6 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                 subj_id = node_cache[actual_subj_idx]["id"]
                 obj_id = node_cache[actual_obj_idx]["id"]
 
-                # --- DEBUG: Validate edge endpoints against result node bindings ---
-                # Skip subclass edges (they reference superclass nodes which are
-                # handled separately via auxiliary graphs / composite edges)
-                if qedge_id not in subclass_qedges:
-                    # Collect ALL node IDs in this path (including superclass nodes)
-                    result_node_ids = set()
-                    for _nc in range(pa_num_node_cols):
-                        _nidx = int(pa_nodes[path_idx, _nc])
-                        result_node_ids.add(node_cache[_nidx]["id"])
-
-                    if subj_id not in result_node_ids or obj_id not in result_node_ids:
-                        print(f"  [DEBUG] *** DISCONNECTED EDGE DETECTED ***")
-                        print(f"  [DEBUG]   result idx={path_idx}, qedge={qedge_id}, col={col}")
-                        print(f"  [DEBUG]   edge: {subj_id} --[{predicate}]--> {obj_id}")
-                        print(f"  [DEBUG]   is_inverse={is_inverse}, fwd_eidx={fwd_eidx}")
-                        print(f"  [DEBUG]   query_subj_idx={query_subj_idx}, query_obj_idx={query_obj_idx}")
-                        print(f"  [DEBUG]   actual_subj_idx={actual_subj_idx}, actual_obj_idx={actual_obj_idx}")
-                        print(f"  [DEBUG]   result node IDs: {result_node_ids}")
-                        # Also check what the CSR arrays say about this fwd_eidx
-                        if fwd_eidx >= 0:
-                            csr_target = int(graph.fwd_targets[fwd_eidx])
-                            csr_pred_id = int(graph.fwd_predicates[fwd_eidx])
-                            csr_pred_str = graph.id_to_predicate[csr_pred_id]
-                            # Find source node from CSR offsets
-                            csr_src = None
-                            for _nid in range(len(graph.fwd_offsets) - 1):
-                                _s = int(graph.fwd_offsets[_nid])
-                                _e = int(graph.fwd_offsets[_nid + 1])
-                                if _s <= fwd_eidx < _e:
-                                    csr_src = _nid
-                                    break
-                            csr_src_id = graph.get_node_id(csr_src) if csr_src is not None else "?"
-                            csr_tgt_id = graph.get_node_id(csr_target)
-                            print(f"  [DEBUG]   CSR edge at fwd_eidx={fwd_eidx}: "
-                                  f"{csr_src_id} --[{csr_pred_str}]--> {csr_tgt_id}")
-                            orig_edge_id = graph.get_edge_id(fwd_eidx)
-                            print(f"  [DEBUG]   original edge ID from JSONL: {orig_edge_id}")
-
                 # Compute dedup key
                 if lightweight or fwd_eidx < 0:
                     edge_key = (subj_id, predicate, obj_id, (), ())
@@ -500,26 +454,14 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                         if orig_id is not None:
                             edge_props["_edge_id"] = orig_id
 
-                    edge_bindings_by_qedge[qedge_id].append(edge_props)
+                    # Store query-aligned subject/object for building
+                    # inferred composite edges.  edge["subject"]/["object"]
+                    # follow stored direction (swapped for inverse edges),
+                    # but superclass_node_overrides uses query direction.
+                    edge_props["_query_subject"] = node_cache[query_subj_idx]["id"]
+                    edge_props["_query_object"] = node_cache[query_obj_idx]["id"]
 
-        # --- DEBUG: Log edge dedup summary per result ---
-        # Include ALL nodes (including superclass) to avoid false positives
-        if verbose:
-            _all_nodes_for_result = set()
-            for _nc in range(pa_num_node_cols):
-                _nidx = int(pa_nodes[first_idx, _nc])
-                _all_nodes_for_result.add(node_cache[_nidx]["id"])
-            for _qeid, _edges in edge_bindings_by_qedge.items():
-                if _qeid in subclass_qedges:
-                    continue  # Subclass edges are handled via auxiliary graphs
-                for _edge in _edges:
-                    _es = _edge.get("subject", "?")
-                    _eo = _edge.get("object", "?")
-                    if _es not in _all_nodes_for_result or _eo not in _all_nodes_for_result:
-                        print(f"  [DEBUG] *** EDGE IN RESULT NOT CONNECTED TO ANY PATH NODE ***")
-                        print(f"  [DEBUG]   qedge={_qeid}, edge: {_es} --[{_edge.get('predicate', '?')}]--> {_eo}")
-                        print(f"  [DEBUG]   all path nodes: {_all_nodes_for_result}")
-                        print(f"  [DEBUG]   _edge_id={_edge.get('_edge_id', 'none')}")
+                    edge_bindings_by_qedge[qedge_id].append(edge_props)
 
         # Add edges to knowledge graph and result bindings
         for edge_id, edges in edge_bindings_by_qedge.items():
@@ -564,10 +506,14 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                             }
 
                         if composite_edge_id not in response["message"]["knowledge_graph"]["edges"]:
+                            # Use query-aligned IDs so the override maps to the
+                            # correct endpoint regardless of stored edge direction.
+                            qs = edge.get("_query_subject", edge["subject"])
+                            qo = edge.get("_query_object", edge["object"])
                             inferred_edge = {
-                                "subject": superclass_node_overrides.get("subject", edge["subject"]),
+                                "subject": superclass_node_overrides.get("subject", qs),
                                 "predicate": edge["predicate"],
-                                "object": superclass_node_overrides.get("object", edge["object"]),
+                                "object": superclass_node_overrides.get("object", qo),
                                 "attributes": [
                                     {
                                         "attribute_type_id": "biolink:knowledge_level",
@@ -608,81 +554,17 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
     # Free path arrays now that results are built
     del path_data
 
-    # Strip internal _edge_id markers from KG edges so they don't leak
+    # Strip internal markers from KG edges so they don't leak
     # into the TRAPI response.
     for edge in response["message"]["knowledge_graph"]["edges"].values():
         edge.pop("_edge_id", None)
+        edge.pop("_query_subject", None)
+        edge.pop("_query_object", None)
 
     t_built = time.perf_counter()
     if verbose:
         print(f"  Built {len(response['message']['results']):,} results ({t_built - t_grouped:.2f}s)")
         print(f"  Post-processing total: {t_built - t_post_start:.2f}s")
-
-    # --- DEBUG: Ground-truth validation of final TRAPI response ---
-    if verbose:
-        kg_nodes = set(response["message"]["knowledge_graph"]["nodes"].keys())
-        kg_edges = response["message"]["knowledge_graph"]["edges"]
-
-        # Check 1: Every KG edge's subject and object must be in KG nodes
-        _orphan_edge_count = 0
-        for _kg_eid, _kg_edge in kg_edges.items():
-            _es = _kg_edge.get("subject")
-            _eo = _kg_edge.get("object")
-            if _es not in kg_nodes or _eo not in kg_nodes:
-                _orphan_edge_count += 1
-                if _orphan_edge_count <= 10:
-                    _missing = []
-                    if _es not in kg_nodes:
-                        _missing.append(f"subject={_es}")
-                    if _eo not in kg_nodes:
-                        _missing.append(f"object={_eo}")
-                    print(f"  [DEBUG] *** KG EDGE REFERENCES MISSING NODE ***")
-                    print(f"  [DEBUG]   edge_kg_id={_kg_eid}")
-                    print(f"  [DEBUG]   {_es} --[{_kg_edge.get('predicate', '?')}]--> {_eo}")
-                    print(f"  [DEBUG]   missing from KG nodes: {', '.join(_missing)}")
-        if _orphan_edge_count > 0:
-            print(f"  [DEBUG] Total KG edges with missing nodes: {_orphan_edge_count}/{len(kg_edges)}")
-
-        # Check 2: Every result's edge bindings reference existing KG edges,
-        # and those edges connect to nodes in the result's node bindings
-        _disconnected_results = 0
-        for _ri, _result in enumerate(response["message"]["results"]):
-            _bound_node_ids = set()
-            for _qn, _bindings in _result["node_bindings"].items():
-                for _b in _bindings:
-                    _bound_node_ids.add(_b["id"])
-
-            for _analysis in _result.get("analyses", []):
-                for _qeid, _ebindings in _analysis.get("edge_bindings", {}).items():
-                    for _eb in _ebindings:
-                        _eid = _eb["id"]
-                        _kg_edge = kg_edges.get(_eid)
-                        if _kg_edge is None:
-                            _disconnected_results += 1
-                            if _disconnected_results <= 10:
-                                print(f"  [DEBUG] *** RESULT REFERENCES MISSING KG EDGE ***")
-                                print(f"  [DEBUG]   result[{_ri}], qedge={_qeid}, edge_id={_eid}")
-                            continue
-                        _es = _kg_edge.get("subject")
-                        _eo = _kg_edge.get("object")
-                        if _es not in _bound_node_ids or _eo not in _bound_node_ids:
-                            _disconnected_results += 1
-                            if _disconnected_results <= 10:
-                                print(f"  [DEBUG] *** RESULT EDGE NOT CONNECTED TO BOUND NODES ***")
-                                print(f"  [DEBUG]   result[{_ri}], qedge={_qeid}, edge_id={_eid}")
-                                print(f"  [DEBUG]   edge: {_es} --[{_kg_edge.get('predicate', '?')}]--> {_eo}")
-                                print(f"  [DEBUG]   bound node IDs: {_bound_node_ids}")
-                                _missing = []
-                                if _es not in _bound_node_ids:
-                                    _missing.append(f"subject={_es}")
-                                if _eo not in _bound_node_ids:
-                                    _missing.append(f"object={_eo}")
-                                print(f"  [DEBUG]   not in bindings: {', '.join(_missing)}")
-        if _disconnected_results > 0:
-            print(f"  [DEBUG] Total result-level disconnections: {_disconnected_results}")
-        else:
-            print(f"  [DEBUG] Response validation passed: all KG edges connected, "
-                  f"all result bindings consistent")
 
 
 def _rewrite_for_subclass(query_graph, subclass_depth=1):

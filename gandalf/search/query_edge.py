@@ -118,37 +118,6 @@ def query_edge(
         (subj, pred, obj) but different qualifiers / sources are kept as
         separate matches.
         """
-        # --- DEBUG: Validate fwd_edge_idx points to correct edge in CSR ---
-        if fwd_edge_idx >= 0:
-            csr_target = int(graph.fwd_targets[fwd_edge_idx])
-            csr_pred_id = int(graph.fwd_predicates[fwd_edge_idx])
-            csr_pred_str = graph.id_to_predicate[csr_pred_id]
-            # The stored edge in CSR is: subj_idx -> csr_target with csr_pred_str
-            # If via_inverse, the match reports (obj_of_stored, stored_pred, subj_of_stored)
-            # so the CSR should have subj_idx -> obj_idx with predicate
-            # If not via_inverse, CSR should have subj_idx -> obj_idx with predicate
-            if not via_inverse:
-                if csr_target != obj_idx:
-                    print(f"  [DEBUG] *** EDGE IDX MISMATCH (forward) ***")
-                    print(f"  [DEBUG]   fwd_eidx={fwd_edge_idx}: CSR target={csr_target} "
-                          f"(node_id={graph.get_node_id(csr_target)}), "
-                          f"but match obj_idx={obj_idx} "
-                          f"(node_id={graph.get_node_id(obj_idx)})")
-                    print(f"  [DEBUG]   match: {graph.get_node_id(subj_idx)} --[{predicate}]--> "
-                          f"{graph.get_node_id(obj_idx)}")
-                    print(f"  [DEBUG]   CSR pred={csr_pred_str}, match pred={predicate}")
-            else:
-                # via_inverse: stored edge is subj_idx -> obj_idx in CSR
-                # but query found it through inverse lookup
-                if csr_target != obj_idx:
-                    print(f"  [DEBUG] *** EDGE IDX MISMATCH (inverse) ***")
-                    print(f"  [DEBUG]   fwd_eidx={fwd_edge_idx}: CSR target={csr_target} "
-                          f"(node_id={graph.get_node_id(csr_target)}), "
-                          f"but match obj_idx={obj_idx} "
-                          f"(node_id={graph.get_node_id(obj_idx)})")
-                    print(f"  [DEBUG]   match: {graph.get_node_id(subj_idx)} --[{predicate}]--> "
-                          f"{graph.get_node_id(obj_idx)}, via_inverse=True")
-
         key = (subj_idx, predicate, obj_idx, fwd_edge_idx)
         if key not in seen_edges:
             seen_edges.add(key)
