@@ -235,6 +235,79 @@ class TestSymmetricPredicates:
         assert results[0]["node_bindings"]["n2"][0]["id"] == "NCBIGene:3643"
 
 
+class TestSymmetricBothPinnedDedup:
+    """Tests that symmetric predicates return both directions when both ends pinned.
+
+    Reproduces the bug where the dedup key in add_match() did not include
+    via_inverse, causing inverse matches to be silently dropped when the same
+    physical edge was found in both forward and inverse directions.
+
+    The test fixture contains:
+    - NCBIGene:5468 (PPARG) --interacts_with--> NCBIGene:3643 (INSR)
+    - NCBIGene:5468 (PPARG) --gene_associated_with_condition--> MONDO:0005148
+    - NCBIGene:3643 (INSR) --gene_associated_with_condition--> MONDO:0005148
+
+    A triangle query (SN --interacts_with--> h, SN --assoc--> ON, h --assoc--> ON)
+    should return BOTH (SN=PPARG, h=INSR) and (SN=INSR, h=PPARG).
+    """
+
+    def test_symmetric_both_pinned_returns_both_directions(self, graph, bmt):
+        """Both direction bindings should appear when symmetric edge has both ends pinned.
+
+        Graph has: PPARG --interacts_with--> INSR (stored once).
+        Query: SN --interacts_with--> h, SN --assoc--> T2D, h --assoc--> T2D.
+        After processing the association edges, SN and h overlap (both contain
+        PPARG and INSR).  The symmetric interacts_with edge should produce
+        two results: (SN=PPARG, h=INSR) AND (SN=INSR, h=PPARG).
+        """
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "SN": {"categories": ["biolink:Gene"]},
+                        "h": {"categories": ["biolink:Gene"]},
+                        "ON": {"ids": ["MONDO:0005148"]},
+                    },
+                    "edges": {
+                        "edge_0": {
+                            "subject": "SN",
+                            "object": "ON",
+                            "predicates": ["biolink:gene_associated_with_condition"],
+                        },
+                        "edge_1": {
+                            "subject": "h",
+                            "object": "ON",
+                            "predicates": ["biolink:gene_associated_with_condition"],
+                        },
+                        "edge_2": {
+                            "subject": "SN",
+                            "object": "h",
+                            "predicates": ["biolink:interacts_with"],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=False)
+        results = response["message"]["results"]
+
+        # Collect (SN, h) binding pairs from results
+        binding_pairs = set()
+        for r in results:
+            sn_id = r["node_bindings"]["SN"][0]["id"]
+            h_id = r["node_bindings"]["h"][0]["id"]
+            binding_pairs.add((sn_id, h_id))
+
+        # Must have both directions
+        assert ("NCBIGene:5468", "NCBIGene:3643") in binding_pairs, (
+            "Missing (SN=PPARG, h=INSR) result"
+        )
+        assert ("NCBIGene:3643", "NCBIGene:5468") in binding_pairs, (
+            "Missing (SN=INSR, h=PPARG) result — inverse direction dropped by dedup"
+        )
+
+
 class TestSymmetricPredicateValidation:
     """Tests that validate returned edges actually exist in the graph.
 

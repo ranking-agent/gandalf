@@ -116,9 +116,12 @@ def query_edge(
 
         Dedup key includes ``fwd_edge_idx`` so that edges with the same
         (subj, pred, obj) but different qualifiers / sources are kept as
-        separate matches.
+        separate matches.  It also includes ``via_inverse`` because the
+        same physical edge found in both forward and inverse directions
+        represents two distinct query bindings (e.g. SN=A,h=B vs SN=B,h=A
+        for symmetric predicates).
         """
-        key = (subj_idx, predicate, obj_idx, fwd_edge_idx)
+        key = (subj_idx, predicate, obj_idx, fwd_edge_idx, via_inverse)
         if key not in seen_edges:
             seen_edges.add(key)
             matches.append((subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx))
