@@ -27,25 +27,31 @@ _DEFAULT_READ_MAP_SIZE = 256 * 1024 * 1024 * 1024   # 256 GB
 _INITIAL_WRITE_MAP_SIZE = 4 * 1024 * 1024 * 1024    # 4 GB
 
 
-def _put_with_resize(env, txn, key, val):
+def _put_with_resize(env, txn, key, val, pending):
     """Put key/value into LMDB, auto-resizing the map if full.
 
-    On MapFullError the current transaction is committed (preserving all
-    prior writes), the map is doubled, and the failed put is retried in a
-    fresh transaction.
+    After a failed put(), LMDB marks the transaction as invalid — it must
+    be aborted, not committed.  So we abort, double the map, and replay
+    all writes since the last commit (tracked in *pending*).
+
+    Callers must clear *pending* after every successful commit.
 
     Returns the (possibly new) write transaction.
     """
     try:
         txn.put(key, val)
+        pending.append((key, val))
         return txn
     except lmdb.MapFullError:
-        txn.commit()
+        txn.abort()
         new_size = env.info()["map_size"] * 2
         env.set_mapsize(new_size)
         print(f"    LMDB: map full, resized to {new_size / (1024**3):.0f} GB")
         txn = env.begin(write=True)
+        for k, v in pending:
+            txn.put(k, v)
         txn.put(key, val)
+        pending.append((key, val))
         return txn
 
 
@@ -149,16 +155,18 @@ class LMDBPropertyStore:
         )
 
         txn = env.begin(write=True)
+        pending = []
         count = 0
         try:
             for edge_idx, props in edge_iterator:
                 key = _encode_key(edge_idx)
                 val = msgpack.packb(props, use_bin_type=True)
-                txn = _put_with_resize(env, txn, key, val)
+                txn = _put_with_resize(env, txn, key, val, pending)
                 count += 1
 
                 if count % commit_every == 0:
                     txn.commit()
+                    pending.clear()
                     if count % 1_000_000 == 0:
                         print(f"    LMDB: wrote {count:,}/{num_edges:,} edges...")
                     txn = env.begin(write=True)
@@ -226,6 +234,7 @@ class LMDBPropertyStore:
 
         temp_txn = temp_env.begin(buffers=True)
         final_txn = final_env.begin(write=True)
+        pending = []
 
         count = 0
         try:
@@ -236,12 +245,13 @@ class LMDBPropertyStore:
 
                 final_key = _encode_key(csr_pos)
                 final_txn = _put_with_resize(
-                    final_env, final_txn, final_key, bytes(val)
+                    final_env, final_txn, final_key, bytes(val), pending
                 )
                 count += 1
 
                 if count % commit_every == 0:
                     final_txn.commit()
+                    pending.clear()
                     if count % 500_000 == 0:
                         print(f"      {count:>12,} edges rewritten")
                     final_txn = final_env.begin(write=True)

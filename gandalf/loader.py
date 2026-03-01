@@ -218,6 +218,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path, temp_dir=None):
     )
 
     txn = temp_env.begin(write=True)
+    pending = []
     try:
         with open(edge_jsonl_path, "r", encoding="utf-8") as f:
             for i, line in enumerate(f):
@@ -249,10 +250,11 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path, temp_dir=None):
                     }
                     key = _encode_key(i)
                     val = msgpack.packb(detail, use_bin_type=True)
-                    txn = _put_with_resize(temp_env, txn, key, val)
+                    txn = _put_with_resize(temp_env, txn, key, val, pending)
 
                 if (i + 1) % 50_000 == 0:
                     txn.commit()
+                    pending.clear()
                     txn = temp_env.begin(write=True)
 
                 if (i + 1) % 1_000_000 == 0:
