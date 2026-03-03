@@ -10,7 +10,7 @@ from gandalf.search.path_arrays import PathArrays
 
 
 # When path count exceeds this threshold, skip edge attribute enrichment
-# (sources, qualifiers, publications, attributes from LMDB) and only include
+# (sources, qualifiers, attributes from LMDB) and only include
 # predicates. This avoids expensive per-edge property lookups on large result sets.
 LARGE_RESULT_PATH_THRESHOLD = int(
     os.environ.get("GANDALF_LARGE_RESULT_THRESHOLD", "50000")

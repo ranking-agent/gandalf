@@ -1,4 +1,4 @@
-"""LMDB-backed edge property storage for publications, sources, and attributes.
+"""LMDB-backed edge property storage for attributes (including publications).
 
 These are the "cold path" properties — only accessed during response enrichment
 for the small set of result edges. Qualifiers and sources (hot path, needed during
@@ -68,7 +68,7 @@ def _decode_key(key: bytes) -> int:
 class LMDBPropertyStore:
     """Disk-backed edge property storage using LMDB.
 
-    Stores publications, sources, and attributes per edge as msgpack blobs.
+    Stores attributes per edge as msgpack blobs.
     Keys are edge indices (matching CSR array positions) encoded as 4-byte
     big-endian integers for correct sort order.
 
@@ -90,7 +90,7 @@ class LMDBPropertyStore:
     def get(self, edge_idx):
         """Get all detail properties for a single edge.
 
-        Returns dict with 'publications', 'sources', 'attributes' keys,
+        Returns dict with an 'attributes' key (and any other stored keys),
         or empty dict if edge not found.
         """
         key = _encode_key(edge_idx)
@@ -133,7 +133,7 @@ class LMDBPropertyStore:
         Args:
             db_path: Path for the LMDB directory.
             edge_iterator: Yields (edge_idx, props_dict) tuples where
-                props_dict has keys 'publications', 'sources', 'attributes'.
+                props_dict has an 'attributes' key (TRAPI Attribute list).
                 Must yield in edge_idx order (0, 1, 2, ...).
             num_edges: Total number of edges (for progress reporting).
             commit_every: Commit transaction every N edges to limit memory.

@@ -23,8 +23,8 @@ class EdgePropertyStore:
     The wrapper dicts returned by _get_props() contain only references to
     long-lived pool objects, so they are freed by refcount (no GC cycles).
 
-    Publications, attributes, and other "cold path" data live in
-    LMDBPropertyStore (disk-backed, accessed only during response enrichment).
+    Other "cold path" data (attributes, which include publications) lives
+    in LMDBPropertyStore (disk-backed, accessed only during response enrichment).
     """
 
     __slots__ = (
@@ -231,7 +231,7 @@ class CSRGraph:
 
     Edge properties are stored in two tiers:
     - Hot path (qualifiers, sources): in-memory dedup store (EdgePropertyStore)
-    - Cold path (publications, attributes): disk-backed LMDB (LMDBPropertyStore)
+    - Cold path (attributes, including publications): disk-backed LMDB (LMDBPropertyStore)
     """
 
     def __init__(
@@ -633,7 +633,7 @@ class CSRGraph:
         """Get a specific property for an edge.
 
         For 'qualifiers' and 'sources': O(log(degree)) via dedup store.
-        For 'publications', 'attributes': O(log(degree)) + LMDB lookup.
+        For 'attributes': O(log(degree)) + LMDB lookup.
         """
         if key == "predicate":
             return predicate
@@ -662,7 +662,7 @@ class CSRGraph:
         """Get all properties for an edge.
 
         Merges hot-path (qualifiers, sources from dedup store) with
-        cold-path (publications, attributes from LMDB).
+        cold-path (attributes from LMDB).
         """
         pred_id = self.predicate_to_idx.get(predicate)
         if pred_id is None:
@@ -687,7 +687,7 @@ class CSRGraph:
         """Get all properties for an edge by its forward-CSR array position.
 
         This is O(1) for hot-path data (qualifiers, sources) and a single
-        LMDB lookup for cold-path data (publications, attributes).  Prefer
+        LMDB lookup for cold-path data (attributes).  Prefer
         this over ``get_all_edge_properties`` when you already have the
         forward edge index (e.g. from ``neighbors_with_properties``).
         """
