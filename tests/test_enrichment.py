@@ -74,7 +74,8 @@ class TestEnrichNodes:
         enrich_knowledge_graph(msg, graph)
 
         node = msg["knowledge_graph"]["nodes"]["CHEBI:6801"]
-        eq_attrs = [a for a in node["attributes"] if a["attribute_type_id"] == "biolink:equivalent_identifiers"]
+        print(node)
+        eq_attrs = [a for a in node["attributes"] if a["original_attribute_name"] == "equivalent_identifiers"]
         assert len(eq_attrs) == 1
         assert "DRUGBANK:DB00331" in eq_attrs[0]["value"]
 
@@ -86,7 +87,7 @@ class TestEnrichNodes:
         enrich_knowledge_graph(msg, graph)
 
         node = msg["knowledge_graph"]["nodes"]["CHEBI:6801"]
-        ic_attrs = [a for a in node["attributes"] if a["attribute_type_id"] == "biolink:information_content"]
+        ic_attrs = [a for a in node["attributes"] if a["original_attribute_name"] == "information_content"]
         assert len(ic_attrs) == 1
         assert ic_attrs[0]["value"] == 85.5
 

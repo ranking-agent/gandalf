@@ -94,7 +94,7 @@ class TestNodeProperties:
         """Should store information_content as a TRAPI attribute."""
         diabetes_idx = graph.node_id_to_idx["MONDO:0005148"]
         attributes = graph.get_node_property(diabetes_idx, "attributes")
-        ic_attrs = [a for a in attributes if a["attribute_type_id"] == "biolink:information_content"]
+        ic_attrs = [a for a in attributes if a["original_attribute_name"] == "information_content"]
         assert len(ic_attrs) == 1
         assert ic_attrs[0]["value"] == pytest.approx(78.2)
         assert ic_attrs[0]["original_attribute_name"] == "information_content"
@@ -103,7 +103,7 @@ class TestNodeProperties:
         """Should store equivalent_identifiers as a TRAPI attribute."""
         metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
         attributes = graph.get_node_property(metformin_idx, "attributes")
-        eq_attrs = [a for a in attributes if a["attribute_type_id"] == "biolink:equivalent_identifiers"]
+        eq_attrs = [a for a in attributes if a["original_attribute_name"] == "equivalent_identifiers"]
         assert len(eq_attrs) == 1
         assert "DRUGBANK:DB00331" in eq_attrs[0]["value"]
         assert eq_attrs[0]["original_attribute_name"] == "equivalent_identifiers"

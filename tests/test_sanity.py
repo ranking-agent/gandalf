@@ -409,7 +409,7 @@ class TestNodePropertySanity:
     def _get_attr_value(attributes, attribute_type_id):
         """Find a TRAPI attribute by type and return its value."""
         for attr in attributes:
-            if attr["attribute_type_id"] == attribute_type_id:
+            if attr["original_attribute_name"] == attribute_type_id:
                 return attr["value"]
         return None
 
@@ -420,9 +420,9 @@ class TestNodePropertySanity:
         assert "biolink:SmallMolecule" in cats
         assert "biolink:Drug" in cats
         attrs = graph.get_node_property(idx, "attributes")
-        eqids = self._get_attr_value(attrs, "biolink:equivalent_identifiers")
+        eqids = self._get_attr_value(attrs, "equivalent_identifiers")
         assert "DRUGBANK:DB00331" in eqids
-        ic = self._get_attr_value(attrs, "biolink:information_content")
+        ic = self._get_attr_value(attrs, "information_content")
         assert ic == pytest.approx(85.5)
 
     def test_pparg_properties(self, graph):
@@ -431,7 +431,7 @@ class TestNodePropertySanity:
         cats = graph.get_node_property(idx, "categories")
         assert "biolink:Gene" in cats
         attrs = graph.get_node_property(idx, "attributes")
-        ic = self._get_attr_value(attrs, "biolink:information_content")
+        ic = self._get_attr_value(attrs, "information_content")
         assert ic == pytest.approx(92.3)
 
     def test_diabetes_properties(self, graph):
@@ -439,7 +439,7 @@ class TestNodePropertySanity:
         assert graph.get_node_property(idx, "name") == "Type 2 Diabetes"
         assert "biolink:Disease" in graph.get_node_property(idx, "categories")
         attrs = graph.get_node_property(idx, "attributes")
-        ic = self._get_attr_value(attrs, "biolink:information_content")
+        ic = self._get_attr_value(attrs, "information_content")
         assert ic == pytest.approx(78.2)
 
     def test_node_id_roundtrips(self, graph):

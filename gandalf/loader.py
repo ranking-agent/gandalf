@@ -137,7 +137,7 @@ def _extract_node_attributes(node_data):
         if field in _CORE_NODE_FIELDS:
             continue
         attributes.append({
-            "attribute_type_id": f"biolink:{field}",
+            "attribute_type_id": "biolink:Attribute",
             "value": value,
             "original_attribute_name": field,
         })
@@ -230,7 +230,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path, temp_dir=None):
     # Temp LMDB for cold-path properties (publications, attributes)
     # Default to same partition as the input data to avoid filling /tmp.
     build_temp_root = temp_dir or str(Path(edge_jsonl_path).resolve().parent)
-    temp_dir = tempfile.mkdtemp(prefix="gandalf_build_", dir=build_temp_root)
+    temp_dir = tempfile.mkdtemp(prefix="gandalf_build_")
     temp_lmdb_path = Path(temp_dir) / "temp_props.lmdb"
     temp_lmdb_path.mkdir(parents=True, exist_ok=True)
 

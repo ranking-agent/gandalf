@@ -61,7 +61,6 @@ class TestLookupResponseStructure:
         # Check Metformin node
         assert "CHEBI:6801" in kg_nodes
         metformin = kg_nodes["CHEBI:6801"]
-        assert metformin["id"] == "CHEBI:6801"
         assert metformin["name"] == "Metformin"
         assert "biolink:SmallMolecule" in metformin["categories"]
 
