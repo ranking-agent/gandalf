@@ -394,28 +394,42 @@ class TestEdgeIndexConsistency:
 class TestNodePropertySanity:
     """Spot-check that node properties are stored against the correct index."""
 
+    @staticmethod
+    def _get_attr_value(attributes, attribute_type_id):
+        """Find a TRAPI attribute by type and return its value."""
+        for attr in attributes:
+            if attr["attribute_type_id"] == attribute_type_id:
+                return attr["value"]
+        return None
+
     def test_metformin_properties(self, graph):
         idx = graph.node_id_to_idx["CHEBI:6801"]
         assert graph.get_node_property(idx, "name") == "Metformin"
         cats = graph.get_node_property(idx, "categories")
         assert "biolink:SmallMolecule" in cats
         assert "biolink:Drug" in cats
-        eqids = graph.get_node_property(idx, "equivalent_identifiers")
+        attrs = graph.get_node_property(idx, "attributes")
+        eqids = self._get_attr_value(attrs, "biolink:equivalent_identifiers")
         assert "DRUGBANK:DB00331" in eqids
-        assert graph.get_node_property(idx, "information_content") == pytest.approx(85.5)
+        ic = self._get_attr_value(attrs, "biolink:information_content")
+        assert ic == pytest.approx(85.5)
 
     def test_pparg_properties(self, graph):
         idx = graph.node_id_to_idx["NCBIGene:5468"]
         assert graph.get_node_property(idx, "name") == "PPARG"
         cats = graph.get_node_property(idx, "categories")
         assert "biolink:Gene" in cats
-        assert graph.get_node_property(idx, "information_content") == pytest.approx(92.3)
+        attrs = graph.get_node_property(idx, "attributes")
+        ic = self._get_attr_value(attrs, "biolink:information_content")
+        assert ic == pytest.approx(92.3)
 
     def test_diabetes_properties(self, graph):
         idx = graph.node_id_to_idx["MONDO:0005148"]
         assert graph.get_node_property(idx, "name") == "Type 2 Diabetes"
         assert "biolink:Disease" in graph.get_node_property(idx, "categories")
-        assert graph.get_node_property(idx, "information_content") == pytest.approx(78.2)
+        attrs = graph.get_node_property(idx, "attributes")
+        ic = self._get_attr_value(attrs, "biolink:information_content")
+        assert ic == pytest.approx(78.2)
 
     def test_node_id_roundtrips(self, graph):
         """Every node should survive idx → id → idx roundtrip."""

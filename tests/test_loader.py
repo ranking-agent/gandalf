@@ -90,11 +90,33 @@ class TestNodeProperties:
         categories = graph.get_node_property(pparg_idx, "categories")
         assert "biolink:Gene" in categories
 
-    def test_node_information_content(self, graph):
-        """Should correctly load information_content property."""
+    def test_node_attributes_contain_information_content(self, graph):
+        """Should store information_content as a TRAPI attribute."""
         diabetes_idx = graph.node_id_to_idx["MONDO:0005148"]
-        ic = graph.get_node_property(diabetes_idx, "information_content")
-        assert ic == pytest.approx(78.2)
+        attributes = graph.get_node_property(diabetes_idx, "attributes")
+        ic_attrs = [a for a in attributes if a["attribute_type_id"] == "biolink:information_content"]
+        assert len(ic_attrs) == 1
+        assert ic_attrs[0]["value"] == pytest.approx(78.2)
+        assert ic_attrs[0]["original_attribute_name"] == "information_content"
+
+    def test_node_attributes_contain_equivalent_identifiers(self, graph):
+        """Should store equivalent_identifiers as a TRAPI attribute."""
+        metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
+        attributes = graph.get_node_property(metformin_idx, "attributes")
+        eq_attrs = [a for a in attributes if a["attribute_type_id"] == "biolink:equivalent_identifiers"]
+        assert len(eq_attrs) == 1
+        assert "DRUGBANK:DB00331" in eq_attrs[0]["value"]
+        assert eq_attrs[0]["original_attribute_name"] == "equivalent_identifiers"
+
+    def test_node_id_not_in_properties(self, graph):
+        """Node id should be omitted from properties (it's the key in the KG)."""
+        metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
+        props = graph.get_all_node_properties(metformin_idx)
+        assert "id" not in props
+        # Also should not appear in attributes
+        attributes = props.get("attributes", [])
+        id_attrs = [a for a in attributes if a["original_attribute_name"] == "id"]
+        assert len(id_attrs) == 0
 
 
 class TestEdgeProperties:

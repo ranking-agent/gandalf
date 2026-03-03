@@ -32,6 +32,9 @@ _CORE_FIELDS = {
     "id", "category", "subject", "object", "predicate", "sources",
 }
 
+# Node fields that become top-level TRAPI Node properties (not attributes)
+_CORE_NODE_FIELDS = {"id", "name", "category"}
+
 # Known qualifier fields that appear as top-level JSONL keys
 _QUALIFIER_FIELDS = {
     "qualified_predicate",
@@ -117,6 +120,25 @@ def _extract_attributes(data):
     return attributes
 
 
+def _extract_node_attributes(node_data):
+    """Extract node attributes as TRAPI Attribute objects.
+
+    Any field not in ``_CORE_NODE_FIELDS`` (id, name, category) is converted
+    to a TRAPI-compliant Attribute dict with ``attribute_type_id``, ``value``,
+    and ``original_attribute_name``.
+    """
+    attributes = []
+    for field, value in node_data.items():
+        if field in _CORE_NODE_FIELDS:
+            continue
+        attributes.append({
+            "attribute_type_id": f"biolink:{field}",
+            "value": value,
+            "original_attribute_name": field,
+        })
+    return attributes
+
+
 def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path, temp_dir=None):
     """Build a CSR graph from JSONL files using three-pass streaming.
 
@@ -178,11 +200,9 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path, temp_dir=None):
                     idx = node_id_to_idx.get(node_id)
                     if idx is not None:
                         node_properties[idx] = {
-                            "id": node_data.get("id", ""),
-                            "categories": node_data.get("category", []),
                             "name": node_data.get("name", None),
-                            "equivalent_identifiers": node_data.get("equivalent_identifiers", []),
-                            "information_content": node_data.get("information_content", 0.0),
+                            "categories": node_data.get("category", []),
+                            "attributes": _extract_node_attributes(node_data),
                         }
         print(f"  Loaded properties for {len(node_properties):,} nodes")
 

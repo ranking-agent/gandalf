@@ -66,27 +66,29 @@ class TestEnrichNodes:
         node = msg["knowledge_graph"]["nodes"]["CHEBI:6801"]
         assert "biolink:SmallMolecule" in node["categories"]
 
-    def test_nodes_get_equivalent_identifiers(self, graph, bmt):
-        """Nodes should have their 'equivalent_identifiers' populated."""
+    def test_nodes_attributes_contain_equivalent_identifiers(self, graph, bmt):
+        """Node attributes should include 'equivalent_identifiers' as a TRAPI attribute."""
         response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
 
         node = msg["knowledge_graph"]["nodes"]["CHEBI:6801"]
-        assert "equivalent_identifiers" in node
-        assert "DRUGBANK:DB00331" in node["equivalent_identifiers"]
+        eq_attrs = [a for a in node["attributes"] if a["attribute_type_id"] == "biolink:equivalent_identifiers"]
+        assert len(eq_attrs) == 1
+        assert "DRUGBANK:DB00331" in eq_attrs[0]["value"]
 
-    def test_nodes_get_information_content(self, graph, bmt):
-        """Nodes should have their 'information_content' populated."""
+    def test_nodes_attributes_contain_information_content(self, graph, bmt):
+        """Node attributes should include 'information_content' as a TRAPI attribute."""
         response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
 
         node = msg["knowledge_graph"]["nodes"]["CHEBI:6801"]
-        assert "information_content" in node
-        assert node["information_content"] == 85.5
+        ic_attrs = [a for a in node["attributes"] if a["attribute_type_id"] == "biolink:information_content"]
+        assert len(ic_attrs) == 1
+        assert ic_attrs[0]["value"] == 85.5
 
     def test_nodes_have_attributes_list(self, graph, bmt):
         """Every node should have an 'attributes' list (possibly empty)."""

@@ -24,9 +24,7 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
     Node properties added (when present in the graph):
         * ``name``
         * ``categories``
-        * ``equivalent_identifiers``
-        * ``information_content``
-        * ``attributes`` (defaults to ``[]``)
+        * ``attributes`` — TRAPI Attribute objects (defaults to ``[]``)
 
     Edge properties added (when present in the graph):
         * ``sources``       — from the in-memory dedup store (hot path)
@@ -74,12 +72,6 @@ def _enrich_nodes(nodes: dict, graph: CSRGraph) -> None:
 
         if "categories" not in node and "categories" in stored:
             node["categories"] = stored["categories"]
-
-        if "equivalent_identifiers" not in node and "equivalent_identifiers" in stored:
-            node["equivalent_identifiers"] = stored["equivalent_identifiers"]
-
-        if "information_content" not in node and "information_content" in stored:
-            node["information_content"] = stored["information_content"]
 
         # Attributes should always be a list
         if "attributes" not in node:
