@@ -159,12 +159,16 @@ class TestEdgeProperties:
             assert "upstream_resource_ids" in source
             assert isinstance(source["upstream_resource_ids"], list)
 
-    def test_edge_publications_property(self, graph):
-        """Should correctly store publications."""
+    def test_edge_publications_in_attributes(self, graph):
+        """Publications should be stored as a TRAPI attribute on the edge."""
         src_idx = graph.node_id_to_idx["CHEBI:6801"]
         dst_idx = graph.node_id_to_idx["NCBIGene:5468"]
-        pubs = graph.get_edge_property(src_idx, dst_idx, "biolink:affects", "publications")
-        assert "PMID:23456789" in pubs
+        props = graph.get_all_edge_properties(src_idx, dst_idx, "biolink:affects")
+        pub_attrs = [a for a in props.get("attributes", [])
+                     if a["attribute_type_id"] == "biolink:publications"]
+        assert len(pub_attrs) == 1
+        assert "PMID:23456789" in pub_attrs[0]["value"]
+        assert pub_attrs[0]["original_attribute_name"] == "publications"
 
 
 class TestGraphStructure:

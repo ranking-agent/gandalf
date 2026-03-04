@@ -5,7 +5,7 @@ Three-pass streaming loader that keeps peak memory at ~3-4GB for 38M edges:
 Pass 1: Stream JSONL to collect vocabularies (node IDs, predicates, edge count).
 Pass 2: Stream JSONL again, converting each edge to integer indices stored in
         pre-allocated numpy arrays. Simultaneously interns qualifier/source data
-        into the EdgePropertyStoreBuilder and writes publications/attributes to
+        into the EdgePropertyStoreBuilder and writes attributes to
         a temporary LMDB keyed by original line index.
 Pass 3: Sort numpy arrays by (src, dst, pred) via np.lexsort. Rewrite the temp
         LMDB in CSR-sorted order to produce the final LMDB where key == CSR
@@ -108,14 +108,19 @@ def _extract_qualifiers(data):
 
 
 def _extract_attributes(data):
-    """Extract attributes (everything not in core/qualifier/source fields)."""
+    """Extract attributes (everything not in core/qualifier/source fields).
+
+    Publications are included as a TRAPI Attribute with
+    ``attribute_type_id`` of ``biolink:publications``.
+    """
     attributes = []
     for field, value in data.items():
-        if field in _CORE_FIELDS or field in _QUALIFIER_FIELDS or field == "qualifiers" or field == "publications":
+        if field in _CORE_FIELDS or field in _QUALIFIER_FIELDS or field == "qualifiers":
             continue
         attributes.append({
             "attribute_type_id": f"biolink:{field}",
             "value": value,
+            "original_attribute_name": field,
         })
     return attributes
 
@@ -255,17 +260,16 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path, temp_dir=None):
                 # Extract properties
                 sources = _extract_sources(data)
                 qualifiers = _extract_qualifiers(data)
-                publications = data.get("publications", [])
                 attributes = _extract_attributes(data)
 
                 # Hot path: intern qualifiers + sources
                 prop_builder.add(i, {"sources": sources, "qualifiers": qualifiers})
 
-                # Cold path: write publications + attributes to temp LMDB
+                # Cold path: write attributes to temp LMDB
+                # (publications are now included in the attributes list)
                 # Skip edges with no cold-path data to save disk space.
-                if publications or attributes:
+                if attributes:
                     detail = {
-                        "publications": publications,
                         "attributes": attributes,
                     }
                     key = _encode_key(i)

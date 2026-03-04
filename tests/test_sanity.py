@@ -59,9 +59,17 @@ def _qualifier_map(qualifiers):
 
 class TestForwardEdgeSanity:
     """Pick specific nodes, follow a known outgoing predicate, and verify
-    that the hot-path (sources, qualifiers) and cold-path (publications)
+    that the hot-path (sources, qualifiers) and cold-path (attributes)
     properties stored in the CSR are exactly what the fixture JSONL defines.
     """
+
+    @staticmethod
+    def _get_publications(props):
+        """Extract publication values from the TRAPI attributes list."""
+        for attr in props.get("attributes", []):
+            if attr["attribute_type_id"] == "biolink:publications":
+                return attr["value"]
+        return []
 
     def test_metformin_treats_diabetes_sources(self, graph):
         """CHEBI:6801 --treats--> MONDO:0005148 should have two treat edges
@@ -97,7 +105,7 @@ class TestForwardEdgeSanity:
         pubs = set()
         for _, _, _, eidx in results:
             full_props = graph.get_edge_properties_by_index(eidx)
-            for pmid in full_props.get("publications", []):
+            for pmid in self._get_publications(full_props):
                 pubs.add(pmid)
 
         assert "PMID:12345678" in pubs   # drugcentral edge
@@ -115,7 +123,8 @@ class TestForwardEdgeSanity:
         qualifiers = graph.get_edge_property(met, pparg, "biolink:affects", "qualifiers")
         assert qualifiers == []
 
-        pubs = graph.get_edge_property(met, pparg, "biolink:affects", "publications")
+        props = graph.get_all_edge_properties(met, pparg, "biolink:affects")
+        pubs = self._get_publications(props)
         assert "PMID:23456789" in pubs
 
     def test_metformin_affects_insr_qualified_edges(self, graph):
@@ -179,19 +188,21 @@ class TestForwardEdgeSanity:
         sources = graph.get_edge_property(pparg, insr, "biolink:interacts_with", "sources")
         assert _primary_source_id(sources) == "infores:intact"
 
-        pubs = graph.get_edge_property(pparg, insr, "biolink:interacts_with", "publications")
+        props = graph.get_all_edge_properties(pparg, insr, "biolink:interacts_with")
+        pubs = self._get_publications(props)
         assert "PMID:56789012" in pubs
 
     def test_diabetes_has_phenotype_hypoglycemia(self, graph):
         """MONDO:0005148 --has_phenotype--> HP:0001943 should have hpo as
-        source and empty publications."""
+        source and no publications attribute."""
         t2d = graph.node_id_to_idx["MONDO:0005148"]
         hypo = graph.node_id_to_idx["HP:0001943"]
 
         sources = graph.get_edge_property(t2d, hypo, "biolink:has_phenotype", "sources")
         assert _primary_source_id(sources) == "infores:hpo"
 
-        pubs = graph.get_edge_property(t2d, hypo, "biolink:has_phenotype", "publications")
+        props = graph.get_all_edge_properties(t2d, hypo, "biolink:has_phenotype")
+        pubs = self._get_publications(props)
         assert pubs == []
 
     def test_glucose_participates_in_pathway(self, graph):

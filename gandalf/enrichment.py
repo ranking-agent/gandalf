@@ -29,8 +29,7 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
     Edge properties added (when present in the graph):
         * ``sources``       — from the in-memory dedup store (hot path)
         * ``qualifiers``    — from the in-memory dedup store (hot path)
-        * ``publications``  — from LMDB (cold path)
-        * ``attributes``    — from LMDB (cold path)
+        * ``attributes``    — from LMDB (cold path; includes publications)
 
     Args:
         message: A TRAPI ``message`` dict that contains at least
@@ -106,7 +105,7 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
         if fwd_idx is not None:
             edge_idx_map[edge_uuid] = fwd_idx
 
-    # Batch LMDB read for cold-path properties (publications, attributes)
+    # Batch LMDB read for cold-path properties (attributes)
     lmdb_results: dict[int, dict] = {}
     if graph.lmdb_store is not None and edge_idx_map:
         unique_indices = list(set(edge_idx_map.values()))
@@ -119,7 +118,6 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
             # Could not resolve — ensure defaults are present
             edge.setdefault("sources", [])
             edge.setdefault("qualifiers", [])
-            edge.setdefault("publications", [])
             edge.setdefault("attributes", [])
             continue
 
@@ -132,9 +130,6 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
 
         # Cold-path properties (LMDB)
         detail = lmdb_results.get(fwd_idx, {})
-
-        if "publications" not in edge:
-            edge["publications"] = detail.get("publications", [])
 
         if "attributes" not in edge:
             edge["attributes"] = detail.get("attributes", [])

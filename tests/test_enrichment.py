@@ -141,16 +141,23 @@ class TestEnrichEdges:
             assert "qualifiers" in edge, f"Edge {edge_id} missing 'qualifiers'"
             assert isinstance(edge["qualifiers"], list)
 
-    def test_edges_have_publications(self, graph, bmt):
-        """Edges should have a 'publications' list after enrichment."""
+    def test_edges_have_publications_in_attributes(self, graph, bmt):
+        """Edge publications should appear as TRAPI attributes after enrichment."""
         response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
 
+        # At least one edge should carry a publications attribute
+        found_pubs = False
         for edge_id, edge in msg["knowledge_graph"]["edges"].items():
-            assert "publications" in edge, f"Edge {edge_id} missing 'publications'"
-            assert isinstance(edge["publications"], list)
+            assert "attributes" in edge, f"Edge {edge_id} missing 'attributes'"
+            pub_attrs = [a for a in edge["attributes"]
+                         if a["attribute_type_id"] == "biolink:publications"]
+            if pub_attrs:
+                assert isinstance(pub_attrs[0]["value"], list)
+                found_pubs = True
+        assert found_pubs, "No edge had a publications attribute"
 
     def test_edges_have_attributes(self, graph, bmt):
         """Edges should have an 'attributes' list after enrichment."""
@@ -220,7 +227,6 @@ class TestEnrichEdgesWithQualifiers:
         for edge_id, edge in msg["knowledge_graph"]["edges"].items():
             assert "sources" in edge
             assert "qualifiers" in edge
-            assert "publications" in edge
             assert "attributes" in edge
 
 
