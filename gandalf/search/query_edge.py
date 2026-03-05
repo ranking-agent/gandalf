@@ -5,6 +5,34 @@ import time
 from gandalf.search.qualifiers import edge_matches_qualifier_constraints
 
 
+def _get_information_content(graph, node_idx):
+    """Extract the information_content value from a node's attributes."""
+    attrs = graph.get_node_property(node_idx, "attributes", [])
+    for attr in attrs:
+        if attr.get("original_attribute_name") == "information_content":
+            return attr.get("value")
+    return None
+
+
+def _node_total_degree(graph, node_idx):
+    """Compute total degree (outgoing + incoming) for a node."""
+    out_deg = int(graph.fwd_offsets[node_idx + 1] - graph.fwd_offsets[node_idx])
+    in_deg = int(graph.rev_offsets[node_idx + 1] - graph.rev_offsets[node_idx])
+    return out_deg + in_deg
+
+
+def _passes_node_filters(graph, node_idx, max_node_degree, min_information_content):
+    """Check if a node passes degree and information content filters."""
+    if max_node_degree is not None:
+        if _node_total_degree(graph, node_idx) > max_node_degree:
+            return False
+    if min_information_content is not None:
+        ic = _get_information_content(graph, node_idx)
+        if ic is None or ic < min_information_content:
+            return False
+    return True
+
+
 def query_subclass_edge(graph, start_idxes, end_idxes, depth, verbose):
     """Traverse ``subclass_of`` edges to find subclass relationships.
 
@@ -76,6 +104,8 @@ def query_edge(
     qualifier_constraints,
     verbose,
     inverse_predicates: list[str] = None,
+    max_node_degree: int = None,
+    min_information_content: float = None,
 ):
     """Query for a single edge with given constraints.
 
@@ -95,6 +125,10 @@ def query_edge(
         inverse_predicates: List of inverse predicate strings for reverse direction
             matching. None means don't check inverse direction. Empty list means
             match all predicates in inverse direction (wildcard).
+        max_node_degree: If set, filter out nodes with total degree (in + out)
+            exceeding this value during traversal.
+        min_information_content: If set, filter out nodes whose
+            information_content attribute is below this value.
 
     Returns:
         List of (subject_idx, predicate, object_idx, via_inverse, fwd_edge_idx) tuples where
@@ -132,6 +166,8 @@ def query_edge(
             graph, start_idxes, allowed_predicates, end_categories,
             qualifier_constraints, check_inverse, inverse_pred_set,
             add_match, verbose,
+            max_node_degree=max_node_degree,
+            min_information_content=min_information_content,
         )
 
     # Case 2: Start unpinned, end pinned
@@ -140,6 +176,8 @@ def query_edge(
             graph, end_idxes, allowed_predicates, start_categories,
             qualifier_constraints, check_inverse, inverse_pred_set,
             add_match, verbose,
+            max_node_degree=max_node_degree,
+            min_information_content=min_information_content,
         )
 
     # Case 3: Both pinned
@@ -148,6 +186,8 @@ def query_edge(
             graph, start_idxes, end_idxes, allowed_predicates,
             qualifier_constraints, check_inverse, inverse_pred_set,
             add_match, verbose,
+            max_node_degree=max_node_degree,
+            min_information_content=min_information_content,
         )
 
     else:
@@ -160,6 +200,7 @@ def _query_forward(
     graph, start_idxes, allowed_predicates, end_categories,
     qualifier_constraints, check_inverse, inverse_pred_set,
     add_match, verbose,
+    max_node_degree=None, min_information_content=None,
 ):
     """Case 1: Start pinned, end unpinned - forward search from pinned nodes."""
     if verbose:
@@ -187,6 +228,10 @@ def _query_forward(
                 if not any(cat in obj_cats for cat in end_categories):
                     continue
 
+            # Check node filters (degree and information content)
+            if not _passes_node_filters(graph, obj_idx, max_node_degree, min_information_content):
+                continue
+
             # Check qualifier constraints
             if qualifier_constraints:
                 edge_qualifiers = props.get("qualifiers", [])
@@ -212,6 +257,10 @@ def _query_forward(
                     obj_cats = graph.get_node_property(other_idx, "categories", [])
                     if not any(cat in obj_cats for cat in end_categories):
                         continue
+
+                # Check node filters (degree and information content)
+                if not _passes_node_filters(graph, other_idx, max_node_degree, min_information_content):
+                    continue
 
                 # Check qualifier constraints
                 if qualifier_constraints:
@@ -247,6 +296,7 @@ def _query_backward(
     graph, end_idxes, allowed_predicates, start_categories,
     qualifier_constraints, check_inverse, inverse_pred_set,
     add_match, verbose,
+    max_node_degree=None, min_information_content=None,
 ):
     """Case 2: Start unpinned, end pinned - backward search from pinned nodes."""
     if verbose:
@@ -276,6 +326,10 @@ def _query_backward(
                 if not any(cat in subj_cats for cat in start_categories):
                     continue
 
+            # Check node filters (degree and information content)
+            if not _passes_node_filters(graph, subj_idx, max_node_degree, min_information_content):
+                continue
+
             # Check qualifier constraints
             if qualifier_constraints:
                 edge_qualifiers = props.get("qualifiers", [])
@@ -301,6 +355,10 @@ def _query_backward(
                     subj_cats = graph.get_node_property(other_idx, "categories", [])
                     if not any(cat in subj_cats for cat in start_categories):
                         continue
+
+                # Check node filters (degree and information content)
+                if not _passes_node_filters(graph, other_idx, max_node_degree, min_information_content):
+                    continue
 
                 # Check qualifier constraints
                 if qualifier_constraints:
@@ -335,6 +393,7 @@ def _query_both_pinned(
     graph, start_idxes, end_idxes, allowed_predicates,
     qualifier_constraints, check_inverse, inverse_pred_set,
     add_match, verbose,
+    max_node_degree=None, min_information_content=None,
 ):
     """Case 3: Both ends pinned - intersection search."""
     if verbose:
@@ -354,6 +413,10 @@ def _query_both_pinned(
     slow_nodes = []
 
     for start_idx in start_idxes:
+        # Check node filters on the start node
+        if not _passes_node_filters(graph, start_idx, max_node_degree, min_information_content):
+            continue
+
         t_node_start = time.perf_counter()
 
         # Count total neighbors for diagnostics (cheap CSR offset math)
@@ -366,6 +429,10 @@ def _query_both_pinned(
         for obj_idx, predicate, props, fwd_edge_idx in graph.neighbors_filtered_by_targets(
             start_idx, end_set, predicate_filter=pred_filter_set
         ):
+            # Check node filters on the end node
+            if not _passes_node_filters(graph, obj_idx, max_node_degree, min_information_content):
+                continue
+
             # Check qualifier constraints inline
             if qualifier_constraints:
                 edge_qualifiers = props.get("qualifiers", [])
@@ -385,10 +452,19 @@ def _query_both_pinned(
     if check_inverse:
         start_set = set(start_idxes)
         for end_idx in end_idxes:
+            # Check node filters on the end node
+            if not _passes_node_filters(graph, end_idx, max_node_degree, min_information_content):
+                continue
+
             for obj_idx, stored_pred, props, fwd_edge_idx in graph.neighbors_filtered_by_targets(
                 end_idx, start_set, predicate_filter=inverse_pred_set or None
             ):
                 total_neighbors += 1
+
+                # Check node filters on the target (start) node
+                if not _passes_node_filters(graph, obj_idx, max_node_degree, min_information_content):
+                    continue
+
                 # Check qualifier constraints before adding
                 if qualifier_constraints:
                     edge_qualifiers = props.get("qualifiers", [])

@@ -15,7 +15,8 @@ from gandalf.search.query_edge import query_edge, query_subclass_edge
 from gandalf.search.reconstruct import reconstruct_paths
 
 
-def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_depth=1):
+def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_depth=1,
+           max_node_degree=None, min_information_content=None):
     """Take an arbitrary Translator query graph and return all matching paths.
 
     Args:
@@ -25,6 +26,10 @@ def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_d
         verbose: Print progress information
         subclass: If True, expand pinned nodes to include subclass descendants
         subclass_depth: Maximum number of subclass_of hops to traverse (default 1)
+        max_node_degree: If set, filter out nodes with total degree (in + out)
+            exceeding this value during path traversal.
+        min_information_content: If set, filter out nodes whose
+            information_content attribute is below this value.
 
     Returns:
         TRAPI response dict with message containing results, knowledge_graph, etc.
@@ -44,7 +49,9 @@ def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_d
 
     try:
         return _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
-                             t_start, gc_monitor)
+                             t_start, gc_monitor,
+                             max_node_degree=max_node_degree,
+                             min_information_content=min_information_content)
     finally:
         gc_monitor.stop()
         if gc_was_enabled_at_start:
@@ -52,7 +59,8 @@ def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_d
 
 
 def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
-                  t_start, gc_monitor):
+                  t_start, gc_monitor,
+                  max_node_degree=None, min_information_content=None):
     """Inner implementation of lookup with all the core logic."""
     if bmt is None:
         bmt = Toolkit()
@@ -173,6 +181,8 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
                 qualifier_constraints,
                 verbose,
                 inverse_predicates=inverse_predicates,
+                max_node_degree=max_node_degree,
+                min_information_content=min_information_content,
             )
 
         # Store results for this edge
