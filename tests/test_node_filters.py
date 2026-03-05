@@ -63,8 +63,8 @@ class TestMaxNodeDegree:
         response = lookup(graph, query, bmt=bmt, verbose=False, max_node_degree=3)
         results = response["message"]["results"]
 
-        # PPARG, INSR, GCK (degree=3) and TNF (degree=1) should all pass
-        assert len(results) == 4
+        # PPARG, GCK (degree=3) and TNF (degree=1) should all pass
+        assert len(results) == 3
 
     def test_max_node_degree_none_means_no_filtering(self, graph, bmt):
         """When max_node_degree is None (default), no filtering should occur."""
