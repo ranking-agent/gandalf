@@ -1,0 +1,11 @@
+{"id": "CHEBI:6801", "name": "Metformin", "category": ["biolink:SmallMolecule", "biolink:Drug"], "equivalent_identifiers": ["CHEBI:6801", "DRUGBANK:DB00331"], "information_content": 85.5}
+{"id": "NCBIGene:5468", "name": "PPARG", "category": ["biolink:Gene", "biolink:GeneOrGeneProduct"], "equivalent_identifiers": ["NCBIGene:5468", "HGNC:9236"], "information_content": 92.3}
+{"id": "NCBIGene:3643", "name": "INSR", "category": ["biolink:Gene", "biolink:GeneOrGeneProduct"], "equivalent_identifiers": ["NCBIGene:3643", "HGNC:6091"], "information_content": 88.7}
+{"id": "MONDO:0005148", "name": "Type 2 Diabetes", "category": ["biolink:Disease"], "equivalent_identifiers": ["MONDO:0005148", "DOID:9352"], "information_content": 78.2}
+{"id": "HP:0001943", "name": "Hypoglycemia", "category": ["biolink:PhenotypicFeature"], "equivalent_identifiers": ["HP:0001943"], "information_content": 65.4}
+{"id": "CHEBI:17234", "name": "Glucose", "category": ["biolink:SmallMolecule", "biolink:ChemicalEntity"], "equivalent_identifiers": ["CHEBI:17234"], "information_content": 70.1}
+{"id": "GO:0006006", "name": "Glucose metabolic process", "category": ["biolink:BiologicalProcess"], "equivalent_identifiers": ["GO:0006006"], "information_content": 55.8}
+{"id": "NCBIGene:2645", "name": "GCK", "category": ["biolink:Gene", "biolink:GeneOrGeneProduct"], "equivalent_identifiers": ["NCBIGene:2645", "HGNC:4195"], "information_content": 81.2}
+{"id": "NCBIGene:7124", "name": "TNF", "category": ["biolink:Gene", "biolink:GeneOrGeneProduct"], "equivalent_identifiers": ["NCBIGene:7124", "HGNC:11892"], "information_content": 94.5}
+{"id": "MONDO:0005015", "name": "Diabetes Mellitus", "category": ["biolink:Disease"], "equivalent_identifiers": ["MONDO:0005015", "DOID:9351"], "information_content": 72.0}
+{"id": "MONDO:0004995", "name": "Cardiovascular Disease", "category": ["biolink:Disease"], "equivalent_identifiers": ["MONDO:0004995"], "information_content": 60.0}

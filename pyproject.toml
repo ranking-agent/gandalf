@@ -3,9 +3,9 @@ requires = ["setuptools>=45", "wheel", "setuptools_scm>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gandalf"
-version = "0.1.0"
-description = "Fast 3-hop path finding in large knowledge graphs"
+name = "gandalf-csr"
+version = "0.1.11"
+description = "Fast path finding in large knowledge graphs"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
@@ -18,7 +18,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "numpy>=2.4.1",
+    "bmt>=1.4.6",
+    "lmdb>=1.4.0",
+    "msgpack>=1.0.0",
+    "numpy>=1.20.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +29,11 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=3.0",
     "black>=22.0",
+]
+server = [
+    "fastapi>=0.100.0",
+    "httpx>=0.24.0",
+    "uvicorn>=0.20.0",
 ]
 
 [project.scripts]

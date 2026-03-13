@@ -1,1 +1,7 @@
-numpy>=2.4.1
+bmt>=1.4.6
+fastapi>=0.100.0
+httpx>=0.24.0
+lmdb>=1.4.0
+msgpack>=1.0.0
+numpy>=1.20.0
+uvicorn>=0.20.0
