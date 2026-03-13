@@ -392,3 +392,340 @@ class TestNodeConstraintsIntegration:
         response = lookup(graph, query, bmt=bmt, verbose=False)
         results = response["message"]["results"]
         assert len(results) == 0
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: edge attribute_constraints filtering through lookup
+# ---------------------------------------------------------------------------
+
+class TestEdgeAttributeConstraintsIntegration:
+    """Test edge attribute_constraints in full TRAPI queries."""
+
+    def test_edge_constraint_knowledge_level_matches_all(self, graph, bmt):
+        """All edges have knowledge_level=knowledge_assertion.
+
+        Constraining to that value should keep all results unchanged.
+        Metformin --affects--> Gene normally returns 4 genes.
+        """
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"categories": ["biolink:Gene"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                            "attribute_constraints": [{
+                                "id": "biolink:knowledge_level",
+                                "name": "knowledge level",
+                                "operator": "==",
+                                "value": "knowledge_assertion",
+                            }],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False)
+        results = response["message"]["results"]
+        assert len(results) == 4
+
+    def test_edge_constraint_knowledge_level_no_match(self, graph, bmt):
+        """No edges have knowledge_level=prediction, so all should be filtered out."""
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"categories": ["biolink:Gene"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                            "attribute_constraints": [{
+                                "id": "biolink:knowledge_level",
+                                "name": "knowledge level",
+                                "operator": "==",
+                                "value": "prediction",
+                            }],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False)
+        results = response["message"]["results"]
+        assert len(results) == 0
+
+    def test_edge_constraint_publications_regex(self, graph, bmt):
+        """Filter edges by publication PMID using regex.
+
+        Metformin --affects--> Gene edges have these PMIDs:
+          PPARG: PMID:23456789, INSR: PMID:11111111 & PMID:66666666,
+          GCK: PMID:22222222, TNF: PMID:33333333
+
+        Constraining publications to match '23456789' should keep only the
+        PPARG edge, yielding 1 result.
+        """
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"categories": ["biolink:Gene"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                            "attribute_constraints": [{
+                                "id": "biolink:publications",
+                                "name": "publications",
+                                "operator": "matches",
+                                "value": "23456789",
+                            }],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False)
+        results = response["message"]["results"]
+
+        assert len(results) == 1
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        assert gene_ids == {"NCBIGene:5468"}
+
+    def test_edge_constraint_not_negation(self, graph, bmt):
+        """Negated edge constraint should exclude matching edges.
+
+        NOT knowledge_level == knowledge_assertion → no edges pass → 0 results.
+        """
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"categories": ["biolink:Gene"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                            "attribute_constraints": [{
+                                "id": "biolink:knowledge_level",
+                                "name": "knowledge level",
+                                "operator": "==",
+                                "value": "knowledge_assertion",
+                                "not": True,
+                            }],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False)
+        results = response["message"]["results"]
+        assert len(results) == 0
+
+    def test_edge_constraint_nonexistent_attribute(self, graph, bmt):
+        """Constraining on an attribute that doesn't exist should filter all edges."""
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"categories": ["biolink:Gene"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                            "attribute_constraints": [{
+                                "id": "biolink:fake_attribute",
+                                "name": "fake",
+                                "operator": "==",
+                                "value": "anything",
+                            }],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False)
+        results = response["message"]["results"]
+        assert len(results) == 0
+
+    def test_edge_constraint_empty_list_no_filtering(self, graph, bmt):
+        """Empty attribute_constraints list should not filter anything."""
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"categories": ["biolink:Gene"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                            "attribute_constraints": [],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False)
+        results = response["message"]["results"]
+        assert len(results) == 4
+
+    def test_edge_and_node_constraints_combined(self, graph, bmt):
+        """Both node constraints and edge attribute_constraints applied together.
+
+        Metformin --affects--> Gene:
+          Node constraint: IC > 90 → keeps PPARG(92.3) and TNF(94.5)
+          Edge constraint: publications matches '23456789' → keeps only PPARG edge
+
+        Combined: only PPARG survives.
+        """
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {
+                            "categories": ["biolink:Gene"],
+                            "constraints": [{
+                                "id": "information_content",
+                                "name": "IC",
+                                "operator": ">",
+                                "value": 90,
+                            }],
+                        },
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                            "attribute_constraints": [{
+                                "id": "biolink:publications",
+                                "name": "publications",
+                                "operator": "matches",
+                                "value": "23456789",
+                            }],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False)
+        results = response["message"]["results"]
+
+        assert len(results) == 1
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        assert gene_ids == {"NCBIGene:5468"}
+
+    def test_edge_constraint_backward_search(self, graph, bmt):
+        """Edge attribute_constraints work in backward search (start unpinned).
+
+        Gene --gene_associated_with_condition--> T2D:
+          PPARG edge: pub PMID:34567890
+          INSR edge: pub PMID:45678901
+          GCK edge: pub PMID:67890123
+
+        Constraining publications to match '34567890' should keep only PPARG.
+        """
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"categories": ["biolink:Gene"]},
+                        "n1": {"ids": ["MONDO:0005148"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:gene_associated_with_condition"],
+                            "attribute_constraints": [{
+                                "id": "biolink:publications",
+                                "name": "publications",
+                                "operator": "matches",
+                                "value": "34567890",
+                            }],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False)
+        results = response["message"]["results"]
+
+        assert len(results) == 1
+        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
+
+    def test_edge_constraint_both_pinned(self, graph, bmt):
+        """Edge attribute_constraints work when both ends are pinned.
+
+        Metformin --treats--> T2D has 2 edges:
+          drugcentral: pub PMID:12345678
+          chembl: pub PMID:55555555
+
+        Constraining publications to match '55555555' keeps only the chembl edge.
+        The result still exists (1 result) but with only the chembl edge in the KG.
+        """
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"ids": ["MONDO:0005148"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:treats"],
+                            "attribute_constraints": [{
+                                "id": "biolink:publications",
+                                "name": "publications",
+                                "operator": "matches",
+                                "value": "55555555",
+                            }],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, verbose=False)
+        results = response["message"]["results"]
+
+        assert len(results) == 1
+        # Only the chembl edge should be in the KG
+        kg_edges = response["message"]["knowledge_graph"]["edges"]
+        treats_edges = [e for e in kg_edges.values() if e["predicate"] == "biolink:treats"]
+        assert len(treats_edges) == 1
+        pubs = [a for a in treats_edges[0].get("attributes", [])
+                if a.get("original_attribute_name") == "publications"]
+        assert len(pubs) == 1
+        assert "PMID:55555555" in pubs[0]["value"]
