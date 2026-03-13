@@ -2,6 +2,7 @@
 
 import time
 
+from gandalf.search.attribute_constraints import matches_attribute_constraints
 from gandalf.search.qualifiers import edge_matches_qualifier_constraints
 
 
@@ -106,6 +107,9 @@ def query_edge(
     inverse_predicates: list[str] = None,
     max_node_degree: int = None,
     min_information_content: float = None,
+    attribute_constraints: list = None,
+    start_node_constraints: list = None,
+    end_node_constraints: list = None,
 ):
     """Query for a single edge with given constraints.
 
@@ -129,6 +133,12 @@ def query_edge(
             exceeding this value during traversal.
         min_information_content: If set, filter out nodes whose
             information_content attribute is below this value.
+        attribute_constraints: List of TRAPI AttributeConstraint dicts for
+            filtering edges by their attributes. All must be satisfied (AND).
+        start_node_constraints: List of TRAPI AttributeConstraint dicts for
+            filtering the start (subject) node by its attributes.
+        end_node_constraints: List of TRAPI AttributeConstraint dicts for
+            filtering the end (object) node by its attributes.
 
     Returns:
         List of (subject_idx, predicate, object_idx, via_inverse, fwd_edge_idx) tuples where
@@ -168,6 +178,9 @@ def query_edge(
             add_match, verbose,
             max_node_degree=max_node_degree,
             min_information_content=min_information_content,
+            attribute_constraints=attribute_constraints,
+            start_node_constraints=start_node_constraints,
+            end_node_constraints=end_node_constraints,
         )
 
     # Case 2: Start unpinned, end pinned
@@ -178,6 +191,9 @@ def query_edge(
             add_match, verbose,
             max_node_degree=max_node_degree,
             min_information_content=min_information_content,
+            attribute_constraints=attribute_constraints,
+            start_node_constraints=start_node_constraints,
+            end_node_constraints=end_node_constraints,
         )
 
     # Case 3: Both pinned
@@ -188,6 +204,9 @@ def query_edge(
             add_match, verbose,
             max_node_degree=max_node_degree,
             min_information_content=min_information_content,
+            attribute_constraints=attribute_constraints,
+            start_node_constraints=start_node_constraints,
+            end_node_constraints=end_node_constraints,
         )
 
     else:
@@ -201,6 +220,8 @@ def _query_forward(
     qualifier_constraints, check_inverse, inverse_pred_set,
     add_match, verbose,
     max_node_degree=None, min_information_content=None,
+    attribute_constraints=None, start_node_constraints=None,
+    end_node_constraints=None,
 ):
     """Case 1: Start pinned, end unpinned - forward search from pinned nodes."""
     if verbose:
@@ -212,6 +233,12 @@ def _query_forward(
     slow_nodes = []  # Track nodes that take > 0.1s
 
     for start_idx in start_idxes:
+        # Check start node attribute constraints once per start node
+        if start_node_constraints:
+            start_attrs = graph.get_node_property(start_idx, "attributes", [])
+            if not matches_attribute_constraints(start_attrs, start_node_constraints):
+                continue
+
         t_node_start = time.perf_counter()
         node_neighbors = 0
 
@@ -232,11 +259,24 @@ def _query_forward(
             if not _passes_node_filters(graph, obj_idx, max_node_degree, min_information_content):
                 continue
 
+            # Check end node attribute constraints
+            if end_node_constraints:
+                obj_attrs = graph.get_node_property(obj_idx, "attributes", [])
+                if not matches_attribute_constraints(obj_attrs, end_node_constraints):
+                    continue
+
             # Check qualifier constraints
             if qualifier_constraints:
                 edge_qualifiers = props.get("qualifiers", [])
                 if not edge_matches_qualifier_constraints(
                     edge_qualifiers, qualifier_constraints
+                ):
+                    continue
+
+            # Check edge attribute constraints (cold path: LMDB lookup)
+            if attribute_constraints:
+                if not _edge_passes_attribute_constraints(
+                    graph, fwd_edge_idx, attribute_constraints
                 ):
                     continue
 
@@ -262,11 +302,24 @@ def _query_forward(
                 if not _passes_node_filters(graph, other_idx, max_node_degree, min_information_content):
                     continue
 
+                # Check end node attribute constraints (other_idx is the "object" via inverse)
+                if end_node_constraints:
+                    obj_attrs = graph.get_node_property(other_idx, "attributes", [])
+                    if not matches_attribute_constraints(obj_attrs, end_node_constraints):
+                        continue
+
                 # Check qualifier constraints
                 if qualifier_constraints:
                     edge_qualifiers = props.get("qualifiers", [])
                     if not edge_matches_qualifier_constraints(
                         edge_qualifiers, qualifier_constraints
+                    ):
+                        continue
+
+                # Check edge attribute constraints (cold path: LMDB lookup)
+                if attribute_constraints:
+                    if not _edge_passes_attribute_constraints(
+                        graph, fwd_edge_idx, attribute_constraints
                     ):
                         continue
 
@@ -297,6 +350,8 @@ def _query_backward(
     qualifier_constraints, check_inverse, inverse_pred_set,
     add_match, verbose,
     max_node_degree=None, min_information_content=None,
+    attribute_constraints=None, start_node_constraints=None,
+    end_node_constraints=None,
 ):
     """Case 2: Start unpinned, end pinned - backward search from pinned nodes."""
     if verbose:
@@ -308,6 +363,12 @@ def _query_backward(
     slow_nodes = []  # Track nodes that take > 0.1s
 
     for i, end_idx in enumerate(end_idxes):
+        # Check end node attribute constraints once per end node
+        if end_node_constraints:
+            end_attrs = graph.get_node_property(end_idx, "attributes", [])
+            if not matches_attribute_constraints(end_attrs, end_node_constraints):
+                continue
+
         t_node_start = time.perf_counter()
         node_neighbors = 0
 
@@ -330,11 +391,24 @@ def _query_backward(
             if not _passes_node_filters(graph, subj_idx, max_node_degree, min_information_content):
                 continue
 
+            # Check start node attribute constraints
+            if start_node_constraints:
+                subj_attrs = graph.get_node_property(subj_idx, "attributes", [])
+                if not matches_attribute_constraints(subj_attrs, start_node_constraints):
+                    continue
+
             # Check qualifier constraints
             if qualifier_constraints:
                 edge_qualifiers = props.get("qualifiers", [])
                 if not edge_matches_qualifier_constraints(
                     edge_qualifiers, qualifier_constraints
+                ):
+                    continue
+
+            # Check edge attribute constraints (cold path: LMDB lookup)
+            if attribute_constraints:
+                if not _edge_passes_attribute_constraints(
+                    graph, fwd_edge_idx, attribute_constraints
                 ):
                     continue
 
@@ -360,11 +434,24 @@ def _query_backward(
                 if not _passes_node_filters(graph, other_idx, max_node_degree, min_information_content):
                     continue
 
+                # Check start node attribute constraints (other_idx is the "subject" via inverse)
+                if start_node_constraints:
+                    subj_attrs = graph.get_node_property(other_idx, "attributes", [])
+                    if not matches_attribute_constraints(subj_attrs, start_node_constraints):
+                        continue
+
                 # Check qualifier constraints
                 if qualifier_constraints:
                     edge_qualifiers = props.get("qualifiers", [])
                     if not edge_matches_qualifier_constraints(
                         edge_qualifiers, qualifier_constraints
+                    ):
+                        continue
+
+                # Check edge attribute constraints (cold path: LMDB lookup)
+                if attribute_constraints:
+                    if not _edge_passes_attribute_constraints(
+                        graph, fwd_edge_idx, attribute_constraints
                     ):
                         continue
 
@@ -394,6 +481,8 @@ def _query_both_pinned(
     qualifier_constraints, check_inverse, inverse_pred_set,
     add_match, verbose,
     max_node_degree=None, min_information_content=None,
+    attribute_constraints=None, start_node_constraints=None,
+    end_node_constraints=None,
 ):
     """Case 3: Both ends pinned - intersection search."""
     if verbose:
@@ -417,6 +506,12 @@ def _query_both_pinned(
         if not _passes_node_filters(graph, start_idx, max_node_degree, min_information_content):
             continue
 
+        # Check start node attribute constraints
+        if start_node_constraints:
+            start_attrs = graph.get_node_property(start_idx, "attributes", [])
+            if not matches_attribute_constraints(start_attrs, start_node_constraints):
+                continue
+
         t_node_start = time.perf_counter()
 
         # Count total neighbors for diagnostics (cheap CSR offset math)
@@ -433,6 +528,12 @@ def _query_both_pinned(
             if not _passes_node_filters(graph, obj_idx, max_node_degree, min_information_content):
                 continue
 
+            # Check end node attribute constraints
+            if end_node_constraints:
+                obj_attrs = graph.get_node_property(obj_idx, "attributes", [])
+                if not matches_attribute_constraints(obj_attrs, end_node_constraints):
+                    continue
+
             # Check qualifier constraints inline
             if qualifier_constraints:
                 edge_qualifiers = props.get("qualifiers", [])
@@ -440,6 +541,14 @@ def _query_both_pinned(
                     edge_qualifiers, qualifier_constraints
                 ):
                     continue
+
+            # Check edge attribute constraints (cold path: LMDB lookup)
+            if attribute_constraints:
+                if not _edge_passes_attribute_constraints(
+                    graph, fwd_edge_idx, attribute_constraints
+                ):
+                    continue
+
             add_match(start_idx, predicate, obj_idx, fwd_edge_idx)
 
         t_node_end = time.perf_counter()
@@ -456,6 +565,12 @@ def _query_both_pinned(
             if not _passes_node_filters(graph, end_idx, max_node_degree, min_information_content):
                 continue
 
+            # Check end node attribute constraints
+            if end_node_constraints:
+                end_attrs = graph.get_node_property(end_idx, "attributes", [])
+                if not matches_attribute_constraints(end_attrs, end_node_constraints):
+                    continue
+
             for obj_idx, stored_pred, props, fwd_edge_idx in graph.neighbors_filtered_by_targets(
                 end_idx, start_set, predicate_filter=inverse_pred_set or None
             ):
@@ -465,6 +580,12 @@ def _query_both_pinned(
                 if not _passes_node_filters(graph, obj_idx, max_node_degree, min_information_content):
                     continue
 
+                # Check start node attribute constraints (obj_idx is a start node)
+                if start_node_constraints:
+                    subj_attrs = graph.get_node_property(obj_idx, "attributes", [])
+                    if not matches_attribute_constraints(subj_attrs, start_node_constraints):
+                        continue
+
                 # Check qualifier constraints before adding
                 if qualifier_constraints:
                     edge_qualifiers = props.get("qualifiers", [])
@@ -472,6 +593,14 @@ def _query_both_pinned(
                         edge_qualifiers, qualifier_constraints
                     ):
                         continue
+
+                # Check edge attribute constraints (cold path: LMDB lookup)
+                if attribute_constraints:
+                    if not _edge_passes_attribute_constraints(
+                        graph, fwd_edge_idx, attribute_constraints
+                    ):
+                        continue
+
                 # Report the actual edge as stored in the graph
                 # The edge is: end_idx --[stored_pred]--> obj_idx
                 # (where obj_idx is a start node)
@@ -486,3 +615,20 @@ def _query_both_pinned(
             print(f"    Slow nodes (>0.1s): {len(slow_nodes)}")
             for node_idx, neighbors, node_time in slow_nodes[:5]:
                 print(f"      Node {node_idx}: {neighbors:,} neighbors, {node_time:.2f}s")
+
+
+def _edge_passes_attribute_constraints(graph, fwd_edge_idx, attribute_constraints):
+    """Check if an edge's attributes satisfy all attribute constraints.
+
+    Fetches edge attributes from LMDB (cold path) and applies the constraint
+    matching logic.  Only called for edges that already passed all other
+    filters (predicates, categories, qualifiers), so the number of LMDB
+    lookups is bounded by the surviving candidate set.
+    """
+    if graph.lmdb_store is None:
+        # No LMDB store — no attributes to check against
+        return False
+
+    detail = graph.lmdb_store.get(fwd_edge_idx)
+    edge_attrs = detail.get("attributes", [])
+    return matches_attribute_constraints(edge_attrs, attribute_constraints)

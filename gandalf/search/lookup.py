@@ -170,6 +170,11 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
                     qualifier_constraints
                 )
 
+            # Get attribute constraints for this edge and its endpoint nodes
+            edge_attribute_constraints = next_edge.get("attribute_constraints", [])
+            start_node_constraints = start_node.get("constraints", [])
+            end_node_constraints = end_node.get("constraints", [])
+
             # Query for matching edges
             edge_matches = query_edge(
                 graph,
@@ -183,6 +188,9 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
                 inverse_predicates=inverse_predicates,
                 max_node_degree=max_node_degree,
                 min_information_content=min_information_content,
+                attribute_constraints=edge_attribute_constraints,
+                start_node_constraints=start_node_constraints,
+                end_node_constraints=end_node_constraints,
             )
 
         # Store results for this edge
