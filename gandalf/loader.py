@@ -405,4 +405,6 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
         ) / 1024 / 1024
         print(f"  CSR memory usage: ~{memory_mb:.1f} MB")
 
+    graph.build_metadata()
+
     return graph

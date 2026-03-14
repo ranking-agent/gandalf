@@ -276,6 +276,8 @@ class CSRGraph:
         print("Building reverse CSR...")
         self._build_reverse_csr(edges, edge_predicates)
 
+        self.build_metadata()
+
     def _build_forward_csr(self, edges, edge_predicates, edge_properties):
         """Build forward adjacency list (source -> targets)."""
         # Sort edges by source for CSR construction
@@ -762,6 +764,132 @@ class CSRGraph:
         return sorted(pred_counts.items(), key=lambda x: x[1], reverse=True)
 
     # ------------------------------------------------------------------
+    # Metadata (Plater-compatible pre-computed summaries)
+    # ------------------------------------------------------------------
+
+    def build_metadata(self):
+        """Pre-compute Plater-compatible metadata from the CSR graph.
+
+        Iterates all forward edges once to build:
+        - meta_kg: TRAPI MetaKnowledgeGraph (nodes + edge triples with counts)
+        - sri_testing_data: One representative edge per (subj_cat, pred, obj_cat) triple
+        - simple_spec: {source_cat: {target_cat: [predicates]}} connection schema
+        - graph_metadata: Graph statistics (node/edge counts, predicate distribution)
+
+        Stored as attributes on the graph object. Total memory: ~10-50 KB.
+        """
+        print("Building Plater-compatible metadata...")
+        t0 = time.perf_counter()
+
+        num_edges = len(self.fwd_targets)
+
+        # Pre-extract the primary category for each node (first in list, or fallback)
+        node_categories = {}
+        for node_idx in range(self.num_nodes):
+            props = self.node_properties.get(node_idx, {})
+            cats = props.get("categories", ["biolink:NamedThing"])
+            node_categories[node_idx] = cats[0] if cats else "biolink:NamedThing"
+
+        # Collect ID prefixes per category (for meta_kg nodes)
+        category_prefixes = {}
+        for node_id, node_idx in self.node_id_to_idx.items():
+            cat = node_categories[node_idx]
+            prefix = node_id.split(":")[0] if ":" in node_id else node_id
+            if cat not in category_prefixes:
+                category_prefixes[cat] = set()
+            category_prefixes[cat].add(prefix)
+
+        # Single pass over all forward edges
+        triple_counts = {}  # (subj_cat, pred, obj_cat) -> count
+        triple_examples = {}  # (subj_cat, pred, obj_cat) -> (subj_id, obj_id)
+
+        for src_idx in range(self.num_nodes):
+            start = int(self.fwd_offsets[src_idx])
+            end = int(self.fwd_offsets[src_idx + 1])
+            if start == end:
+                continue
+
+            subj_cat = node_categories[src_idx]
+
+            for pos in range(start, end):
+                tgt_idx = int(self.fwd_targets[pos])
+                pred_id = int(self.fwd_predicates[pos])
+                pred = self.id_to_predicate[pred_id]
+                obj_cat = node_categories[tgt_idx]
+
+                key = (subj_cat, pred, obj_cat)
+                triple_counts[key] = triple_counts.get(key, 0) + 1
+
+                # Store first example edge for SRI testing data
+                if key not in triple_examples:
+                    triple_examples[key] = (
+                        self.idx_to_node_id[src_idx],
+                        self.idx_to_node_id[tgt_idx],
+                    )
+
+        # Build meta_kg in TRAPI MetaKnowledgeGraph format
+        meta_nodes = {}
+        for cat, prefixes in category_prefixes.items():
+            meta_nodes[cat] = {"id_prefixes": sorted(prefixes)}
+
+        meta_edges = []
+        for (subj_cat, pred, obj_cat) in sorted(triple_counts):
+            meta_edges.append({
+                "subject": subj_cat,
+                "predicate": pred,
+                "object": obj_cat,
+                "count": triple_counts[(subj_cat, pred, obj_cat)],
+            })
+
+        self.meta_kg = {"nodes": meta_nodes, "edges": meta_edges}
+
+        # Build SRI testing data
+        self.sri_testing_data = {
+            "edges": [
+                {
+                    "subject_category": subj_cat,
+                    "object_category": obj_cat,
+                    "predicate": pred,
+                    "subject_id": example[0],
+                    "object_id": example[1],
+                }
+                for (subj_cat, pred, obj_cat), example in triple_examples.items()
+            ]
+        }
+
+        # Build simple_spec
+        simple_spec = {}
+        for subj_cat, pred, obj_cat in triple_counts:
+            if subj_cat not in simple_spec:
+                simple_spec[subj_cat] = {}
+            if obj_cat not in simple_spec[subj_cat]:
+                simple_spec[subj_cat][obj_cat] = []
+            simple_spec[subj_cat][obj_cat].append(pred)
+        self.simple_spec = simple_spec
+
+        # Build graph_metadata
+        pred_counts = {}
+        for pred_id in range(len(self.id_to_predicate)):
+            pred_str = self.id_to_predicate[pred_id]
+            count = int(np.sum(self.fwd_predicates == pred_id))
+            if count > 0:
+                pred_counts[pred_str] = count
+
+        self.graph_metadata = {
+            "node_count": self.num_nodes,
+            "edge_count": num_edges,
+            "predicate_count": len(self.predicate_to_idx),
+            "category_count": len(category_prefixes),
+            "predicates": pred_counts,
+            "categories": {cat: len(prefixes) for cat, prefixes in category_prefixes.items()},
+        }
+
+        t1 = time.perf_counter()
+        print(f"  Metadata built in {t1 - t0:.2f}s: "
+              f"{len(triple_counts)} unique triples, "
+              f"{len(category_prefixes)} categories")
+
+    # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
 
@@ -859,6 +987,9 @@ class CSRGraph:
             f"Graph loaded! {graph.num_nodes:,} nodes, {len(graph.fwd_targets):,} edges"
         )
         print(f"  Unique predicates: {len(graph.predicate_to_idx):,}")
+
+        graph.build_metadata()
+
         return graph
 
     def save_mmap(self, directory: Union[str, Path]):
@@ -1046,5 +1177,7 @@ class CSRGraph:
             f"  {graph.num_nodes:,} nodes, {len(graph.fwd_targets):,} edges, "
             f"{len(graph.predicate_to_idx):,} predicates"
         )
+
+        graph.build_metadata()
 
         return graph
