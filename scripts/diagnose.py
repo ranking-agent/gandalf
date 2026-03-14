@@ -7,6 +7,7 @@ Example:
 """
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -16,6 +17,9 @@ from gandalf import (
     analyze_predicates,
     diagnose_path_explosion,
 )
+from gandalf.logging_config import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -60,20 +64,26 @@ Examples:
         "--skip-predicates", action="store_true", help="Skip predicate analysis"
     )
 
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable debug logging"
+    )
+
     args = parser.parse_args()
+
+    configure_logging(logging.DEBUG if args.verbose else logging.INFO)
 
     # Validate graph file
     if not args.graph.exists():
-        print(f"Error: Graph file not found: {args.graph}", file=sys.stderr)
+        logger.error("Graph file not found: %s", args.graph)
         sys.exit(1)
 
     # Load graph
-    print(f"Loading graph from {args.graph}\n")
+    logger.info("Loading graph from %s", args.graph)
 
     try:
         graph = CSRGraph.load_mmap(str(args.graph))
     except Exception as e:
-        print(f"Error loading graph: {e}", file=sys.stderr)
+        logger.error("Error loading graph: %s", e)
         sys.exit(1)
 
     # Run diagnostics
@@ -83,23 +93,21 @@ Examples:
 
         # Node type analysis
         if not args.skip_node_types:
-            print()
             analyze_node_types(graph, args.start, args.end, max_sample=args.sample)
 
         # Predicate analysis
         if not args.skip_predicates:
-            print()
             analyze_predicates(graph, args.start, args.end, max_sample=args.sample)
 
         # Summary recommendations
+        total_paths = results["total_paths"]
+
         print("\n" + "=" * 70)
         print("SUMMARY")
         print("=" * 70)
 
-        total_paths = results["total_paths"]
-
         if total_paths > 1_000_000:
-            print("⚠️  SEVERE path explosion detected!")
+            print("SEVERE path explosion detected!")
             print(
                 f"   {total_paths:,} paths is likely too many to process efficiently."
             )
@@ -114,7 +122,7 @@ Examples:
             print("      --exclude-predicates biolink:subclass_of")
 
         elif total_paths > 10_000:
-            print("⚠️  High path count detected")
+            print("High path count detected")
             print(f"   {total_paths:,} paths may be manageable with filtering.")
             print()
             print("Consider:")
@@ -123,13 +131,13 @@ Examples:
             print("  3. Sample and rank before enrichment")
 
         else:
-            print(f"✓ Reasonable path count: {total_paths:,}")
+            print(f"Reasonable path count: {total_paths:,}")
             print("  This should be fast to process with property enrichment.")
 
         print()
 
     except Exception as e:
-        print(f"Error during diagnosis: {e}", file=sys.stderr)
+        logger.error("Error during diagnosis: %s", e)
         import traceback
 
         traceback.print_exc()

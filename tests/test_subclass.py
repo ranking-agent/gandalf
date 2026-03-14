@@ -35,7 +35,7 @@ class TestSubclassHandling:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=False)
+        response = lookup(graph, query, bmt=bmt, subclass=False)
         results = response["message"]["results"]
 
         # Only exact match: Metformin treats Diabetes Mellitus
@@ -66,7 +66,7 @@ class TestSubclassHandling:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
 
         # Should find results for both Diabetes Mellitus (direct) and Type 2 Diabetes (subclass)
@@ -97,8 +97,8 @@ class TestSubclassHandling:
             },
         }
 
-        response_no_subclass = lookup(graph, query, bmt=bmt, verbose=False, subclass=False)
-        response_depth_zero = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=0)
+        response_no_subclass = lookup(graph, query, bmt=bmt, subclass=False)
+        response_depth_zero = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=0)
 
         results_no = response_no_subclass["message"]["results"]
         results_zero = response_depth_zero["message"]["results"]
@@ -126,7 +126,7 @@ class TestSubclassHandling:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
 
         # Should find the explicit edge without creating synthetic superclass nodes
@@ -155,7 +155,7 @@ class TestSubclassHandling:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         aux_graphs = response["message"]["auxiliary_graphs"]
 
         # auxiliary_graphs should exist in the response
@@ -188,7 +188,7 @@ class TestSubclassHandling:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         kg_edges = response["message"]["knowledge_graph"]["edges"]
 
         # Find inferred edges (those with support_graphs attribute)
@@ -227,7 +227,7 @@ class TestSubclassHandling:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
 
         # All results should have n0 bound to Metformin
@@ -259,7 +259,7 @@ class TestSubclassHandling:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
 
         for result in results:
@@ -289,7 +289,7 @@ class TestSubclassHandling:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
 
         for result in results:
@@ -333,11 +333,11 @@ class TestSubclassHandling:
         }
 
         # Without subclass: n1 must have treats edges AND has_phenotype edges
-        response_no = lookup(graph, query, bmt=bmt, verbose=False, subclass=False)
+        response_no = lookup(graph, query, bmt=bmt, subclass=False)
         results_no = response_no["message"]["results"]
 
         # With subclass: same query but subclass expansion might find more paths
-        response_yes = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response_yes = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results_yes = response_yes["message"]["results"]
 
         # Both should find results through Type 2 Diabetes
@@ -365,6 +365,6 @@ class TestSubclassHandling:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         assert "auxiliary_graphs" in response["message"]
         assert isinstance(response["message"]["auxiliary_graphs"], dict)

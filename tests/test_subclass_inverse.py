@@ -93,7 +93,7 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
         results = response["message"]["results"]
         assert len(results) >= 1
@@ -142,7 +142,7 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
         results = response["message"]["results"]
         assert len(results) >= 1
@@ -196,7 +196,7 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
         results = response["message"]["results"]
         assert len(results) >= 1
@@ -237,7 +237,7 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
         for eid, edge in response["message"]["knowledge_graph"]["edges"].items():
             assert "_query_subject" not in edge, (
@@ -291,7 +291,7 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
         results = response["message"]["results"]
         assert len(results) >= 1
@@ -324,7 +324,7 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
         kg_nodes = set(response["message"]["knowledge_graph"]["nodes"].keys())
         kg_edges = response["message"]["knowledge_graph"]["edges"]

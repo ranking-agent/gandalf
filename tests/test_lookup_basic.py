@@ -33,7 +33,7 @@ class TestLookupOneHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Results are aggregated by unique node paths
@@ -69,7 +69,7 @@ class TestLookupOneHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # CHEBI:6801 (Metformin) affects 4 genes:
@@ -98,7 +98,7 @@ class TestLookupOneHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -123,7 +123,7 @@ class TestLookupOneHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Three genes associated with MONDO:0005148:
@@ -164,7 +164,7 @@ class TestLookupTwoHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Three paths from Metformin through genes to Type 2 Diabetes:
@@ -205,7 +205,7 @@ class TestLookupTwoHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # NCBIGene:2645 (GCK) participates_in GO:0006006 AND
@@ -238,7 +238,7 @@ class TestLookupEdgeCases:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -263,7 +263,7 @@ class TestLookupEdgeCases:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -288,7 +288,7 @@ class TestLookupEdgeCases:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # CHEBI:6801 affects NCBIGene:5468 (Gene) and CHEBI:17234 (SmallMolecule)

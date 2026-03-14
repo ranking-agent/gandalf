@@ -7,10 +7,14 @@ Example:
 """
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 from gandalf import build_graph_from_jsonl
+from gandalf.logging_config import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -36,23 +40,29 @@ Examples:
         "--output", "-o", required=True, type=Path, help="Output directory for graph"
     )
 
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable debug logging"
+    )
+
     args = parser.parse_args()
+
+    configure_logging(logging.DEBUG if args.verbose else logging.INFO)
 
     # Validate input files
     if not args.edges.exists():
-        print(f"Error: Edge file not found: {args.edges}", file=sys.stderr)
+        logger.error("Edge file not found: %s", args.edges)
         sys.exit(1)
 
     if not args.nodes.exists():
-        print(f"Error: Node file not found: {args.nodes}", file=sys.stderr)
+        logger.error("Node file not found: %s", args.nodes)
         sys.exit(1)
 
     # Create output directory if needed
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     # Build graph
-    print(f"Building graph from {args.edges}")
-    print(f"Loading nodes from {args.nodes}")
+    logger.info("Building graph from %s", args.edges)
+    logger.info("Loading nodes from %s", args.nodes)
 
     try:
         graph = build_graph_from_jsonl(
@@ -61,15 +71,13 @@ Examples:
         )
 
         # Save graph
-        print(f"\nSaving graph to {args.output}")
+        logger.info("Saving graph to %s", args.output)
         graph.save_mmap(str(args.output))
 
-        print("\n✓ Graph built successfully!")
-        # print(f"  Nodes: {graph.num_nodes:,}")
-        # print(f"  Edges: {len(graph.edge_dst):,}")
+        logger.info("Graph built successfully!")
 
     except Exception as e:
-        print(f"Error building graph: {e}", file=sys.stderr)
+        logger.error("Error building graph: %s", e)
         sys.exit(1)
 
 

@@ -331,7 +331,7 @@ class TestLookupWithQualifierConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Only NCBIGene:3643 (INSR) has qualifiers matching activity+increased
@@ -366,7 +366,7 @@ class TestLookupWithQualifierConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Only NCBIGene:2645 (GCK) has qualifiers matching activity+decreased
@@ -401,7 +401,7 @@ class TestLookupWithQualifierConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Only NCBIGene:7124 (TNF) has abundance increased qualifiers
@@ -441,7 +441,7 @@ class TestLookupWithQualifierConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should match both INSR (activity+increased) and TNF (abundance)
@@ -469,7 +469,7 @@ class TestLookupWithQualifierConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should return all 4 affects edges to genes:
@@ -503,7 +503,7 @@ class TestLookupWithQualifierConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # No edges have expression qualifier

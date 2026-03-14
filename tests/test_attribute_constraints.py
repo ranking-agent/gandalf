@@ -200,7 +200,7 @@ class TestNodeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 2
@@ -239,7 +239,7 @@ class TestNodeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -278,7 +278,7 @@ class TestNodeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 2
@@ -308,7 +308,7 @@ class TestNodeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # All 4 genes should still be returned
@@ -354,7 +354,7 @@ class TestNodeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 2
@@ -389,7 +389,7 @@ class TestNodeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
         assert len(results) == 0
 
@@ -431,7 +431,7 @@ class TestEdgeAttributeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
         assert len(results) == 4
 
@@ -461,7 +461,7 @@ class TestEdgeAttributeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
         assert len(results) == 0
 
@@ -499,7 +499,7 @@ class TestEdgeAttributeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -536,7 +536,7 @@ class TestEdgeAttributeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
         assert len(results) == 0
 
@@ -566,7 +566,7 @@ class TestEdgeAttributeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
         assert len(results) == 0
 
@@ -591,7 +591,7 @@ class TestEdgeAttributeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
         assert len(results) == 4
 
@@ -636,7 +636,7 @@ class TestEdgeAttributeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -677,7 +677,7 @@ class TestEdgeAttributeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -717,7 +717,7 @@ class TestEdgeAttributeConstraintsIntegration:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -772,7 +772,7 @@ class TestNumericEdgeConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 2
@@ -805,7 +805,7 @@ class TestNumericEdgeConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 2
@@ -853,7 +853,7 @@ class TestNumericEdgeConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 3
@@ -886,7 +886,7 @@ class TestNumericEdgeConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
         assert len(results) == 0
 
@@ -916,7 +916,7 @@ class TestNumericEdgeConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -956,7 +956,7 @@ class TestNumericEdgeConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -999,7 +999,7 @@ class TestNumericEdgeConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -1045,7 +1045,7 @@ class TestNumericEdgeConstraints:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1

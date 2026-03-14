@@ -9,12 +9,15 @@ memory pages via the OS, identical to how numpy mmap works. No per-process
 duplication.
 """
 
+import logging
 import shutil
 import struct
 from pathlib import Path
 
 import lmdb
 import msgpack
+
+logger = logging.getLogger(__name__)
 
 
 # Read-only map size — large enough to cover any pre-built database.
@@ -46,7 +49,7 @@ def _put_with_resize(env, txn, key, val, pending):
         txn.abort()
         new_size = env.info()["map_size"] * 2
         env.set_mapsize(new_size)
-        print(f"    LMDB: map full, resized to {new_size / (1024**3):.0f} GB")
+        logger.warning("    LMDB: map full, resized to %.0f GB", new_size / (1024**3))
         txn = env.begin(write=True)
         for k, v in pending:
             txn.put(k, v)
@@ -168,7 +171,7 @@ class LMDBPropertyStore:
                     txn.commit()
                     pending.clear()
                     if count % 1_000_000 == 0:
-                        print(f"    LMDB: wrote {count:,}/{num_edges:,} edges...")
+                        logger.debug("    LMDB: wrote %s/%s edges...", f"{count:,}", f"{num_edges:,}")
                     txn = env.begin(write=True)
 
             txn.commit()
@@ -178,7 +181,7 @@ class LMDBPropertyStore:
         finally:
             env.close()
 
-        print(f"    LMDB: wrote {count:,} edges to {db_path}")
+        logger.debug("    LMDB: wrote %s edges to %s", f"{count:,}", db_path)
         return LMDBPropertyStore(db_path, readonly=True)
 
     @staticmethod
@@ -222,7 +225,7 @@ class LMDBPropertyStore:
             readahead=False,
         )
 
-        print(f"    LMDB: rewriting {num_edges:,} edges in CSR-sorted order...")
+        logger.debug("    LMDB: rewriting %s edges in CSR-sorted order...", f"{num_edges:,}")
 
         temp_txn = temp_env.begin(buffers=True)
         final_txn = final_env.begin(write=True)
@@ -243,7 +246,7 @@ class LMDBPropertyStore:
                     final_txn.commit()
                     pending.clear()
                     if (csr_pos + 1) % 1_000_000 == 0:
-                        print(f"      {csr_pos + 1:,}/{num_edges:,} edges rewritten...")
+                        logger.debug("      %s/%s edges rewritten...", f"{csr_pos + 1:,}", f"{num_edges:,}")
                     final_txn = final_env.begin(write=True)
 
             final_txn.commit()
@@ -255,5 +258,5 @@ class LMDBPropertyStore:
             temp_env.close()
             final_env.close()
 
-        print(f"    LMDB: final store written to {db_path}")
+        logger.debug("    LMDB: final store written to %s", db_path)
         return LMDBPropertyStore(db_path, readonly=True)

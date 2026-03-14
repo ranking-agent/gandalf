@@ -46,7 +46,7 @@ class TestNodeBindingGrouping:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=False)
+        response = lookup(graph, query, bmt=bmt, subclass=False)
         results = response["message"]["results"]
 
         # Three genes connect Metformin to Type 2 Diabetes: PPARG, INSR, GCK
@@ -106,7 +106,7 @@ class TestNodeBindingGrouping:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
 
         assert len(results) >= 3
@@ -144,7 +144,7 @@ class TestNodeBindingGrouping:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 3
@@ -181,7 +181,7 @@ class TestNodeBindingGrouping:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
 
         # Collect the node binding fingerprints (n0_id, n1_id) for each result

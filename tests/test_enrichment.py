@@ -45,7 +45,7 @@ class TestEnrichNodes:
 
     def test_nodes_get_name(self, graph, bmt):
         """Nodes should have their 'name' property populated."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -58,7 +58,7 @@ class TestEnrichNodes:
 
     def test_nodes_get_categories(self, graph, bmt):
         """Nodes should have their 'categories' property populated."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -68,7 +68,7 @@ class TestEnrichNodes:
 
     def test_nodes_attributes_contain_equivalent_identifiers(self, graph, bmt):
         """Node attributes should include 'equivalent_identifiers' as a TRAPI attribute."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -81,7 +81,7 @@ class TestEnrichNodes:
 
     def test_nodes_attributes_contain_information_content(self, graph, bmt):
         """Node attributes should include 'information_content' as a TRAPI attribute."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -93,7 +93,7 @@ class TestEnrichNodes:
 
     def test_nodes_have_attributes_list(self, graph, bmt):
         """Every node should have an 'attributes' list (possibly empty)."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -104,7 +104,7 @@ class TestEnrichNodes:
 
     def test_does_not_overwrite_existing_node_properties(self, graph, bmt):
         """Enrichment should not overwrite properties already present."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         # Pre-set a custom name
@@ -121,7 +121,7 @@ class TestEnrichEdges:
 
     def test_edges_have_sources(self, graph, bmt):
         """Edges should have a 'sources' list after enrichment."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -132,7 +132,7 @@ class TestEnrichEdges:
 
     def test_edges_have_qualifiers(self, graph, bmt):
         """Edges should have a 'qualifiers' list after enrichment."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -143,7 +143,7 @@ class TestEnrichEdges:
 
     def test_edges_have_publications_in_attributes(self, graph, bmt):
         """Edge publications should appear as TRAPI attributes after enrichment."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -161,7 +161,7 @@ class TestEnrichEdges:
 
     def test_edges_have_attributes(self, graph, bmt):
         """Edges should have an 'attributes' list after enrichment."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -172,7 +172,7 @@ class TestEnrichEdges:
 
     def test_does_not_overwrite_existing_edge_properties(self, graph, bmt):
         """Enrichment should not overwrite properties already present."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         # Pick the first edge and pre-set sources
@@ -218,7 +218,7 @@ class TestEnrichEdgesWithQualifiers:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         msg = response["message"]
 
         enrich_knowledge_graph(msg, graph)
@@ -249,7 +249,7 @@ class TestEnrichEmptyMessage:
 
     def test_returns_same_message(self, graph, bmt):
         """enrich_knowledge_graph should return the same dict it was passed."""
-        response = lookup(graph, _one_hop_query(), bmt=bmt, verbose=False)
+        response = lookup(graph, _one_hop_query(), bmt=bmt)
         msg = response["message"]
 
         result = enrich_knowledge_graph(msg, graph)

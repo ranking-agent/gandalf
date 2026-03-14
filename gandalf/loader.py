@@ -24,7 +24,10 @@ import numpy as np
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import LMDBPropertyStore, _INITIAL_WRITE_MAP_SIZE, _encode_key, _put_with_resize
 
+import logging
 import lmdb
+
+logger = logging.getLogger(__name__)
 
 
 # Fields that are structural (not stored as properties)
@@ -159,7 +162,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # =================================================================
     # Pass 1: Vocabulary collection
     # =================================================================
-    print(f"Pass 1: Collecting vocabularies from {edge_jsonl_path}...")
+    logger.info("Pass 1: Collecting vocabularies from %s...", edge_jsonl_path)
 
     node_ids = set()
     predicates = set()
@@ -174,10 +177,10 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
             edge_count += 1
 
             if edge_count % 1_000_000 == 0:
-                print(f"  {edge_count:,} edges scanned...")
+                logger.debug("  %s edges scanned...", f"{edge_count:,}")
 
-    print(f"  Found {len(node_ids):,} unique nodes, {len(predicates):,} predicates, "
-          f"{edge_count:,} edges")
+    logger.info("  Found %s unique nodes, %s predicates, %s edges",
+                f"{len(node_ids):,}", f"{len(predicates):,}", f"{edge_count:,}")
 
     # Build vocabulary mappings
     node_id_to_idx = {nid: idx for idx, nid in enumerate(sorted(node_ids))}
@@ -188,7 +191,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # Load node properties
     node_properties = {}
     if node_jsonl_path:
-        print(f"Reading node properties from {node_jsonl_path}...")
+        logger.debug("Reading node properties from %s...", node_jsonl_path)
         with open(node_jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
                 node_data = json.loads(line)
@@ -201,12 +204,12 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
                             "categories": node_data.get("category", []),
                             "attributes": _extract_node_attributes(node_data),
                         }
-        print(f"  Loaded properties for {len(node_properties):,} nodes")
+        logger.debug("  Loaded properties for %s nodes", f"{len(node_properties):,}")
 
     # =================================================================
     # Pass 2: Build arrays + dedup store + temp LMDB
     # =================================================================
-    print(f"Pass 2: Building arrays and property stores ({edge_count:,} edges)...")
+    logger.info("Pass 2: Building arrays and property stores (%s edges)...", f"{edge_count:,}")
 
     # Pre-allocate numpy arrays
     src_indices = np.empty(edge_count, dtype=np.int32)
@@ -270,7 +273,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
                     txn = temp_env.begin(write=True)
 
                 if (i + 1) % 1_000_000 == 0:
-                    print(f"  {i + 1:,}/{edge_count:,} edges processed...")
+                    logger.debug("  %s/%s edges processed...", f"{i + 1:,}", f"{edge_count:,}")
 
         txn.commit()
     except BaseException:
@@ -279,12 +282,12 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     finally:
         temp_env.close()
 
-    print(f"  Arrays and temp LMDB built")
+    logger.debug("  Arrays and temp LMDB built")
 
     # =================================================================
     # Pass 3: Sort, rewrite LMDB, build CSR
     # =================================================================
-    print("Pass 3: Sorting and building CSR structure...")
+    logger.info("Pass 3: Sorting and building CSR structure...")
 
     # Sort by (src, dst, pred) using lexsort (last key is primary)
     sort_order = np.lexsort((pred_indices, dst_indices, src_indices))
@@ -307,9 +310,9 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     del prop_builder
 
     stats = edge_properties.dedup_stats()
-    print(f"  Edge property dedup: {stats['total_edges']:,} edges -> "
-          f"{stats['unique_sources']:,} unique source configs, "
-          f"{stats['unique_qualifiers']:,} unique qualifier combos")
+    logger.debug("  Edge property dedup: %s edges -> %s unique source configs, %s unique qualifier combos",
+                 f"{stats['total_edges']:,}", f"{stats['unique_sources']:,}",
+                 f"{stats['unique_qualifiers']:,}")
 
     # Rewrite temp LMDB in CSR-sorted order → final LMDB
     # This is the expensive build-time step, but ensures query-time
@@ -327,7 +330,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # NOTE: sort_order is kept alive — needed for rev_to_fwd mapping below.
 
     # Build CSR offset arrays using searchsorted
-    print("  Building CSR offsets...")
+    logger.debug("  Building CSR offsets...")
     fwd_offsets = np.zeros(num_nodes + 1, dtype=np.int64)
     if edge_count > 0:
         boundaries = np.searchsorted(src_sorted, np.arange(num_nodes + 1))
@@ -335,7 +338,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     del src_sorted
 
     # Build reverse CSR: sort edges by (dst, src, pred)
-    print("  Building reverse CSR...")
+    logger.debug("  Building reverse CSR...")
     # Reconstruct per-edge source node IDs from forward CSR offsets
     edge_src = np.empty(edge_count, dtype=np.int32)
     for node_idx in range(num_nodes):
@@ -358,7 +361,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # corresponding forward-CSR position.  Forward positions are simply
     # 0..E-1 (the arrays are already in forward-sorted order).  The
     # inverse of sort_order maps original-edge-index → forward position.
-    print("  Building rev_to_fwd mapping...")
+    logger.debug("  Building rev_to_fwd mapping...")
     fwd_pos = np.empty(edge_count, dtype=np.int32)
     fwd_pos[sort_order] = np.arange(edge_count, dtype=np.int32)
     rev_to_fwd = rev_order.astype(np.int32)
@@ -367,7 +370,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     del edge_src, rev_dst_sorted, rev_order
 
     # Assemble the graph
-    print("  Assembling graph...")
+    logger.debug("  Assembling graph...")
     graph = CSRGraph.__new__(CSRGraph)
     graph.num_nodes = num_nodes
     graph.node_id_to_idx = node_id_to_idx
@@ -392,18 +395,18 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # Print statistics
     degrees = [graph.degree(i) for i in range(min(1000, graph.num_nodes))]
     if degrees:
-        print("\nGraph statistics:")
-        print(f"  Nodes: {graph.num_nodes:,}")
-        print(f"  Edges: {len(graph.fwd_targets):,}")
-        print(f"  Unique predicates: {len(predicate_to_idx):,}")
-        print(f"  Avg degree (sampled): {np.mean(degrees):.1f}")
-        print(f"  Max degree (sampled): {np.max(degrees)}")
+        logger.info("Graph statistics:")
+        logger.info("  Nodes: %s", f"{graph.num_nodes:,}")
+        logger.info("  Edges: %s", f"{len(graph.fwd_targets):,}")
+        logger.info("  Unique predicates: %s", f"{len(predicate_to_idx):,}")
+        logger.info("  Avg degree (sampled): %.1f", np.mean(degrees))
+        logger.info("  Max degree (sampled): %s", np.max(degrees))
         memory_mb = (
             graph.fwd_targets.nbytes
             + graph.fwd_offsets.nbytes
             + graph.fwd_predicates.nbytes
         ) / 1024 / 1024
-        print(f"  CSR memory usage: ~{memory_mb:.1f} MB")
+        logger.info("  CSR memory usage: ~%.1f MB", memory_mb)
 
     graph.build_metadata()
 

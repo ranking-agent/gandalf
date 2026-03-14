@@ -37,7 +37,7 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) >= 1
@@ -69,7 +69,7 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Before the fix this returned 0 results because inverse edges
@@ -105,7 +105,7 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         result_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
@@ -153,7 +153,7 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         result_ids = {r["node_bindings"]["n0"][0]["id"] for r in results}
@@ -210,8 +210,8 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response_related = lookup(graph, query_related, bmt=bmt, verbose=False)
-        response_none = lookup(graph, query_none, bmt=bmt, verbose=False)
+        response_related = lookup(graph, query_related, bmt=bmt)
+        response_none = lookup(graph, query_none, bmt=bmt)
 
         ids_related = {
             r["node_bindings"]["n1"][0]["id"]
@@ -256,7 +256,7 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should find at least PPARG as the intermediate node
@@ -320,8 +320,8 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response_a = lookup(graph, query_a, bmt=bmt, verbose=False)
-        response_b = lookup(graph, query_b, bmt=bmt, verbose=False)
+        response_a = lookup(graph, query_a, bmt=bmt)
+        response_b = lookup(graph, query_b, bmt=bmt)
 
         intermediates_a = {r["node_bindings"]["n1"][0]["id"]
                           for r in response_a["message"]["results"]}
@@ -394,8 +394,8 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response_fwd = lookup(graph, query_forward, bmt=bmt, verbose=False)
-        response_rev = lookup(graph, query_reversed, bmt=bmt, verbose=False)
+        response_fwd = lookup(graph, query_forward, bmt=bmt)
+        response_rev = lookup(graph, query_reversed, bmt=bmt)
 
         intermediates_fwd = {r["node_bindings"]["n1"][0]["id"]
                             for r in response_fwd["message"]["results"]}

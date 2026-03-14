@@ -28,7 +28,7 @@ class TestLookupResponseStructure:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
 
         assert "message" in response
         assert "knowledge_graph" in response["message"]
@@ -55,7 +55,7 @@ class TestLookupResponseStructure:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         kg_nodes = response["message"]["knowledge_graph"]["nodes"]
 
         # Check Metformin node
@@ -84,7 +84,7 @@ class TestLookupResponseStructure:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         kg_edges = response["message"]["knowledge_graph"]["edges"]
 
         # Should have 4 edges (treats includes descendants: ameliorates_condition, preventative_for_condition)
@@ -130,7 +130,7 @@ class TestLookupResponseStructure:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         result = response["message"]["results"][0]
 
         assert "node_bindings" in result
@@ -178,7 +178,7 @@ class TestMetforminType2DiabetesEdges:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Results aggregated by node path: 1 result with 4 edge bindings
@@ -211,7 +211,7 @@ class TestMetforminType2DiabetesEdges:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -240,7 +240,7 @@ class TestMetforminType2DiabetesEdges:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 1
@@ -273,7 +273,7 @@ class TestMetforminType2DiabetesEdges:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Results aggregated by node path: 1 result with 3 edge bindings

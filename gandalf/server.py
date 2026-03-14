@@ -1,6 +1,7 @@
 """GANDALF — Plater-compatible TRAPI server."""
 
 import gc
+import logging
 import os
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -19,6 +20,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from gandalf import CSRGraph, lookup
+from gandalf.logging_config import configure_logging
+
+configure_logging(logging.INFO)
+logger = logging.getLogger(__name__)
 
 GRAPH = None
 BMT = None
@@ -81,9 +86,9 @@ def load_graph(path: str, format: str = "auto") -> CSRGraph:
 async def lifespan(app: FastAPI):
     """Handle graph and BMT loading on startup."""
     global GRAPH, BMT
-    print(f"Loading graph from {GRAPH_PATH} (format={GRAPH_FORMAT})...")
+    logger.info("Loading graph from %s (format=%s)...", GRAPH_PATH, GRAPH_FORMAT)
     GRAPH = load_graph(GRAPH_PATH, GRAPH_FORMAT)
-    print("Initializing Biolink Model Toolkit...")
+    logger.info("Initializing Biolink Model Toolkit...")
     BMT = Toolkit()
 
     # Freeze all objects allocated so far (graph + BMT) into a permanent
@@ -94,7 +99,7 @@ async def lifespan(app: FastAPI):
     # Raise thresholds so Gen 2 collections are less frequent even for
     # the (now-small) unfrozen query-time object set.
     gc.set_threshold(50_000, 50, 50)
-    print("Server ready!")
+    logger.info("Server ready!")
     yield
     GRAPH = None
     BMT = None
@@ -412,9 +417,9 @@ def async_lookup(callback_url: str, query: dict):
         ) as client:
             res = client.post(callback_url, json=response)
             res.raise_for_status()
-            print(f"Posted to {callback_url} with code {res.status_code}")
+            logger.info("Posted to %s with code %s", callback_url, res.status_code)
     except Exception as e:
-        print(f"Callback to {callback_url} failed with: {e}")
+        logger.error("Callback to %s failed with: %s", callback_url, e)
 
 
 @APP.post("/asyncquery")
@@ -445,7 +450,7 @@ def async_query(
     if (query.get("set_interpretation", None) or "BATCH") == "MANY":
         raise HTTPException(422, "set_interpretation MANY not supported.")
 
-    print(f"Doing async lookup for {callback}")
+    logger.info("Doing async lookup for %s", callback)
     background_tasks.add_task(async_lookup, callback, query)
 
     return

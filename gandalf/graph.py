@@ -7,9 +7,13 @@ import time
 from pathlib import Path
 from typing import Optional, Union
 
+import logging
+
 import numpy as np
 
 from gandalf.lmdb_store import LMDBPropertyStore
+
+logger = logging.getLogger(__name__)
 
 
 class EdgePropertyStore:
@@ -270,10 +274,10 @@ class CSRGraph:
         self.edge_ids = None
 
         # Build both forward and reverse CSR structures
-        print("Building forward CSR...")
+        logger.debug("Building forward CSR...")
         self._build_forward_csr(edges, edge_predicates, edge_properties)
 
-        print("Building reverse CSR...")
+        logger.debug("Building reverse CSR...")
         self._build_reverse_csr(edges, edge_predicates)
 
         self.build_metadata()
@@ -305,9 +309,12 @@ class CSRGraph:
         self.edge_properties = EdgePropertyStore.from_property_list(props_list)
 
         stats = self.edge_properties.dedup_stats()
-        print(f"  Edge property dedup: {stats['total_edges']:,} edges -> "
-              f"{stats['unique_sources']:,} unique source configs, "
-              f"{stats['unique_qualifiers']:,} unique qualifier combos")
+        logger.debug("  Edge property dedup: %s edges -> "
+                     "%s unique source configs, "
+                     "%s unique qualifier combos",
+                     stats['total_edges'],
+                     stats['unique_sources'],
+                     stats['unique_qualifiers'])
 
         # Build forward offsets
         self.fwd_offsets = np.zeros(self.num_nodes + 1, dtype=np.int64)
@@ -778,7 +785,7 @@ class CSRGraph:
 
         Stored as attributes on the graph object. Total memory: ~10-50 KB.
         """
-        print("Building Plater-compatible metadata...")
+        logger.debug("Building Plater-compatible metadata...")
         t0 = time.perf_counter()
 
         num_edges = len(self.fwd_targets)
@@ -885,9 +892,12 @@ class CSRGraph:
         }
 
         t1 = time.perf_counter()
-        print(f"  Metadata built in {t1 - t0:.2f}s: "
-              f"{len(triple_counts)} unique triples, "
-              f"{len(category_prefixes)} categories")
+        logger.debug("  Metadata built in %.2fs: "
+                     "%s unique triples, "
+                     "%s categories",
+                     t1 - t0,
+                     len(triple_counts),
+                     len(category_prefixes))
 
     # ------------------------------------------------------------------
     # Serialization
@@ -905,7 +915,7 @@ class CSRGraph:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
 
-        print(f"Saving graph to {directory} (mmap format)...")
+        logger.info("Saving graph to %s (mmap format)...", directory)
         t0 = time.perf_counter()
 
         # Save NumPy arrays as .npy files (memory-mappable)
@@ -950,7 +960,7 @@ class CSRGraph:
                 shutil.copytree(lmdb_src, lmdb_dst)
 
         t1 = time.perf_counter()
-        print(f"Graph saved in {t1 - t0:.2f}s")
+        logger.info("Graph saved in %.2fs", t1 - t0)
 
         # Print file sizes
         total_size = 0
@@ -958,12 +968,12 @@ class CSRGraph:
             if f.is_file():
                 size = f.stat().st_size
                 total_size += size
-                print(f"  {f.name}: {size / 1024 / 1024:.1f} MB")
+                logger.debug("  %s: %.1f MB", f.name, size / 1024 / 1024)
             elif f.is_dir():
                 dir_size = sum(ff.stat().st_size for ff in f.iterdir() if ff.is_file())
                 total_size += dir_size
-                print(f"  {f.name}/: {dir_size / 1024 / 1024:.1f} MB")
-        print(f"  Total: {total_size / 1024 / 1024:.1f} MB")
+                logger.debug("  %s/: %.1f MB", f.name, dir_size / 1024 / 1024)
+        logger.debug("  Total: %.1f MB", total_size / 1024 / 1024)
 
     @staticmethod
     def load_mmap(directory: Union[str, Path], mmap_mode: str = "r"):
@@ -973,7 +983,7 @@ class CSRGraph:
         the legacy format (full EdgePropertyStore with pubs/sources/quals).
         """
         directory = Path(directory)
-        print(f"Loading graph from {directory} (mmap_mode={mmap_mode})...")
+        logger.info("Loading graph from %s (mmap_mode=%s)...", directory, mmap_mode)
         t0 = time.perf_counter()
 
         graph = CSRGraph.__new__(CSRGraph)
@@ -1030,7 +1040,7 @@ class CSRGraph:
             with open(directory / "edge_properties.pkl", "rb") as f:
                 graph.edge_properties = pickle.load(f)
             if isinstance(graph.edge_properties, list):
-                print("  Converting edge properties to deduplicated format...")
+                logger.debug("  Converting edge properties to deduplicated format...")
                 graph.edge_properties = EdgePropertyStore.from_property_list(
                     graph.edge_properties
                 )
@@ -1057,26 +1067,34 @@ class CSRGraph:
 
         if isinstance(graph.edge_properties, EdgePropertyStore):
             stats = graph.edge_properties.dedup_stats()
-            print(f"  Edge property dedup: {stats['total_edges']:,} edges -> "
-                  f"{stats['unique_sources']:,} unique source configs, "
-                  f"{stats['unique_qualifiers']:,} unique qualifier combos")
+            logger.debug("  Edge property dedup: %s edges -> "
+                         "%s unique source configs, "
+                         "%s unique qualifier combos",
+                         stats['total_edges'],
+                         stats['unique_sources'],
+                         stats['unique_qualifiers'])
 
         if graph.lmdb_store is not None:
-            print(f"  LMDB detail store: {lmdb_path}")
+            logger.debug("  LMDB detail store: %s", lmdb_path)
 
         # Rebuild rev_to_fwd if not present (legacy format)
         if graph.rev_to_fwd is None:
-            print("  Rebuilding rev_to_fwd mapping...")
+            logger.debug("  Rebuilding rev_to_fwd mapping...")
             graph._rebuild_rev_to_fwd()
 
         t1 = time.perf_counter()
-        print(
-            f"Graph loaded in {t1 - t0:.2f}s "
-            f"(edge_properties: {t_props_end - t_props_start:.2f}s)"
+        logger.info(
+            "Graph loaded in %.2fs "
+            "(edge_properties: %.2fs)",
+            t1 - t0,
+            t_props_end - t_props_start,
         )
-        print(
-            f"  {graph.num_nodes:,} nodes, {len(graph.fwd_targets):,} edges, "
-            f"{len(graph.predicate_to_idx):,} predicates"
+        logger.info(
+            "  %s nodes, %s edges, "
+            "%s predicates",
+            graph.num_nodes,
+            len(graph.fwd_targets),
+            len(graph.predicate_to_idx),
         )
 
         graph.build_metadata()

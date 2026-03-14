@@ -1,5 +1,6 @@
 """3-hop path finding functions for direct graph traversal."""
 
+import logging
 import time
 from collections import defaultdict
 
@@ -7,14 +8,15 @@ import numpy as np
 
 from gandalf.graph import CSRGraph
 
+logger = logging.getLogger(__name__)
+
 
 def _return_with_properties(
-    graph: CSRGraph, paths: list[list[int]], verbose=True
+    graph: CSRGraph, paths: list[list[int]]
 ) -> list[dict[str, dict[str, str]]]:
     """Given paths, return them with useful properties attached."""
     start_time = time.time()
-    if verbose:
-        print("Assembling enriched paths...")
+    logger.debug("Assembling enriched paths...")
     hydrated_paths = []
     for path_idx in paths:
         [start_idx, n1_idx, n2_idx, end_idx] = path_idx
@@ -22,8 +24,6 @@ def _return_with_properties(
         edges_01 = graph.get_all_edges_between(start_idx, n1_idx)
         edges_12 = graph.get_all_edges_between(n1_idx, n2_idx)
         edges_23 = graph.get_all_edges_between(n2_idx, end_idx)
-        print(edges_01)
-        exit()
 
         pred_01 = edges_01[0][0] if edges_01 else None
         pred_12 = edges_12[0][0] if edges_12 else None
@@ -66,15 +66,14 @@ def _return_with_properties(
             "e2": e2,
             "n3": n3,
         })
-    if verbose:
-        print(
-            f"Done! Hydrating {len(hydrated_paths):,} paths took {time.time() - start_time}"
-        )
+    logger.debug(
+        "Done! Hydrating %s paths took %s", f"{len(hydrated_paths):,}", time.time() - start_time
+    )
     return hydrated_paths
 
 
 def find_3hop_paths_with_properties(
-    graph: CSRGraph, start_id, end_id, verbose=True, max_paths=None
+    graph: CSRGraph, start_id, end_id, max_paths=None
 ):
     """Find all 3-hop paths between two nodes with edge and node properties.
 
@@ -84,7 +83,6 @@ def find_3hop_paths_with_properties(
         graph: CSRGraph instance
         start_id: Starting node ID
         end_id: Ending node ID
-        verbose: Print progress information
         max_paths: If specified, only enrich the first N paths (for performance)
     """
     # Convert IDs to indices
@@ -97,9 +95,8 @@ def find_3hop_paths_with_properties(
     if start_idx == end_idx:
         return []
 
-    if verbose:
-        print(f"Start node '{start_id}' has degree: {graph.degree(start_idx):,}")
-        print(f"End node '{end_id}' has degree: {graph.degree(end_idx):,}")
+    logger.debug("Start node '%s' has degree: %s", start_id, f"{graph.degree(start_idx):,}")
+    logger.debug("End node '%s' has degree: %s", end_id, f"{graph.degree(end_idx):,}")
 
     # Get raw paths (as indices)
     paths_idx = _find_3hop_paths_directed_idx(
@@ -109,16 +106,14 @@ def find_3hop_paths_with_properties(
         start_from_end=(graph.degree(start_idx) > graph.degree(end_idx)),
     )
 
-    if verbose:
-        print(f"Found {len(paths_idx):,} paths")
+    logger.debug("Found %s paths", f"{len(paths_idx):,}")
 
     # Limit paths if requested
     if max_paths and len(paths_idx) > max_paths:
-        if verbose:
-            print(f"Limiting to first {max_paths:,} paths for property enrichment")
+        logger.debug("Limiting to first %s paths for property enrichment", f"{max_paths:,}")
         paths_idx = paths_idx[:max_paths]
 
-    return _return_with_properties(graph, paths_idx, verbose)
+    return _return_with_properties(graph, paths_idx)
 
 
 def _find_3hop_paths_directed_idx(graph, start_idx, end_idx, start_from_end=False):
@@ -131,15 +126,14 @@ def _find_3hop_paths_directed_idx(graph, start_idx, end_idx, start_from_end=Fals
         return _do_unfiltered_search(graph, start_idx, end_idx)
 
 
-def _do_unfiltered_search(graph: CSRGraph, start_idx, end_idx, verbose=False):
+def _do_unfiltered_search(graph: CSRGraph, start_idx, end_idx):
     """Actual bidirectional search implementation returning full 3-hop paths."""
 
     # Forward: start -> n1
     t0 = time.perf_counter()
     forward_1 = graph.neighbors(start_idx)
     t1 = time.perf_counter()
-    if verbose:
-        print("Imatinib 1-hop:", len(forward_1), t1 - t0)
+    logger.debug("Imatinib 1-hop: %s %s", len(forward_1), t1 - t0)
 
     if len(forward_1) == 0:
         return []
@@ -168,15 +162,13 @@ def _do_unfiltered_search(graph: CSRGraph, start_idx, end_idx, verbose=False):
     dst_n2 = np.concatenate(dst_bufs)
 
     t1 = time.perf_counter()
-    if verbose:
-        print("Imatinib 2-hop edges:", len(dst_n2), t1 - t0)
+    logger.debug("Imatinib 2-hop edges: %s %s", len(dst_n2), t1 - t0)
 
     # Backward: end -> n2
     t0 = time.perf_counter()
     backward_1 = graph.incoming_neighbors(end_idx)
     t1 = time.perf_counter()
-    if verbose:
-        print("Asthma 1-hop:", len(backward_1), t1 - t0)
+    logger.debug("Asthma 1-hop: %s %s", len(backward_1), t1 - t0)
 
     if len(backward_1) == 0:
         return []
@@ -189,8 +181,7 @@ def _do_unfiltered_search(graph: CSRGraph, start_idx, end_idx, verbose=False):
     src_n1 = src_n1[mask]
     dst_n2 = dst_n2[mask]
     t1 = time.perf_counter()
-    if verbose:
-        print("Intersection edges:", len(dst_n2), t1 - t0)
+    logger.debug("Intersection edges: %s %s", len(dst_n2), t1 - t0)
 
     if len(dst_n2) == 0:
         return []
@@ -212,7 +203,6 @@ def find_3hop_paths_filtered(
     end_id,
     allowed_predicates=None,
     excluded_predicates=None,
-    verbose=True,
 ):
     """Find 3-hop paths with predicate filtering.
 
@@ -222,7 +212,6 @@ def find_3hop_paths_filtered(
         end_id: Ending node ID
         allowed_predicates: If provided, only use edges with these predicates
         excluded_predicates: If provided, skip edges with these predicates
-        verbose: Print progress information
     """
     start_idx = graph.get_node_idx(start_id)
     end_idx = graph.get_node_idx(end_id)
@@ -241,9 +230,8 @@ def find_3hop_paths_filtered(
             return False
         return True
 
-    if verbose:
-        print(f"Start node '{start_id}' has degree: {graph.degree(start_idx):,}")
-        print(f"End node '{end_id}' has degree: {graph.degree(end_idx):,}")
+    logger.debug("Start node '%s' has degree: %s", start_id, f"{graph.degree(start_idx):,}")
+    logger.debug("End node '%s' has degree: %s", end_id, f"{graph.degree(end_idx):,}")
 
     # Forward: start -> n1 (with filtering)
     # Get all edges from start, filter by predicate
@@ -255,8 +243,7 @@ def find_3hop_paths_filtered(
         if is_predicate_allowed(predicate):
             forward_1_filtered.append((n1_idx, predicate))
 
-    if verbose:
-        print(f"After filtering edge 1: {len(forward_1_filtered):,} neighbors")
+    logger.debug("After filtering edge 1: %s neighbors", f"{len(forward_1_filtered):,}")
 
     if len(forward_1_filtered) == 0:
         return []
@@ -272,8 +259,7 @@ def find_3hop_paths_filtered(
             if is_predicate_allowed(pred_12):
                 forward_paths[n2_idx].append((n1_idx, pred_01, pred_12))
 
-    if verbose:
-        print(f"Nodes reachable in 2 hops: {len(forward_paths):,}")
+    logger.debug("Nodes reachable in 2 hops: %s", f"{len(forward_paths):,}")
 
     # Check which n2 nodes connect to end
     backward_connections = {}  # n2_idx -> predicate (n2 -> end)
@@ -288,10 +274,9 @@ def find_3hop_paths_filtered(
                     backward_connections[n2_idx] = []
                 backward_connections[n2_idx].append(predicate)
 
-    if verbose:
-        print(
-            f"After filtering edge 3: {len(backward_connections):,} nodes connect to end"
-        )
+    logger.debug(
+        "After filtering edge 3: %s nodes connect to end", f"{len(backward_connections):,}"
+    )
 
     # Find intersection and build paths
     paths = []
@@ -340,13 +325,12 @@ def find_3hop_paths_filtered(
                         "n3": n3,
                     })
 
-    if verbose:
-        print(f"Found {len(paths):,} filtered paths")
+    logger.debug("Found %s filtered paths", f"{len(paths):,}")
 
     return paths
 
 
-def find_mechanistic_paths(graph: CSRGraph, start_id, end_id, verbose=True):
+def find_mechanistic_paths(graph: CSRGraph, start_id, end_id):
     """Find paths using only mechanistic/causal predicates.
 
     Good for finding actual biological mechanisms rather than associations.
@@ -373,11 +357,10 @@ def find_mechanistic_paths(graph: CSRGraph, start_id, end_id, verbose=True):
         start_id,
         end_id,
         allowed_predicates=mechanistic_predicates,
-        verbose=verbose,
     )
 
 
-def do_one_hop(graph: CSRGraph, start_id: str, verbose=True):
+def do_one_hop(graph: CSRGraph, start_id: str):
     """Get all neighbors from a single node."""
     start_idx = graph.get_node_idx(start_id)
 

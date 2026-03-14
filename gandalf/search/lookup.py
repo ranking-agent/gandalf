@@ -2,11 +2,14 @@
 
 import copy
 import gc
+import logging
 import time
 import uuid
 from collections import defaultdict
 
 from bmt.toolkit import Toolkit
+
+logger = logging.getLogger(__name__)
 
 from gandalf.query_planner import get_next_qedge, remove_orphaned
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
@@ -15,7 +18,7 @@ from gandalf.search.query_edge import query_edge, query_subclass_edge
 from gandalf.search.reconstruct import reconstruct_paths
 
 
-def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_depth=1,
+def lookup(graph, query: dict, bmt=None, subclass=True, subclass_depth=1,
            max_node_degree=None, min_information_content=None):
     """Take an arbitrary Translator query graph and return all matching paths.
 
@@ -23,7 +26,6 @@ def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_d
         graph: CSRGraph instance
         query: Full TRAPI request dict containing message.query_graph
         bmt: Biolink Model Toolkit instance (optional, will create if not provided)
-        verbose: Print progress information
         subclass: If True, expand pinned nodes to include subclass descendants
         subclass_depth: Maximum number of subclass_of hops to traverse (default 1)
         max_node_degree: If set, filter out nodes with total degree (in + out)
@@ -37,7 +39,7 @@ def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_d
     t_start = time.perf_counter()
 
     # Start GC monitoring to track collection events
-    gc_monitor = GCMonitor(verbose=verbose)
+    gc_monitor = GCMonitor()
     gc_monitor.start()
 
     # Disable GC for the entire query to prevent expensive Gen 2 collections
@@ -48,7 +50,7 @@ def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_d
     gc.disable()
 
     try:
-        return _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
+        return _lookup_inner(graph, query, bmt, subclass, subclass_depth,
                              t_start, gc_monitor,
                              max_node_degree=max_node_degree,
                              min_information_content=min_information_content)
@@ -58,17 +60,16 @@ def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_d
             gc.enable()
 
 
-def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
+def _lookup_inner(graph, query, bmt, subclass, subclass_depth,
                   t_start, gc_monitor,
                   max_node_degree=None, min_information_content=None):
     """Inner implementation of lookup with all the core logic."""
     if bmt is None:
         bmt = Toolkit()
         t_bmt = time.perf_counter()
-        if verbose:
-            print(f"BMT initialization: {t_bmt - t_start:.2f}s")
-    elif verbose:
-        print("Using provided BMT instance")
+        logger.debug("BMT initialization: %.2fs", t_bmt - t_start)
+    else:
+        logger.debug("Using provided BMT instance")
 
     # Create predicate expander for handling symmetric/inverse predicates at query time
     predicate_expander = PredicateExpander(bmt)
@@ -82,8 +83,7 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
 
     # Rewrite query graph for subclass expansion if requested
     if subclass and subqgraph["edges"]:
-        if verbose:
-            print(f"Rewriting query graph for subclass expansion (depth={subclass_depth})")
+        logger.debug("Rewriting query graph for subclass expansion (depth=%s)", subclass_depth)
         _rewrite_for_subclass(subqgraph, subclass_depth=subclass_depth)
         # Use the rewritten graph as the query graph for the rest of the pipeline
         query_graph = copy.deepcopy(subqgraph)
@@ -100,18 +100,15 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
     original_edges = list(query_graph["edges"].keys())
     original_nodes = set(query_graph["nodes"].keys())
 
-    if verbose:
-        print(f"Query graph: {len(original_nodes)} nodes, {len(original_edges)} edges")
+    logger.debug("Query graph: %s nodes, %s edges", len(original_nodes), len(original_edges))
 
     # Process edges one at a time
     while len(subqgraph["edges"].keys()) > 0:
         # Get next edge to query
         next_edge_id, next_edge = get_next_qedge(subqgraph)
 
-        if verbose:
-            print(
-                f"\nProcessing edge '{next_edge_id}': {next_edge['subject']} -> {next_edge['object']}"
-            )
+        logger.debug("Processing edge '%s': %s -> %s",
+                     next_edge_id, next_edge['subject'], next_edge['object'])
 
         # Get node constraints
         start_node = subqgraph["nodes"][next_edge["subject"]]
@@ -138,7 +135,7 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
         if next_edge.get("_subclass"):
             subclass_edge_depth = next_edge.get("_subclass_depth", 1)
             edge_matches = query_subclass_edge(
-                graph, start_node_idxes, end_node_idxes, subclass_edge_depth, verbose
+                graph, start_node_idxes, end_node_idxes, subclass_edge_depth
             )
             edge_inverse_preds[next_edge_id] = set()
         else:
@@ -156,9 +153,11 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
             # Keep them separate to avoid confusion in reverse_pred_map construction
             allowed_predicates = forward_predicates
 
-            if verbose and query_predicates:
-                print(f"  Query predicates: {query_predicates}")
-                print(f"  Expanded to {len(forward_predicates)} forward, {len(inverse_predicates) if inverse_predicates is not None else 0} inverse predicates")
+            if query_predicates:
+                logger.debug("  Query predicates: %s", query_predicates)
+                logger.debug("  Expanded to %s forward, %s inverse predicates",
+                             len(forward_predicates),
+                             len(inverse_predicates) if inverse_predicates is not None else 0)
 
             # Store inverse predicates for this edge (for path reconstruction)
             edge_inverse_preds[next_edge_id] = set(inverse_predicates) if inverse_predicates is not None else set()
@@ -184,7 +183,6 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
                 end_node.get("categories", []),
                 allowed_predicates,
                 qualifier_constraints,
-                verbose,
                 inverse_predicates=inverse_predicates,
                 max_node_degree=max_node_degree,
                 min_information_content=min_information_content,
@@ -196,11 +194,10 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
         # Store results for this edge
         edge_results[next_edge_id] = edge_matches
 
-        if verbose:
-            print(f"  Found {len(edge_matches):,} matching edges")
+        logger.debug("  Found %s matching edges", f"{len(edge_matches):,}")
 
         if len(edge_matches) <= 0:
-            print("Found no edge matches, returning 0 results.")
+            logger.info("Found no edge matches, returning 0 results.")
             original_edges = []
             break
 
@@ -232,22 +229,19 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
         # Remove orphaned nodes
         remove_orphaned(subqgraph)
 
-        if verbose:
-            print(f"  Remaining edges: {len(subqgraph['edges'])}")
+        logger.debug("  Remaining edges: %s", len(subqgraph['edges']))
 
     # Reconstruct complete paths from edge results
-    if verbose:
-        print(f"\nReconstructing complete paths...")
+    logger.debug("Reconstructing complete paths...")
 
     path_data = reconstruct_paths(
-        graph, query_graph, edge_results, original_edges, verbose,
+        graph, query_graph, edge_results, original_edges,
         edge_inverse_preds=edge_inverse_preds
     )
 
     num_paths = len(path_data) if path_data is not None else 0
 
-    if verbose:
-        print(f"Found {num_paths:,} complete paths")
+    logger.debug("Found %s complete paths", f"{num_paths:,}")
 
     t_post_start = time.perf_counter()
 
@@ -265,27 +259,26 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
 
     if num_paths == 0:
         t_built = time.perf_counter()
-        if verbose:
-            print(f"  Post-processing total: {t_built - t_post_start:.2f}s")
+        logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
     else:
         _build_response(
             graph, response, path_data, query_graph, num_paths,
-            t_post_start, gc_monitor, verbose,
+            t_post_start, gc_monitor,
         )
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
     # The monitor is still accumulating events until stop() is called there.
     gc_summary = gc_monitor.summary()
-    if verbose and gc_summary and gc_summary["total_time"] > 0.1:
-        print(f"  [GC Summary] {gc_summary['total_collections']} collections, "
-              f"{gc_summary['total_time']:.2f}s total, "
-              f"{gc_summary['total_collected']} objects collected")
+    if gc_summary and gc_summary["total_time"] > 0.1:
+        logger.debug("  [GC Summary] %s collections, %.2fs total, %s objects collected",
+                     gc_summary['total_collections'], gc_summary['total_time'],
+                     gc_summary['total_collected'])
 
     return response
 
 
 def _build_response(graph, response, path_data, query_graph, num_paths,
-                    t_post_start, gc_monitor, verbose):
+                    t_post_start, gc_monitor):
     """Build the TRAPI response from path data."""
     # Extract arrays and metadata from PathArrays for efficient access
     pa_nodes = path_data.paths_nodes
@@ -359,8 +352,8 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
         node_binding_groups[node_key].append(path_idx)
 
     t_grouped = time.perf_counter()
-    if verbose:
-        print(f"  Grouped into {len(node_binding_groups):,} unique node paths ({t_grouped - t_post_start:.2f}s)")
+    logger.debug("  Grouped into %s unique node paths (%.2fs)",
+                 f"{len(node_binding_groups):,}", t_grouped - t_post_start)
 
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
@@ -618,9 +611,9 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
         edge.pop("_query_object", None)
 
     t_built = time.perf_counter()
-    if verbose:
-        print(f"  Built {len(response['message']['results']):,} results ({t_built - t_grouped:.2f}s)")
-        print(f"  Post-processing total: {t_built - t_post_start:.2f}s")
+    logger.debug("  Built %s results (%.2fs)",
+                 f"{len(response['message']['results']):,}", t_built - t_grouped)
+    logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
 
 
 def _rewrite_for_subclass(query_graph, subclass_depth=1):

@@ -37,7 +37,7 @@ class TestSymmetricPredicates:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should find the direct edge PPARG -> INSR
@@ -79,7 +79,7 @@ class TestSymmetricPredicates:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should find 1 result - the symmetric edge
@@ -117,7 +117,7 @@ class TestSymmetricPredicates:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should find INSR as interacting partner
@@ -149,7 +149,7 @@ class TestSymmetricPredicates:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should find INSR as the subject (interacts with PPARG)
@@ -185,7 +185,7 @@ class TestSymmetricPredicates:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should find 1 path: Metformin -> PPARG -> INSR
@@ -225,7 +225,7 @@ class TestSymmetricPredicates:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should find 1 path via symmetric interacts_with
@@ -289,7 +289,7 @@ class TestSymmetricBothPinnedDedup:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, subclass=False)
+        response = lookup(graph, query, bmt=bmt, subclass=False)
         results = response["message"]["results"]
 
         # Collect (SN, h) binding pairs from results
@@ -335,7 +335,7 @@ class TestSymmetricPredicateValidation:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         kg_edges = response["message"]["knowledge_graph"]["edges"]
 
         # Every edge in the knowledge graph should exist in the actual graph
@@ -373,7 +373,7 @@ class TestSymmetricPredicateValidation:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         kg_edges = response["message"]["knowledge_graph"]["edges"]
 
         # Should have found at least one edge
@@ -418,7 +418,7 @@ class TestSymmetricPredicateValidation:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         kg_edges = response["message"]["knowledge_graph"]["edges"]
 
         # Validate every edge

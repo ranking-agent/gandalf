@@ -8,6 +8,7 @@ Example:
 
 import argparse
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,9 @@ from gandalf import (
     find_3hop_paths_filtered,
     find_3hop_paths_with_properties,
 )
+from gandalf.logging_config import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -80,35 +84,42 @@ Examples:
         "--quiet", "-q", action="store_true", help="Suppress progress output"
     )
 
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable debug logging"
+    )
+
     args = parser.parse_args()
+
+    if args.verbose:
+        configure_logging(logging.DEBUG)
+    elif args.quiet:
+        configure_logging(logging.WARNING)
+    else:
+        configure_logging(logging.INFO)
 
     # Validate graph file
     if not args.graph.exists():
-        print(f"Error: Graph file not found: {args.graph}", file=sys.stderr)
+        logger.error("Graph file not found: %s", args.graph)
         sys.exit(1)
 
     # Load graph
-    if not args.quiet:
-        print(f"Loading graph from {args.graph}")
+    logger.info("Loading graph from %s", args.graph)
 
     try:
         graph = CSRGraph.load_mmap(str(args.graph))
     except Exception as e:
-        print(f"Error loading graph: {e}", file=sys.stderr)
+        logger.error("Error loading graph: %s", e)
         sys.exit(1)
 
     # Query paths
-    if not args.quiet:
-        print(f"\nFinding paths: {args.start} → {args.end}")
-        print("-" * 60)
+    logger.info("Finding paths: %s -> %s", args.start, args.end)
 
     start_time = time.time()
 
     try:
         # Check if filtering is needed
         if args.allowed_predicates or args.excluded_predicates:
-            if not args.quiet:
-                print("Applying predicate filters...")
+            logger.info("Applying predicate filters...")
 
             paths = find_3hop_paths_filtered(
                 graph,
@@ -120,7 +131,6 @@ Examples:
                 excluded_predicates=set(args.excluded_predicates)
                 if args.excluded_predicates
                 else None,
-                verbose=not args.quiet,
             )
         else:
             # Standard search
@@ -129,7 +139,6 @@ Examples:
                     graph,
                     args.start,
                     args.end,
-                    verbose=not args.quiet,
                     max_paths=args.limit,
                 )
             else:
@@ -138,9 +147,7 @@ Examples:
                 end_idx = graph.get_node_idx(args.end)
 
                 if start_idx is None or end_idx is None:
-                    print(
-                        "Error: Start or end node not found in graph", file=sys.stderr
-                    )
+                    logger.error("Start or end node not found in graph")
                     sys.exit(1)
 
                 from gandalf.search import _find_3hop_paths_directed_idx
@@ -156,8 +163,7 @@ Examples:
         elapsed = time.time() - start_time
 
         # Report results
-        if not args.quiet:
-            print(f"\n✓ Found {len(paths):,} paths in {elapsed:.1f} seconds")
+        logger.info("Found %s paths in %.1f seconds", f"{len(paths):,}", elapsed)
 
         # Output results
         if args.output:
@@ -179,8 +185,7 @@ Examples:
             with open(args.output, "w") as f:
                 json.dump(output_data, f, indent=2)
 
-            if not args.quiet:
-                print(f"Results saved to {args.output}")
+            logger.info("Results saved to %s", args.output)
         else:
             # Print to stdout
             if args.with_properties:
@@ -188,13 +193,13 @@ Examples:
             else:
                 # Simple format for ID-only paths
                 for i, path in enumerate(paths[:20], 1):  # Show first 20
-                    print(f"{i}. {' → '.join([path['n0']['id'], path['n1']['id'], path['n2']['id'], path['n3']['id']])}")
+                    print(f"{i}. {' -> '.join([path['n0']['id'], path['n1']['id'], path['n2']['id'], path['n3']['id']])}")
 
                 if len(paths) > 20:
                     print(f"... and {len(paths) - 20:,} more paths")
 
     except Exception as e:
-        print(f"Error querying paths: {e}", file=sys.stderr)
+        logger.error("Error querying paths: %s", e)
         import traceback
 
         traceback.print_exc()

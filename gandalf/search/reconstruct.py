@@ -1,5 +1,6 @@
 """Path reconstruction from edge results using join operations."""
 
+import logging
 import os
 import time
 from collections import defaultdict
@@ -7,6 +8,8 @@ from collections import defaultdict
 import numpy as np
 
 from gandalf.search.path_arrays import PathArrays
+
+logger = logging.getLogger(__name__)
 
 
 # When path count exceeds this threshold, skip edge attribute enrichment
@@ -24,7 +27,7 @@ MAX_PATH_LIMIT = int(
 )
 
 
-def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
+def reconstruct_paths(graph, query_graph, edge_results, edge_order,
                       edge_inverse_preds=None):
     """Reconstruct complete paths by iteratively joining edge results.
 
@@ -36,7 +39,6 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
         query_graph: Original query graph
         edge_results: Dict of edge_id -> [(subj_idx, pred, obj_idx, via_inverse, fwd_edge_idx), ...]
         edge_order: List of edge IDs in original query order
-        verbose: Print progress
         edge_inverse_preds: (Deprecated, kept for compatibility) Dict of edge_id -> set of inverse predicates
 
     Returns:
@@ -48,10 +50,9 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
     t0 = time.perf_counter()
 
     # Build join order based on query graph structure
-    join_order = compute_join_order(query_graph, edge_results, edge_order, verbose)
+    join_order = compute_join_order(query_graph, edge_results, edge_order)
 
-    if verbose:
-        print(f"  Join order: {join_order}")
+    logger.debug("  Join order: %s", join_order)
 
     # Build mappings for query structure
     # qnode_id -> column index in node array
@@ -108,8 +109,7 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
         paths_via_inverse[i, 0] = via_inverse
         paths_fwd_edge_idx[i, 0] = fwd_edge_idx
 
-    if verbose:
-        print(f"  Starting with {num_paths:,} paths from edge '{first_edge_id}'")
+    logger.debug("  Starting with %s paths from edge '%s'", f"{num_paths:,}", first_edge_id)
 
     # Iteratively join with remaining edges using two-pass approach:
     # Pass 1: count output rows, Pass 2: fill pre-allocated arrays.
@@ -119,11 +119,8 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
         subj_qnode = edge["subject"]
         obj_qnode = edge["object"]
 
-        if verbose:
-            print(
-                f"  Join {join_idx}/{len(join_order) - 1}: Adding edge '{edge_id}' ({len(paths_nodes):,} paths)...",
-                end="",
-            )
+        logger.debug("  Join %s/%s: Adding edge '%s' (%s paths)...",
+                     join_idx, len(join_order) - 1, edge_id, f"{len(paths_nodes):,}")
 
         t_join_start = time.perf_counter()
 
@@ -170,8 +167,7 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
 
         else:
             # Neither node in paths - cartesian product
-            if verbose:
-                print(f"\n    Warning: Cartesian product needed for edge '{edge_id}'")
+            logger.debug("    Warning: Cartesian product needed for edge '%s'", edge_id)
 
             if subj_qnode not in qnode_to_col:
                 qnode_to_col[subj_qnode] = num_node_cols
@@ -186,17 +182,14 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
             )
 
         t_join_end = time.perf_counter()
-        if verbose:
-            print(f" -> {len(paths_nodes):,} paths ({t_join_end - t_join_start:.2f}s)")
+        logger.debug(" -> %s paths (%.2fs)", f"{len(paths_nodes):,}", t_join_end - t_join_start)
 
         if len(paths_nodes) == 0:
-            if verbose:
-                print(f"  No valid paths found after joining edge '{edge_id}'")
+            logger.debug("  No valid paths found after joining edge '%s'", edge_id)
             break
 
     t1 = time.perf_counter()
-    if verbose:
-        print(f"  Path reconstruction took {t1 - t0:.2f}s")
+    logger.debug("  Path reconstruction took %.2fs", t1 - t0)
 
     num_paths = len(paths_nodes)
     if num_paths == 0:
@@ -205,14 +198,11 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
     # Check if we exceed the large result threshold
     lightweight = num_paths > LARGE_RESULT_PATH_THRESHOLD
 
-    if verbose:
-        if lightweight:
-            print(
-                f"  {num_paths:,} paths (lightweight mode: "
-                f">{LARGE_RESULT_PATH_THRESHOLD:,} paths, skipping edge attributes)..."
-            )
-        else:
-            print(f"  {num_paths:,} paths")
+    if lightweight:
+        logger.debug("  %s paths (lightweight mode: >%s paths, skipping edge attributes)...",
+                     f"{num_paths:,}", f"{LARGE_RESULT_PATH_THRESHOLD:,}")
+    else:
+        logger.debug("  %s paths", f"{num_paths:,}")
 
     # Build node property cache
     t_cache_start = time.perf_counter()
@@ -230,11 +220,8 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order, verbose,
         node_id_cache[node_idx] = graph.get_node_id(node_idx)
 
     t_cache_end = time.perf_counter()
-    if verbose:
-        print(
-            f"  Cached properties for {len(unique_node_indices):,} unique nodes "
-            f"({t_cache_end - t_cache_start:.2f}s)"
-        )
+    logger.debug("  Cached properties for %s unique nodes (%.2fs)",
+                 f"{len(unique_node_indices):,}", t_cache_end - t_cache_start)
 
     # Build reverse mappings
     col_to_qnode = {v: k for k, v in qnode_to_col.items()}
@@ -274,7 +261,7 @@ def _join_both_in_paths(
         if key in edge_index:
             output_count += len(edge_index[key])
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        print(f"\n    Warning: Truncating {output_count:,} intermediate paths to {MAX_PATH_LIMIT:,}")
+        logger.warning("Truncating %s intermediate paths to %s", f"{output_count:,}", f"{MAX_PATH_LIMIT:,}")
         output_count = MAX_PATH_LIMIT
 
     # Pass 2: Fill pre-allocated arrays
@@ -319,7 +306,7 @@ def _join_on_subject(
         if sidx in edge_index:
             output_count += len(edge_index[sidx])
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        print(f"\n    Warning: Truncating {output_count:,} intermediate paths to {MAX_PATH_LIMIT:,}")
+        logger.warning("Truncating %s intermediate paths to %s", f"{output_count:,}", f"{MAX_PATH_LIMIT:,}")
         output_count = MAX_PATH_LIMIT
 
     # Pass 2: Fill
@@ -365,7 +352,7 @@ def _join_on_object(
         if oidx in edge_index:
             output_count += len(edge_index[oidx])
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        print(f"\n    Warning: Truncating {output_count:,} intermediate paths to {MAX_PATH_LIMIT:,}")
+        logger.warning("Truncating %s intermediate paths to %s", f"{output_count:,}", f"{MAX_PATH_LIMIT:,}")
         output_count = MAX_PATH_LIMIT
 
     # Pass 2: Fill
@@ -402,7 +389,7 @@ def _join_cartesian(
     """Neither node in paths - cartesian product."""
     output_count = len(paths_nodes) * len(edge_data)
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        print(f"\n    Warning: Truncating {output_count:,} intermediate paths to {MAX_PATH_LIMIT:,}")
+        logger.warning("Truncating %s intermediate paths to %s", f"{output_count:,}", f"{MAX_PATH_LIMIT:,}")
         output_count = MAX_PATH_LIMIT
 
     new_nodes = np.empty((output_count, max_nodes), dtype=np.int32)
@@ -430,7 +417,7 @@ def _join_cartesian(
     return new_nodes, new_preds, new_via_inv, new_fwd_eidx
 
 
-def compute_join_order(query_graph, edge_results, edge_order, verbose):
+def compute_join_order(query_graph, edge_results, edge_order):
     """Compute optimal join order to minimize intermediate results.
 
     Strategy:

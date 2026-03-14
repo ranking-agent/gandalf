@@ -60,7 +60,7 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
 
         kg_edges = response["message"]["knowledge_graph"]["edges"]
@@ -97,7 +97,7 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
 
         kg_nodes = set(response["message"]["knowledge_graph"]["nodes"].keys())
@@ -126,7 +126,7 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
 
         inferred = _get_inferred_edges(response)
@@ -155,7 +155,7 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
 
         aux_graphs = response["message"]["auxiliary_graphs"]
@@ -185,7 +185,7 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
 
         results = response["message"]["results"]
@@ -237,7 +237,7 @@ class TestSubclassCompositeStillCreatedWhenNoDirectEdge:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
 
         results = response["message"]["results"]
@@ -284,7 +284,7 @@ class TestSubclassCompositeStillCreatedWhenNoDirectEdge:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
 
         kg_edges = response["message"]["knowledge_graph"]["edges"]
@@ -320,7 +320,7 @@ class TestSubclassCompositeStillCreatedWhenNoDirectEdge:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
 
         kg_nodes = set(response["message"]["knowledge_graph"]["nodes"].keys())
@@ -358,7 +358,7 @@ class TestDirectEdgePriorityWithInverse:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False,
+        response = lookup(graph, query, bmt=bmt,
                           subclass=True, subclass_depth=1)
 
         results = response["message"]["results"]

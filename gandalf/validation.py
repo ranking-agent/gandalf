@@ -4,12 +4,15 @@ This module provides tools for development and testing to ensure that
 query results are consistent with the actual graph data.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 from bmt.toolkit import Toolkit
 
 from gandalf.graph import CSRGraph
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level BMT instance for predicate lookups
@@ -173,7 +176,6 @@ def validate_trapi_response(
     graph: CSRGraph,
     response: dict,
     check_inverse: bool = True,
-    verbose: bool = False,
 ) -> ValidationResult:
     """
     Validate a TRAPI response against the graph.
@@ -187,7 +189,6 @@ def validate_trapi_response(
         graph: The CSRGraph to validate against
         response: TRAPI response dict with message.knowledge_graph and message.results
         check_inverse: If True, also check for inverse predicates in reverse direction
-        verbose: Print progress information
 
     Returns:
         ValidationResult with validation status and any errors found
@@ -197,9 +198,8 @@ def validate_trapi_response(
     kg = message.get("knowledge_graph", {})
     results = message.get("results", [])
 
-    if verbose:
-        print(f"Validating response with {len(kg.get('nodes', {}))} KG nodes, "
-              f"{len(kg.get('edges', {}))} KG edges, {len(results)} results")
+    logger.debug("Validating response with %s KG nodes, %s KG edges, %s results",
+                 len(kg.get('nodes', {})), len(kg.get('edges', {})), len(results))
 
     # Validate knowledge graph nodes
     kg_nodes = kg.get("nodes", {})
@@ -208,8 +208,8 @@ def validate_trapi_response(
         if err:
             errors.append(err)
 
-    if verbose:
-        print(f"  Validated {len(kg_nodes)} KG nodes, {len([e for e in errors if e.error_type.startswith('NODE')])} errors")
+    logger.debug("  Validated %s KG nodes, %s errors",
+                 len(kg_nodes), len([e for e in errors if e.error_type.startswith('NODE')]))
 
     # Validate knowledge graph edges
     kg_edges = kg.get("edges", {})
@@ -235,8 +235,7 @@ def validate_trapi_response(
             err.edge_id = edge_id
             errors.append(err)
 
-    if verbose:
-        print(f"  Validated {len(kg_edges)} KG edges, {len(errors) - edge_errors_before} errors")
+    logger.debug("  Validated %s KG edges, %s errors", len(kg_edges), len(errors) - edge_errors_before)
 
     # Count valid paths (results where all bindings are valid)
     valid_paths = 0
@@ -276,8 +275,7 @@ def validate_trapi_response(
         if path_valid:
             valid_paths += 1
 
-    if verbose:
-        print(f"  Validated {len(results)} results, {valid_paths} valid")
+    logger.debug("  Validated %s results, %s valid", len(results), valid_paths)
 
     return ValidationResult(
         valid=len(errors) == 0,
@@ -291,7 +289,6 @@ def validate_edge_list(
     graph: CSRGraph,
     edges: list[tuple[int, str, int]],
     check_inverse: bool = True,
-    verbose: bool = False,
 ) -> ValidationResult:
     """
     Validate a list of edges (as returned by _query_edge).
@@ -300,7 +297,6 @@ def validate_edge_list(
         graph: The CSRGraph to validate against
         edges: List of (subject_idx, predicate, object_idx) tuples
         check_inverse: If True, also check for inverse predicates in reverse direction
-        verbose: Print progress information
 
     Returns:
         ValidationResult with validation status and any errors found
@@ -340,8 +336,7 @@ def validate_edge_list(
         else:
             valid_count += 1
 
-    if verbose:
-        print(f"Validated {len(edges)} edges: {valid_count} valid, {len(errors)} errors")
+    logger.debug("Validated %s edges: %s valid, %s errors", len(edges), valid_count, len(errors))
 
     return ValidationResult(
         valid=len(errors) == 0,
