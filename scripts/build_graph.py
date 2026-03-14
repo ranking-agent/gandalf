@@ -3,7 +3,7 @@
 CLI tool to build knowledge graphs from JSONL files.
 
 Example:
-    kg-build --edges data/edges.jsonl --output data/graph.pkl
+    kg-build --edges data/edges.jsonl --output data/graph_mmap/
 """
 
 import argparse
@@ -20,7 +20,7 @@ def main():
         epilog="""
 Examples:
   # Basic usage
-  kg-build --edges edges.jsonl --nodes nodes.jsonl --output graph.pkl
+  kg-build --edges edges.jsonl --nodes nodes.jsonl --output graph_mmap/
         """,
     )
 
@@ -33,7 +33,7 @@ Examples:
     )
 
     parser.add_argument(
-        "--output", "-o", required=True, type=Path, help="Output path for pickled graph"
+        "--output", "-o", required=True, type=Path, help="Output directory for graph"
     )
 
     args = parser.parse_args()

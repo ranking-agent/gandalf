@@ -53,7 +53,7 @@ graph = build_graph_from_jsonl(
 )
 
 # Save for fast loading
-graph.save("data/processed/graph_filtered.pkl")
+graph.save_mmap("data/processed/graph_filtered")
 ```
 
 ### Query paths
@@ -61,7 +61,7 @@ graph.save("data/processed/graph_filtered.pkl")
 from gandalf import CSRGraph, find_paths
 
 # Load graph (takes ~1-2 seconds)
-graph = CSRGraph.load("data/processed/graph.pkl")
+graph = CSRGraph.load_mmap("data/processed/graph")
 
 # Find paths
 paths = find_paths(

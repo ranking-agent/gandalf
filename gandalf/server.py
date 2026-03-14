@@ -25,7 +25,7 @@ BMT = None
 
 # Configuration via environment variables
 GRAPH_PATH = os.environ.get("GANDALF_GRAPH_PATH", "../12_17_2025/gandalf_mmap")
-GRAPH_FORMAT = os.environ.get("GANDALF_GRAPH_FORMAT", "auto")  # "auto", "pickle", or "mmap"
+GRAPH_FORMAT = os.environ.get("GANDALF_GRAPH_FORMAT", "auto")  # "auto" or "mmap"
 
 
 # ---------------------------------------------------------------------------
@@ -53,27 +53,22 @@ def load_graph(path: str, format: str = "auto") -> CSRGraph:
     """Load graph from disk.
 
     Args:
-        path: Path to graph file (pickle) or directory (mmap)
-        format: "auto" (detect from path), "pickle", or "mmap"
+        path: Path to graph directory (mmap format)
+        format: "auto" (detect from path) or "mmap"
 
     Returns:
         Loaded CSRGraph
     """
     path = Path(path)
 
-    # Auto-detect format
     if format == "auto":
         if path.is_dir():
             format = "mmap"
-        elif path.suffix == ".pkl":
-            format = "pickle"
         else:
-            raise ValueError(f"Cannot auto-detect format for: {path}")
+            raise ValueError(f"Cannot auto-detect format for: {path}. Expected a directory.")
 
     if format == "mmap":
         return CSRGraph.load_mmap(path)
-    elif format == "pickle":
-        return CSRGraph.load(path)
     else:
         raise ValueError(f"Unknown format: {format}")
 

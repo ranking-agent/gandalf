@@ -3,7 +3,7 @@
 CLI tool to diagnose path explosion in knowledge graphs.
 
 Example:
-    kg-diagnose --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979"
+    kg-diagnose --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979"
 """
 
 import argparse
@@ -25,20 +25,20 @@ def main():
         epilog="""
 Examples:
   # Full diagnosis
-  gandalf-diagnose --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979"
+  gandalf-diagnose --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979"
 
   # Just path count analysis
-  gandalf-diagnose --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979" \\
+  gandalf-diagnose --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979" \\
       --skip-node-types --skip-predicates
 
   # Focus on predicates
-  gandalf-diagnose --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979" \\
+  gandalf-diagnose --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979" \\
       --skip-node-types --sample 10000
         """,
     )
 
     parser.add_argument(
-        "--graph", "-g", required=True, type=Path, help="Path to pickled graph file"
+        "--graph", "-g", required=True, type=Path, help="Path to graph directory"
     )
 
     parser.add_argument("--start", "-s", required=True, help="Start node ID")
@@ -71,7 +71,7 @@ Examples:
     print(f"Loading graph from {args.graph}\n")
 
     try:
-        graph = CSRGraph.load(str(args.graph))
+        graph = CSRGraph.load_mmap(str(args.graph))
     except Exception as e:
         print(f"Error loading graph: {e}", file=sys.stderr)
         sys.exit(1)
@@ -110,7 +110,7 @@ Examples:
             print("  3. Constrain intermediate node types")
             print()
             print("Example:")
-            print("  gandalf-build --edges edges.jsonl --output graph_filtered.pkl \\")
+            print("  gandalf-build --edges edges.jsonl --output graph_filtered/ \\")
             print("      --exclude-predicates biolink:subclass_of")
 
         elif total_paths > 10_000:

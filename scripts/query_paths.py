@@ -3,7 +3,7 @@
 CLI tool to query paths in knowledge graphs.
 
 Example:
-    gandalf-query --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979"
+    gandalf-query --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979"
 """
 
 import argparse
@@ -26,28 +26,28 @@ def main():
         epilog="""
 Examples:
   # Basic query
-  gandalf-query --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979"
+  gandalf-query --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979"
 
   # With property enrichment
-  gandalf-query --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979" \\
+  gandalf-query --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979" \\
       --with-properties --limit 100
 
   # Filter by predicates
-  gandalf-query --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979" \\
+  gandalf-query --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979" \\
       --allowed-predicates biolink:treats biolink:affects
 
   # Exclude predicates
-  gandalf-query --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979" \\
+  gandalf-query --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979" \\
       --excluded-predicates biolink:subclass_of
 
   # Save results
-  gandalf-query --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979" \\
+  gandalf-query --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979" \\
       --output results.json
         """,
     )
 
     parser.add_argument(
-        "--graph", "-g", required=True, type=Path, help="Path to pickled graph file"
+        "--graph", "-g", required=True, type=Path, help="Path to graph directory"
     )
 
     parser.add_argument("--start", "-s", required=True, help="Start node ID")
@@ -92,7 +92,7 @@ Examples:
         print(f"Loading graph from {args.graph}")
 
     try:
-        graph = CSRGraph.load(str(args.graph))
+        graph = CSRGraph.load_mmap(str(args.graph))
     except Exception as e:
         print(f"Error loading graph: {e}", file=sys.stderr)
         sys.exit(1)

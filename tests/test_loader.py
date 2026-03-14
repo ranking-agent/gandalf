@@ -239,43 +239,6 @@ class TestGraphStructure:
             assert predicate.startswith("biolink:")
 
 
-class TestGraphSaveLoad:
-    """Tests for graph serialization."""
-
-    def test_save_and_load_roundtrip(self, graph):
-        """Should correctly save and load graph."""
-        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
-            temp_path = f.name
-
-        try:
-            graph.save(temp_path)
-            loaded_graph = CSRGraph.load(temp_path)
-
-            # Verify key attributes match
-            assert loaded_graph.num_nodes == graph.num_nodes
-            assert len(loaded_graph.fwd_targets) == len(graph.fwd_targets)
-            assert loaded_graph.node_id_to_idx == graph.node_id_to_idx
-            assert loaded_graph.predicate_to_idx == graph.predicate_to_idx
-        finally:
-            os.unlink(temp_path)
-
-    def test_loaded_graph_neighbors_work(self, graph):
-        """Should be able to query neighbors after load."""
-        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
-            temp_path = f.name
-
-        try:
-            graph.save(temp_path)
-            loaded_graph = CSRGraph.load(temp_path)
-
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
-            neighbors = loaded_graph.neighbors(metformin_idx)
-            # Metformin has 11 outgoing edges (including duplicate s,o,p edges)
-            assert len(neighbors) == 11
-        finally:
-            os.unlink(temp_path)
-
-
 class TestGraphMmapSaveLoad:
     """Tests for memory-mapped graph serialization."""
 
