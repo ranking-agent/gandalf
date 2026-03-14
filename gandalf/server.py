@@ -3,6 +3,7 @@
 import gc
 import logging
 import os
+import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -57,7 +58,12 @@ class CustomORJSONResponse(JSONResponse):
     media_type = "application/json"
 
     def render(self, content) -> bytes:
-        return orjson.dumps(content, default=_orjson_default)
+        t0 = time.perf_counter()
+        data = orjson.dumps(content, default=_orjson_default)
+        dt_ms = (time.perf_counter() - t0) * 1000
+        size_kb = len(data) / 1024
+        logger.debug("orjson serialization: %.2f ms, %.1f KB", dt_ms, size_kb)
+        return data
 
 
 # ---------------------------------------------------------------------------
