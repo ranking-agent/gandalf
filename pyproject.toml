@@ -34,6 +34,7 @@ server = [
     "fastapi>=0.100.0",
     "httpx>=0.24.0",
     "orjson>=3.9.0",
+    "pydantic>=2.0.0",
     "uvicorn>=0.20.0",
 ]
 
@@ -41,3 +42,8 @@ server = [
 gandalf-build = "scripts.build_graph:main"
 gandalf-query = "scripts.query_paths:main"
 gandalf-diagnose = "scripts.diagnose:main"
+
+[tool.mypy]
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

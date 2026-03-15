@@ -100,6 +100,40 @@ The package uses a three-stage pipeline:
 
 This separation allows filtering millions of paths before expensive property lookups.
 
+## Configuration
+
+The server is configured via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GANDALF_GRAPH_PATH` | `../12_17_2025/gandalf_mmap` | Path to the mmap graph directory |
+| `GANDALF_GRAPH_FORMAT` | `auto` | Graph format (`auto` or `mmap`) |
+| `GANDALF_LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `GANDALF_LOG_FORMAT` | `text` | Log format (`text` for human-readable, `json` for structured) |
+| `GANDALF_CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins |
+| `GANDALF_MAX_REQUEST_SIZE_MB` | `10` | Maximum request body size in MB |
+| `GANDALF_RATE_LIMIT` | `100` | Maximum requests per minute per client IP (0 to disable) |
+
+## Docker
+
+```bash
+# Build the image
+docker build -t gandalf .
+
+# Run with a graph volume
+docker run -p 6429:6429 \
+  -v /path/to/graph:/data/graph \
+  -e GANDALF_GRAPH_PATH=/data/graph \
+  gandalf
+```
+
+## Health Check
+
+```bash
+curl http://localhost:6429/health
+# {"status": "ok", "graph_loaded": true, "node_count": 38456123, "edge_count": 127843456}
+```
+
 ## Releases
 Run this on the mmap folder:
 - `tar -czvf gandalf_mmap_<date>.tar.gz gandalf_mmap`

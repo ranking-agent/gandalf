@@ -125,10 +125,10 @@ lookup tables in `MockBMT`.
 
 ## Known Considerations
 
-- Project is in alpha stage (development focus)
-- Some debug print statements remain in library code
-- No CI/CD pipeline currently configured
 - Symmetric predicates are handled via BMT toolkit
+- CI/CD pipeline configured via `.github/workflows/ci.yml` (lint, test, typecheck)
+- Dockerfile available for containerized deployment
+- Server configurable via environment variables (see README.md)
 
 ## Best practice:
 

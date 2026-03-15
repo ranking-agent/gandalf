@@ -274,6 +274,7 @@ def _lookup_inner(graph, query, bmt, subclass, subclass_depth,
                      gc_summary['total_collections'], gc_summary['total_time'],
                      gc_summary['total_collected'])
 
+    logger.info(f"Returning {len(response['message']['results'])} results.")
     return response
 
 
