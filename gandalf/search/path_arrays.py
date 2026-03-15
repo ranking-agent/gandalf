@@ -10,18 +10,40 @@ class PathArrays:
     """
 
     __slots__ = (
-        'paths_nodes', 'paths_preds', 'paths_via_inverse',
-        'paths_fwd_edge_idx', 'node_cache', 'node_id_cache',
-        'idx_to_predicate',
-        'qnode_to_col', 'qedge_to_col', 'col_to_qnode', 'col_to_qedge',
-        'num_node_cols', 'num_edges', 'lightweight',
+        "paths_nodes",
+        "paths_preds",
+        "paths_via_inverse",
+        "paths_fwd_edge_idx",
+        "node_cache",
+        "node_id_cache",
+        "idx_to_predicate",
+        "qnode_to_col",
+        "qedge_to_col",
+        "col_to_qnode",
+        "col_to_qedge",
+        "num_node_cols",
+        "num_edges",
+        "lightweight",
     )
 
-    def __init__(self, *, paths_nodes, paths_preds, paths_via_inverse,
-                 paths_fwd_edge_idx, node_cache, node_id_cache,
-                 idx_to_predicate,
-                 qnode_to_col, qedge_to_col, col_to_qnode, col_to_qedge,
-                 num_node_cols, num_edges, lightweight):
+    def __init__(
+        self,
+        *,
+        paths_nodes,
+        paths_preds,
+        paths_via_inverse,
+        paths_fwd_edge_idx,
+        node_cache,
+        node_id_cache,
+        idx_to_predicate,
+        qnode_to_col,
+        qedge_to_col,
+        col_to_qnode,
+        col_to_qedge,
+        num_node_cols,
+        num_edges,
+        lightweight,
+    ):
         self.paths_nodes = paths_nodes
         self.paths_preds = paths_preds
         self.paths_via_inverse = paths_via_inverse

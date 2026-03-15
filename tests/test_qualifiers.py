@@ -13,7 +13,10 @@ class TestQualifierConstraintMatching:
     def test_no_constraints_returns_true(self):
         """No qualifier constraints should match any edge."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"}
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            }
         ]
         assert edge_matches_qualifier_constraints(edge_qualifiers, None) is True
         assert edge_matches_qualifier_constraints(edge_qualifiers, []) is True
@@ -21,7 +24,10 @@ class TestQualifierConstraintMatching:
     def test_empty_qualifier_set_matches_any_edge(self):
         """Empty qualifier_set should match any edge."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"}
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            }
         ]
         constraints = [{"qualifier_set": []}]
         assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is True
@@ -29,12 +35,18 @@ class TestQualifierConstraintMatching:
     def test_single_qualifier_match(self):
         """Edge with matching single qualifier should match."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"}
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            }
         ]
         constraints = [
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"}
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "activity",
+                    }
                 ]
             }
         ]
@@ -43,12 +55,18 @@ class TestQualifierConstraintMatching:
     def test_single_qualifier_no_match(self):
         """Edge with non-matching qualifier should not match."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"}
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            }
         ]
         constraints = [
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "abundance"}
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "abundance",
+                    }
                 ]
             }
         ]
@@ -57,14 +75,26 @@ class TestQualifierConstraintMatching:
     def test_multiple_qualifiers_all_match(self):
         """Edge with all required qualifiers should match (AND semantics within set)."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
-            {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "increased"},
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            },
+            {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "increased",
+            },
         ]
         constraints = [
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
-                    {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "increased"},
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "activity",
+                    },
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "qualifier_value": "increased",
+                    },
                 ]
             }
         ]
@@ -73,13 +103,22 @@ class TestQualifierConstraintMatching:
     def test_multiple_qualifiers_partial_match(self):
         """Edge with only some required qualifiers should not match."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            },
         ]
         constraints = [
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
-                    {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "increased"},
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "activity",
+                    },
+                    {
+                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                        "qualifier_value": "increased",
+                    },
                 ]
             }
         ]
@@ -88,17 +127,26 @@ class TestQualifierConstraintMatching:
     def test_or_semantics_between_qualifier_sets(self):
         """Edge matching any qualifier_set should match (OR semantics between sets)."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "abundance"},
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "abundance",
+            },
         ]
         constraints = [
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "activity",
+                    },
                 ]
             },
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "abundance"},
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "abundance",
+                    },
                 ]
             },
         ]
@@ -110,7 +158,10 @@ class TestQualifierConstraintMatching:
         constraints = [
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "activity",
+                    },
                 ]
             }
         ]
@@ -119,14 +170,26 @@ class TestQualifierConstraintMatching:
     def test_edge_with_extra_qualifiers_still_matches(self):
         """Edge with extra qualifiers beyond required should still match."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
-            {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "increased"},
-            {"qualifier_type_id": "biolink:qualified_predicate", "qualifier_value": "biolink:causes"},
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            },
+            {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "increased",
+            },
+            {
+                "qualifier_type_id": "biolink:qualified_predicate",
+                "qualifier_value": "biolink:causes",
+            },
         ]
         constraints = [
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "activity",
+                    },
                 ]
             }
         ]
@@ -135,7 +198,10 @@ class TestQualifierConstraintMatching:
     def test_expanded_format_single_value_match(self):
         """Expanded format with qualifier_values (plural) should match if edge has any value."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"}
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            }
         ]
         # Expanded format: qualifier_values (plural) with list of acceptable values
         constraints = [
@@ -143,7 +209,10 @@ class TestQualifierConstraintMatching:
                 "qualifier_set": [
                     {
                         "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_values": ["activity", "abundance"],  # Edge has "activity"
+                        "qualifier_values": [
+                            "activity",
+                            "abundance",
+                        ],  # Edge has "activity"
                     }
                 ]
             }
@@ -153,14 +222,20 @@ class TestQualifierConstraintMatching:
     def test_expanded_format_no_match(self):
         """Expanded format should not match if edge value is not in the list."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "expression"}
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "expression",
+            }
         ]
         constraints = [
             {
                 "qualifier_set": [
                     {
                         "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_values": ["activity", "abundance"],  # "expression" not in list
+                        "qualifier_values": [
+                            "activity",
+                            "abundance",
+                        ],  # "expression" not in list
                     }
                 ]
             }
@@ -170,8 +245,14 @@ class TestQualifierConstraintMatching:
     def test_expanded_format_multiple_types_all_match(self):
         """Expanded format with multiple qualifier types - all must match (AND semantics)."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
-            {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "increased"},
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            },
+            {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "increased",
+            },
         ]
         constraints = [
             {
@@ -192,8 +273,14 @@ class TestQualifierConstraintMatching:
     def test_expanded_format_multiple_types_partial_match(self):
         """Expanded format with multiple qualifier types - partial match should fail."""
         edge_qualifiers = [
-            {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
-            {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "unchanged"},
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            },
+            {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "unchanged",
+            },
         ]
         constraints = [
             {
@@ -204,7 +291,10 @@ class TestQualifierConstraintMatching:
                     },
                     {
                         "qualifier_type_id": "biolink:object_direction_qualifier",
-                        "qualifier_values": ["increased", "decreased"],  # "unchanged" not in list
+                        "qualifier_values": [
+                            "increased",
+                            "decreased",
+                        ],  # "unchanged" not in list
                     },
                 ]
             }
@@ -266,7 +356,9 @@ class TestQualifierExpander:
         assert len(result) == 1
         assert len(result[0]["qualifier_set"]) == 1
         expanded_qualifier = result[0]["qualifier_set"][0]
-        assert expanded_qualifier["qualifier_type_id"] == "biolink:object_aspect_qualifier"
+        assert (
+            expanded_qualifier["qualifier_type_id"] == "biolink:object_aspect_qualifier"
+        )
         assert "qualifier_values" in expanded_qualifier
         assert "activity" in expanded_qualifier["qualifier_values"]
 
@@ -276,12 +368,18 @@ class TestQualifierExpander:
         constraints = [
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"}
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "activity",
+                    }
                 ]
             },
             {
                 "qualifier_set": [
-                    {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "abundance"}
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "abundance",
+                    }
                 ]
             },
         ]
@@ -320,8 +418,14 @@ class TestLookupWithQualifierConstraints:
                             "qualifier_constraints": [
                                 {
                                     "qualifier_set": [
-                                        {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
-                                        {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "increased"},
+                                        {
+                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                            "qualifier_value": "activity",
+                                        },
+                                        {
+                                            "qualifier_type_id": "biolink:object_direction_qualifier",
+                                            "qualifier_value": "increased",
+                                        },
                                     ]
                                 }
                             ],
@@ -355,8 +459,14 @@ class TestLookupWithQualifierConstraints:
                             "qualifier_constraints": [
                                 {
                                     "qualifier_set": [
-                                        {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
-                                        {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "decreased"},
+                                        {
+                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                            "qualifier_value": "activity",
+                                        },
+                                        {
+                                            "qualifier_type_id": "biolink:object_direction_qualifier",
+                                            "qualifier_value": "decreased",
+                                        },
                                     ]
                                 }
                             ],
@@ -390,8 +500,14 @@ class TestLookupWithQualifierConstraints:
                             "qualifier_constraints": [
                                 {
                                     "qualifier_set": [
-                                        {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "abundance"},
-                                        {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "increased"},
+                                        {
+                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                            "qualifier_value": "abundance",
+                                        },
+                                        {
+                                            "qualifier_type_id": "biolink:object_direction_qualifier",
+                                            "qualifier_value": "increased",
+                                        },
                                     ]
                                 }
                             ],
@@ -425,13 +541,22 @@ class TestLookupWithQualifierConstraints:
                             "qualifier_constraints": [
                                 {
                                     "qualifier_set": [
-                                        {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "activity"},
-                                        {"qualifier_type_id": "biolink:object_direction_qualifier", "qualifier_value": "increased"},
+                                        {
+                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                            "qualifier_value": "activity",
+                                        },
+                                        {
+                                            "qualifier_type_id": "biolink:object_direction_qualifier",
+                                            "qualifier_value": "increased",
+                                        },
                                     ]
                                 },
                                 {
                                     "qualifier_set": [
-                                        {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "abundance"},
+                                        {
+                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                            "qualifier_value": "abundance",
+                                        },
                                     ]
                                 },
                             ],
@@ -493,7 +618,10 @@ class TestLookupWithQualifierConstraints:
                             "qualifier_constraints": [
                                 {
                                     "qualifier_set": [
-                                        {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": "expression"},
+                                        {
+                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                            "qualifier_value": "expression",
+                                        },
                                     ]
                                 }
                             ],

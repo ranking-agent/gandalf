@@ -53,6 +53,7 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
 # Internal helpers
 # ------------------------------------------------------------------
 
+
 def _enrich_nodes(nodes: dict, graph: CSRGraph) -> None:
     """Fill in missing properties for every node in the knowledge graph."""
     for node_id, node in nodes.items():
@@ -159,7 +160,10 @@ def _find_fwd_edge_idx(
 
     candidates: list[int] = []
     for pos in range(start, end):
-        if int(graph.fwd_targets[pos]) == obj_idx and int(graph.fwd_predicates[pos]) == pred_idx:
+        if (
+            int(graph.fwd_targets[pos]) == obj_idx
+            and int(graph.fwd_predicates[pos]) == pred_idx
+        ):
             candidates.append(pos)
 
     if not candidates:
@@ -182,7 +186,9 @@ def _find_fwd_edge_idx(
                     match = False
             if match and edge_sources is not None:
                 stored_sources = graph.edge_properties.get_sources(pos)
-                if _normalize_sources(stored_sources) != _normalize_sources(edge_sources):
+                if _normalize_sources(stored_sources) != _normalize_sources(
+                    edge_sources
+                ):
                     match = False
             if match:
                 return pos
@@ -202,6 +208,5 @@ def _normalize_quals(quals: list) -> frozenset:
 def _normalize_sources(sources: list) -> frozenset:
     """Create a hashable representation of a source list for comparison."""
     return frozenset(
-        (s.get("resource_id", ""), s.get("resource_role", ""))
-        for s in (sources or [])
+        (s.get("resource_id", ""), s.get("resource_role", "")) for s in (sources or [])
     )

@@ -22,13 +22,12 @@ LARGE_RESULT_PATH_THRESHOLD = int(
 # Maximum number of intermediate paths allowed during join operations.
 # When exceeded, paths are truncated to this limit and a warning is printed.
 # Set to 0 to disable the limit.
-MAX_PATH_LIMIT = int(
-    os.environ.get("GANDALF_MAX_PATH_LIMIT", "0")
-)
+MAX_PATH_LIMIT = int(os.environ.get("GANDALF_MAX_PATH_LIMIT", "0"))
 
 
-def reconstruct_paths(graph, query_graph, edge_results, edge_order,
-                      edge_inverse_preds=None):
+def reconstruct_paths(
+    graph, query_graph, edge_results, edge_order, edge_inverse_preds=None
+):
     """Reconstruct complete paths by iteratively joining edge results.
 
     Uses two-pass joins (count then fill) to avoid temporary Python lists
@@ -98,7 +97,9 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order,
     paths_fwd_edge_idx = np.zeros((num_paths, num_edges), dtype=np.int32)
 
     # Fill in first edge data
-    for i, (subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx) in enumerate(first_results):
+    for i, (subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx) in enumerate(
+        first_results
+    ):
         if via_inverse:
             paths_nodes[i, 0] = obj_idx
             paths_nodes[i, 1] = subj_idx
@@ -109,7 +110,9 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order,
         paths_via_inverse[i, 0] = via_inverse
         paths_fwd_edge_idx[i, 0] = fwd_edge_idx
 
-    logger.debug("  Starting with %s paths from edge '%s'", f"{num_paths:,}", first_edge_id)
+    logger.debug(
+        "  Starting with %s paths from edge '%s'", f"{num_paths:,}", first_edge_id
+    )
 
     # Iteratively join with remaining edges using two-pass approach:
     # Pass 1: count output rows, Pass 2: fill pre-allocated arrays.
@@ -119,8 +122,13 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order,
         subj_qnode = edge["subject"]
         obj_qnode = edge["object"]
 
-        logger.debug("  Join %s/%s: Adding edge '%s' (%s paths)...",
-                     join_idx, len(join_order) - 1, edge_id, f"{len(paths_nodes):,}")
+        logger.debug(
+            "  Join %s/%s: Adding edge '%s' (%s paths)...",
+            join_idx,
+            len(join_order) - 1,
+            edge_id,
+            f"{len(paths_nodes):,}",
+        )
 
         t_join_start = time.perf_counter()
 
@@ -133,36 +141,70 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order,
         normalized_edge_data = []
         for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
             if via_inverse:
-                normalized_edge_data.append((obj_idx, predicate, subj_idx, via_inverse, fwd_edge_idx))
+                normalized_edge_data.append(
+                    (obj_idx, predicate, subj_idx, via_inverse, fwd_edge_idx)
+                )
             else:
-                normalized_edge_data.append((subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx))
+                normalized_edge_data.append(
+                    (subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx)
+                )
         edge_data = normalized_edge_data
 
         if subj_in_paths and obj_in_paths:
-            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = _join_both_in_paths(
-                paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx,
-                edge_data, qnode_to_col[subj_qnode], qnode_to_col[obj_qnode],
-                join_idx, max_nodes, num_edges, get_pred_idx,
+            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = (
+                _join_both_in_paths(
+                    paths_nodes,
+                    paths_preds,
+                    paths_via_inverse,
+                    paths_fwd_edge_idx,
+                    edge_data,
+                    qnode_to_col[subj_qnode],
+                    qnode_to_col[obj_qnode],
+                    join_idx,
+                    max_nodes,
+                    num_edges,
+                    get_pred_idx,
+                )
             )
 
         elif subj_in_paths:
             if obj_qnode not in qnode_to_col:
                 qnode_to_col[obj_qnode] = num_node_cols
                 num_node_cols += 1
-            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = _join_on_subject(
-                paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx,
-                edge_data, qnode_to_col[subj_qnode], qnode_to_col[obj_qnode],
-                join_idx, max_nodes, num_edges, get_pred_idx,
+            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = (
+                _join_on_subject(
+                    paths_nodes,
+                    paths_preds,
+                    paths_via_inverse,
+                    paths_fwd_edge_idx,
+                    edge_data,
+                    qnode_to_col[subj_qnode],
+                    qnode_to_col[obj_qnode],
+                    join_idx,
+                    max_nodes,
+                    num_edges,
+                    get_pred_idx,
+                )
             )
 
         elif obj_in_paths:
             if subj_qnode not in qnode_to_col:
                 qnode_to_col[subj_qnode] = num_node_cols
                 num_node_cols += 1
-            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = _join_on_object(
-                paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx,
-                edge_data, qnode_to_col[subj_qnode], qnode_to_col[obj_qnode],
-                join_idx, max_nodes, num_edges, get_pred_idx,
+            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = (
+                _join_on_object(
+                    paths_nodes,
+                    paths_preds,
+                    paths_via_inverse,
+                    paths_fwd_edge_idx,
+                    edge_data,
+                    qnode_to_col[subj_qnode],
+                    qnode_to_col[obj_qnode],
+                    join_idx,
+                    max_nodes,
+                    num_edges,
+                    get_pred_idx,
+                )
             )
 
         else:
@@ -175,14 +217,26 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order,
             if obj_qnode not in qnode_to_col:
                 qnode_to_col[obj_qnode] = num_node_cols
                 num_node_cols += 1
-            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = _join_cartesian(
-                paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx,
-                edge_data, qnode_to_col[subj_qnode], qnode_to_col[obj_qnode],
-                join_idx, max_nodes, num_edges, get_pred_idx,
+            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = (
+                _join_cartesian(
+                    paths_nodes,
+                    paths_preds,
+                    paths_via_inverse,
+                    paths_fwd_edge_idx,
+                    edge_data,
+                    qnode_to_col[subj_qnode],
+                    qnode_to_col[obj_qnode],
+                    join_idx,
+                    max_nodes,
+                    num_edges,
+                    get_pred_idx,
+                )
             )
 
         t_join_end = time.perf_counter()
-        logger.debug(" -> %s paths (%.2fs)", f"{len(paths_nodes):,}", t_join_end - t_join_start)
+        logger.debug(
+            " -> %s paths (%.2fs)", f"{len(paths_nodes):,}", t_join_end - t_join_start
+        )
 
         if len(paths_nodes) == 0:
             logger.debug("  No valid paths found after joining edge '%s'", edge_id)
@@ -199,8 +253,11 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order,
     lightweight = num_paths > LARGE_RESULT_PATH_THRESHOLD
 
     if lightweight:
-        logger.debug("  %s paths (lightweight mode: >%s paths, skipping edge attributes)...",
-                     f"{num_paths:,}", f"{LARGE_RESULT_PATH_THRESHOLD:,}")
+        logger.debug(
+            "  %s paths (lightweight mode: >%s paths, skipping edge attributes)...",
+            f"{num_paths:,}",
+            f"{LARGE_RESULT_PATH_THRESHOLD:,}",
+        )
     else:
         logger.debug("  %s paths", f"{num_paths:,}")
 
@@ -220,8 +277,11 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order,
         node_id_cache[node_idx] = graph.get_node_id(node_idx)
 
     t_cache_end = time.perf_counter()
-    logger.debug("  Cached properties for %s unique nodes (%.2fs)",
-                 f"{len(unique_node_indices):,}", t_cache_end - t_cache_start)
+    logger.debug(
+        "  Cached properties for %s unique nodes (%.2fs)",
+        f"{len(unique_node_indices):,}",
+        t_cache_end - t_cache_start,
+    )
 
     # Build reverse mappings
     col_to_qnode = {v: k for k, v in qnode_to_col.items()}
@@ -246,22 +306,40 @@ def reconstruct_paths(graph, query_graph, edge_results, edge_order,
 
 
 def _join_both_in_paths(
-    paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx,
-    edge_data, subj_col, obj_col, join_idx, max_nodes, num_edges, get_pred_idx,
+    paths_nodes,
+    paths_preds,
+    paths_via_inverse,
+    paths_fwd_edge_idx,
+    edge_data,
+    subj_col,
+    obj_col,
+    join_idx,
+    max_nodes,
+    num_edges,
+    get_pred_idx,
 ):
     """Join when both nodes already in path - validate consistency."""
     edge_index = defaultdict(list)
     for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
-        edge_index[(subj_idx, obj_idx)].append((get_pred_idx(predicate), via_inverse, fwd_edge_idx))
+        edge_index[(subj_idx, obj_idx)].append(
+            (get_pred_idx(predicate), via_inverse, fwd_edge_idx)
+        )
 
     # Pass 1: Count output rows
     output_count = 0
     for path_idx in range(len(paths_nodes)):
-        key = (int(paths_nodes[path_idx, subj_col]), int(paths_nodes[path_idx, obj_col]))
+        key = (
+            int(paths_nodes[path_idx, subj_col]),
+            int(paths_nodes[path_idx, obj_col]),
+        )
         if key in edge_index:
             output_count += len(edge_index[key])
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        logger.warning("Truncating %s intermediate paths to %s", f"{output_count:,}", f"{MAX_PATH_LIMIT:,}")
+        logger.warning(
+            "Truncating %s intermediate paths to %s",
+            f"{output_count:,}",
+            f"{MAX_PATH_LIMIT:,}",
+        )
         output_count = MAX_PATH_LIMIT
 
     # Pass 2: Fill pre-allocated arrays
@@ -273,7 +351,10 @@ def _join_both_in_paths(
     for path_idx in range(len(paths_nodes)):
         if w >= output_count:
             break
-        key = (int(paths_nodes[path_idx, subj_col]), int(paths_nodes[path_idx, obj_col]))
+        key = (
+            int(paths_nodes[path_idx, subj_col]),
+            int(paths_nodes[path_idx, obj_col]),
+        )
         if key in edge_index:
             for pred_idx, via_inverse, fwd_edge_idx in edge_index[key]:
                 if w >= output_count:
@@ -291,13 +372,24 @@ def _join_both_in_paths(
 
 
 def _join_on_subject(
-    paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx,
-    edge_data, subj_col, obj_col, join_idx, max_nodes, num_edges, get_pred_idx,
+    paths_nodes,
+    paths_preds,
+    paths_via_inverse,
+    paths_fwd_edge_idx,
+    edge_data,
+    subj_col,
+    obj_col,
+    join_idx,
+    max_nodes,
+    num_edges,
+    get_pred_idx,
 ):
     """Join on subject node, add object node."""
     edge_index = defaultdict(list)
     for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
-        edge_index[subj_idx].append((get_pred_idx(predicate), obj_idx, via_inverse, fwd_edge_idx))
+        edge_index[subj_idx].append(
+            (get_pred_idx(predicate), obj_idx, via_inverse, fwd_edge_idx)
+        )
 
     # Pass 1: Count
     output_count = 0
@@ -306,7 +398,11 @@ def _join_on_subject(
         if sidx in edge_index:
             output_count += len(edge_index[sidx])
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        logger.warning("Truncating %s intermediate paths to %s", f"{output_count:,}", f"{MAX_PATH_LIMIT:,}")
+        logger.warning(
+            "Truncating %s intermediate paths to %s",
+            f"{output_count:,}",
+            f"{MAX_PATH_LIMIT:,}",
+        )
         output_count = MAX_PATH_LIMIT
 
     # Pass 2: Fill
@@ -337,13 +433,24 @@ def _join_on_subject(
 
 
 def _join_on_object(
-    paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx,
-    edge_data, subj_col, obj_col, join_idx, max_nodes, num_edges, get_pred_idx,
+    paths_nodes,
+    paths_preds,
+    paths_via_inverse,
+    paths_fwd_edge_idx,
+    edge_data,
+    subj_col,
+    obj_col,
+    join_idx,
+    max_nodes,
+    num_edges,
+    get_pred_idx,
 ):
     """Join on object node, add subject node."""
     edge_index = defaultdict(list)
     for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
-        edge_index[obj_idx].append((subj_idx, get_pred_idx(predicate), via_inverse, fwd_edge_idx))
+        edge_index[obj_idx].append(
+            (subj_idx, get_pred_idx(predicate), via_inverse, fwd_edge_idx)
+        )
 
     # Pass 1: Count
     output_count = 0
@@ -352,7 +459,11 @@ def _join_on_object(
         if oidx in edge_index:
             output_count += len(edge_index[oidx])
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        logger.warning("Truncating %s intermediate paths to %s", f"{output_count:,}", f"{MAX_PATH_LIMIT:,}")
+        logger.warning(
+            "Truncating %s intermediate paths to %s",
+            f"{output_count:,}",
+            f"{MAX_PATH_LIMIT:,}",
+        )
         output_count = MAX_PATH_LIMIT
 
     # Pass 2: Fill
@@ -383,13 +494,26 @@ def _join_on_object(
 
 
 def _join_cartesian(
-    paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx,
-    edge_data, subj_col, obj_col, join_idx, max_nodes, num_edges, get_pred_idx,
+    paths_nodes,
+    paths_preds,
+    paths_via_inverse,
+    paths_fwd_edge_idx,
+    edge_data,
+    subj_col,
+    obj_col,
+    join_idx,
+    max_nodes,
+    num_edges,
+    get_pred_idx,
 ):
     """Neither node in paths - cartesian product."""
     output_count = len(paths_nodes) * len(edge_data)
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        logger.warning("Truncating %s intermediate paths to %s", f"{output_count:,}", f"{MAX_PATH_LIMIT:,}")
+        logger.warning(
+            "Truncating %s intermediate paths to %s",
+            f"{output_count:,}",
+            f"{MAX_PATH_LIMIT:,}",
+        )
         output_count = MAX_PATH_LIMIT
 
     new_nodes = np.empty((output_count, max_nodes), dtype=np.int32)

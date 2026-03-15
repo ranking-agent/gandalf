@@ -34,7 +34,7 @@ def _return_with_properties(
             "name": graph.get_node_property(start_idx, "name"),
         }
         e0 = {
-            "predicate": graph.get_edge_property(start_idx, n1_idx, "predicate"),
+            "predicate": pred_01,
         }
         n1 = {
             "id": graph.get_node_id(n1_idx),
@@ -42,7 +42,7 @@ def _return_with_properties(
             "name": graph.get_node_property(n1_idx, "name"),
         }
         e1 = {
-            "predicate": graph.get_edge_property(n1_idx, n2_idx, "predicate"),
+            "predicate": pred_12,
         }
         n2 = {
             "id": graph.get_node_id(n2_idx),
@@ -50,31 +50,33 @@ def _return_with_properties(
             "name": graph.get_node_property(n2_idx, "name"),
         }
         e2 = {
-            "predicate": graph.get_edge_property(n2_idx, end_idx, "predicate"),
+            "predicate": pred_23,
         }
         n3 = {
             "id": graph.get_node_id(end_idx),
             "category": graph.get_node_property(end_idx, "category", []),
             "name": graph.get_node_property(end_idx, "name"),
         }
-        hydrated_paths.append({
-            "n0": n0,
-            "e0": e0,
-            "n1": n1,
-            "e1": e1,
-            "n2": n2,
-            "e2": e2,
-            "n3": n3,
-        })
+        hydrated_paths.append(
+            {
+                "n0": n0,
+                "e0": e0,
+                "n1": n1,
+                "e1": e1,
+                "n2": n2,
+                "e2": e2,
+                "n3": n3,
+            }
+        )
     logger.debug(
-        "Done! Hydrating %s paths took %s", f"{len(hydrated_paths):,}", time.time() - start_time
+        "Done! Hydrating %s paths took %s",
+        f"{len(hydrated_paths):,}",
+        time.time() - start_time,
     )
     return hydrated_paths
 
 
-def find_3hop_paths_with_properties(
-    graph: CSRGraph, start_id, end_id, max_paths=None
-):
+def find_3hop_paths_with_properties(graph: CSRGraph, start_id, end_id, max_paths=None):
     """Find all 3-hop paths between two nodes with edge and node properties.
 
     Returns list of dicts with path information.
@@ -95,7 +97,9 @@ def find_3hop_paths_with_properties(
     if start_idx == end_idx:
         return []
 
-    logger.debug("Start node '%s' has degree: %s", start_id, f"{graph.degree(start_idx):,}")
+    logger.debug(
+        "Start node '%s' has degree: %s", start_id, f"{graph.degree(start_idx):,}"
+    )
     logger.debug("End node '%s' has degree: %s", end_id, f"{graph.degree(end_idx):,}")
 
     # Get raw paths (as indices)
@@ -110,7 +114,9 @@ def find_3hop_paths_with_properties(
 
     # Limit paths if requested
     if max_paths and len(paths_idx) > max_paths:
-        logger.debug("Limiting to first %s paths for property enrichment", f"{max_paths:,}")
+        logger.debug(
+            "Limiting to first %s paths for property enrichment", f"{max_paths:,}"
+        )
         paths_idx = paths_idx[:max_paths]
 
     return _return_with_properties(graph, paths_idx)
@@ -187,12 +193,14 @@ def _do_unfiltered_search(graph: CSRGraph, start_idx, end_idx):
         return []
 
     # Assemble full paths (vectorized)
-    paths = np.column_stack([
-        np.full(len(src_n1), start_idx, dtype=np.int32),
-        src_n1,
-        dst_n2,
-        np.full(len(src_n1), end_idx, dtype=np.int32),
-    ])
+    paths = np.column_stack(
+        [
+            np.full(len(src_n1), start_idx, dtype=np.int32),
+            src_n1,
+            dst_n2,
+            np.full(len(src_n1), end_idx, dtype=np.int32),
+        ]
+    )
 
     return paths.tolist()
 
@@ -230,7 +238,9 @@ def find_3hop_paths_filtered(
             return False
         return True
 
-    logger.debug("Start node '%s' has degree: %s", start_id, f"{graph.degree(start_idx):,}")
+    logger.debug(
+        "Start node '%s' has degree: %s", start_id, f"{graph.degree(start_idx):,}"
+    )
     logger.debug("End node '%s' has degree: %s", end_id, f"{graph.degree(end_idx):,}")
 
     # Forward: start -> n1 (with filtering)
@@ -262,7 +272,7 @@ def find_3hop_paths_filtered(
     logger.debug("Nodes reachable in 2 hops: %s", f"{len(forward_paths):,}")
 
     # Check which n2 nodes connect to end
-    backward_connections = {}  # n2_idx -> predicate (n2 -> end)
+    backward_connections: dict[int, list] = {}  # n2_idx -> predicate (n2 -> end)
 
     for n2_idx in forward_paths.keys():
         # Get all edges from n2 to end
@@ -275,7 +285,8 @@ def find_3hop_paths_filtered(
                 backward_connections[n2_idx].append(predicate)
 
     logger.debug(
-        "After filtering edge 3: %s nodes connect to end", f"{len(backward_connections):,}"
+        "After filtering edge 3: %s nodes connect to end",
+        f"{len(backward_connections):,}",
     )
 
     # Find intersection and build paths
@@ -315,15 +326,17 @@ def find_3hop_paths_filtered(
                         "category": graph.get_node_property(end_idx, "category", []),
                         "name": graph.get_node_property(end_idx, "name"),
                     }
-                    paths.append({
-                        "n0": n0,
-                        "e0": e0,
-                        "n1": n1,
-                        "e1": e1,
-                        "n2": n2,
-                        "e2": e2,
-                        "n3": n3,
-                    })
+                    paths.append(
+                        {
+                            "n0": n0,
+                            "e0": e0,
+                            "n1": n1,
+                            "e1": e1,
+                            "n2": n2,
+                            "e2": e2,
+                            "n3": n3,
+                        }
+                    )
 
     logger.debug("Found %s filtered paths", f"{len(paths):,}")
 

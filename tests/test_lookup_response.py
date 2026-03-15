@@ -147,7 +147,9 @@ class TestLookupResponseStructure:
         # Edge bindings should be a list containing multiple edges
         edge_bindings = result["analyses"][0]["edge_bindings"]["e0"]
         assert isinstance(edge_bindings, list)
-        assert len(edge_bindings) == 4  # treats, ameliorates_condition, preventative_for_condition
+        assert (
+            len(edge_bindings) == 4
+        )  # treats, ameliorates_condition, preventative_for_condition
 
 
 class TestMetforminType2DiabetesEdges:

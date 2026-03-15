@@ -136,14 +136,10 @@ class MockBMT:
             return _MockElement(canonical=False)
         return None
 
-    def get_descendants(
-        self, predicate: str, formatted: bool = False
-    ) -> list[str]:
+    def get_descendants(self, predicate: str, formatted: bool = False) -> list[str]:
         return list(self._DESCENDANTS.get(predicate, []))
 
-    def is_permissible_value_of_enum(
-        self, enum_name: str, value: str
-    ) -> bool:
+    def is_permissible_value_of_enum(self, enum_name: str, value: str) -> bool:
         return value in self._ENUM_VALUES.get(enum_name, set())
 
     def get_permissible_value_descendants(

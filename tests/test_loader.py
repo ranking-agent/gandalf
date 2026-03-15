@@ -8,7 +8,6 @@ import pytest
 from gandalf.loader import build_graph_from_jsonl
 from gandalf.graph import CSRGraph
 
-
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 NODES_FILE = os.path.join(FIXTURES_DIR, "nodes.jsonl")
 EDGES_FILE = os.path.join(FIXTURES_DIR, "edges.jsonl")
@@ -94,7 +93,11 @@ class TestNodeProperties:
         """Should store information_content as a TRAPI attribute."""
         diabetes_idx = graph.node_id_to_idx["MONDO:0005148"]
         attributes = graph.get_node_property(diabetes_idx, "attributes")
-        ic_attrs = [a for a in attributes if a["original_attribute_name"] == "information_content"]
+        ic_attrs = [
+            a
+            for a in attributes
+            if a["original_attribute_name"] == "information_content"
+        ]
         assert len(ic_attrs) == 1
         assert ic_attrs[0]["value"] == pytest.approx(78.2)
         assert ic_attrs[0]["original_attribute_name"] == "information_content"
@@ -103,7 +106,11 @@ class TestNodeProperties:
         """Should store equivalent_identifiers as a TRAPI attribute."""
         metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
         attributes = graph.get_node_property(metformin_idx, "attributes")
-        eq_attrs = [a for a in attributes if a["original_attribute_name"] == "equivalent_identifiers"]
+        eq_attrs = [
+            a
+            for a in attributes
+            if a["original_attribute_name"] == "equivalent_identifiers"
+        ]
         assert len(eq_attrs) == 1
         assert "DRUGBANK:DB00331" in eq_attrs[0]["value"]
         assert eq_attrs[0]["original_attribute_name"] == "equivalent_identifiers"
@@ -130,7 +137,9 @@ class TestEdgeProperties:
         """Should correctly store predicate in edge properties."""
         src_idx = graph.node_id_to_idx["CHEBI:6801"]
         dst_idx = graph.node_id_to_idx["MONDO:0005148"]
-        predicate = graph.get_edge_property(src_idx, dst_idx, "biolink:treats", "predicate")
+        predicate = graph.get_edge_property(
+            src_idx, dst_idx, "biolink:treats", "predicate"
+        )
         assert predicate == "biolink:treats"
 
     def test_edge_source_property(self, graph):
@@ -164,8 +173,11 @@ class TestEdgeProperties:
         src_idx = graph.node_id_to_idx["CHEBI:6801"]
         dst_idx = graph.node_id_to_idx["NCBIGene:5468"]
         props = graph.get_all_edge_properties(src_idx, dst_idx, "biolink:affects")
-        pub_attrs = [a for a in props.get("attributes", [])
-                     if a["attribute_type_id"] == "biolink:publications"]
+        pub_attrs = [
+            a
+            for a in props.get("attributes", [])
+            if a["attribute_type_id"] == "biolink:publications"
+        ]
         assert len(pub_attrs) == 1
         assert "PMID:23456789" in pub_attrs[0]["value"]
         assert pub_attrs[0]["original_attribute_name"] == "publications"
@@ -263,7 +275,9 @@ class TestGraphMmapSaveLoad:
                 "edge_property_pools.pkl",
             ]
             for filename in expected_files:
-                assert os.path.exists(os.path.join(temp_dir, filename)), f"Missing {filename}"
+                assert os.path.exists(
+                    os.path.join(temp_dir, filename)
+                ), f"Missing {filename}"
 
     def test_mmap_save_and_load_roundtrip(self, graph):
         """Should correctly save and load graph in mmap format."""
@@ -358,7 +372,11 @@ class TestDuplicateEdges:
         # Each edge should have different sources
         source_ids = set()
         for _pred, props in treats_edges:
-            primary = [s for s in props["sources"] if s["resource_role"] == "primary_knowledge_source"]
+            primary = [
+                s
+                for s in props["sources"]
+                if s["resource_role"] == "primary_knowledge_source"
+            ]
             assert len(primary) == 1
             source_ids.add(primary[0]["resource_id"])
 
@@ -378,7 +396,9 @@ class TestDuplicateEdges:
         qualifier_combos = set()
         for _pred, props in affects_edges:
             quals = props.get("qualifiers", [])
-            combo = tuple(sorted((q["qualifier_type_id"], q["qualifier_value"]) for q in quals))
+            combo = tuple(
+                sorted((q["qualifier_type_id"], q["qualifier_value"]) for q in quals)
+            )
             qualifier_combos.add(combo)
 
         assert len(qualifier_combos) == 2  # Two distinct qualifier combinations
@@ -390,7 +410,9 @@ class TestDuplicateEdges:
 
         treats_results = [
             (target, pred, props, eidx)
-            for target, pred, props, eidx in graph.neighbors_with_properties(metformin_idx)
+            for target, pred, props, eidx in graph.neighbors_with_properties(
+                metformin_idx
+            )
             if target == diabetes_idx and pred == "biolink:treats"
         ]
         assert len(treats_results) == 2
@@ -404,14 +426,20 @@ class TestDuplicateEdges:
 
         treats_results = [
             (src, pred, props, eidx)
-            for src, pred, props, eidx in graph.incoming_neighbors_with_properties(diabetes_idx)
+            for src, pred, props, eidx in graph.incoming_neighbors_with_properties(
+                diabetes_idx
+            )
             if src == metformin_idx and pred == "biolink:treats"
         ]
         assert len(treats_results) == 2
         # Each should have correct, distinct properties
         source_ids = set()
         for _, _, props, _ in treats_results:
-            primary = [s for s in props["sources"] if s["resource_role"] == "primary_knowledge_source"]
+            primary = [
+                s
+                for s in props["sources"]
+                if s["resource_role"] == "primary_knowledge_source"
+            ]
             source_ids.add(primary[0]["resource_id"])
         assert source_ids == {"infores:drugcentral", "infores:chembl"}
 
@@ -421,7 +449,10 @@ class TestDuplicateEdges:
 
         edge_indices = []
         for target, pred, props, eidx in graph.neighbors_with_properties(metformin_idx):
-            if pred == "biolink:treats" and graph.idx_to_node_id[target] == "MONDO:0005148":
+            if (
+                pred == "biolink:treats"
+                and graph.idx_to_node_id[target] == "MONDO:0005148"
+            ):
                 edge_indices.append(eidx)
 
         assert len(edge_indices) == 2
@@ -440,13 +471,19 @@ class TestDuplicateEdges:
 
             treats_results = [
                 (src, pred, props, eidx)
-                for src, pred, props, eidx in loaded.incoming_neighbors_with_properties(diabetes_idx)
+                for src, pred, props, eidx in loaded.incoming_neighbors_with_properties(
+                    diabetes_idx
+                )
                 if src == metformin_idx and pred == "biolink:treats"
             ]
             assert len(treats_results) == 2
             source_ids = set()
             for _, _, props, _ in treats_results:
-                primary = [s for s in props["sources"] if s["resource_role"] == "primary_knowledge_source"]
+                primary = [
+                    s
+                    for s in props["sources"]
+                    if s["resource_role"] == "primary_knowledge_source"
+                ]
                 source_ids.add(primary[0]["resource_id"])
             assert source_ids == {"infores:drugcentral", "infores:chembl"}
 
@@ -457,7 +494,9 @@ class TestEdgeCases:
     def test_nonexistent_predicate_filter_returns_empty(self, graph):
         """Should return empty array for nonexistent predicate."""
         metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
-        neighbors = graph.neighbors(metformin_idx, predicate_filter="biolink:nonexistent")
+        neighbors = graph.neighbors(
+            metformin_idx, predicate_filter="biolink:nonexistent"
+        )
         assert len(neighbors) == 0
 
     def test_node_with_no_outgoing_edges(self, graph):
@@ -474,5 +513,7 @@ class TestEdgeCases:
     def test_get_node_property_default_value(self, graph):
         """Should return default for missing property."""
         metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
-        value = graph.get_node_property(metformin_idx, "nonexistent_key", default="default")
+        value = graph.get_node_property(
+            metformin_idx, "nonexistent_key", default="default"
+        )
         assert value == "default"

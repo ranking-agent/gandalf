@@ -125,12 +125,12 @@ Examples:
                 graph,
                 args.start,
                 args.end,
-                allowed_predicates=set(args.allowed_predicates)
-                if args.allowed_predicates
-                else None,
-                excluded_predicates=set(args.excluded_predicates)
-                if args.excluded_predicates
-                else None,
+                allowed_predicates=(
+                    set(args.allowed_predicates) if args.allowed_predicates else None
+                ),
+                excluded_predicates=(
+                    set(args.excluded_predicates) if args.excluded_predicates else None
+                ),
             )
         else:
             # Standard search
@@ -193,7 +193,9 @@ Examples:
             else:
                 # Simple format for ID-only paths
                 for i, path in enumerate(paths[:20], 1):  # Show first 20
-                    print(f"{i}. {' -> '.join([path['n0']['id'], path['n1']['id'], path['n2']['id'], path['n3']['id']])}")
+                    print(
+                        f"{i}. {' -> '.join([path['n0']['id'], path['n1']['id'], path['n2']['id'], path['n3']['id']])}"
+                    )
 
                 if len(paths) > 20:
                     print(f"... and {len(paths) - 20:,} more paths")

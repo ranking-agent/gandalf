@@ -20,7 +20,6 @@ from gandalf.models import (
     WorkflowStep,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -270,7 +269,9 @@ class TestResponseModels:
     """Tests for response documentation models."""
 
     def test_node_response(self):
-        r = NodeResponse(id="CHEBI:6801", name="Metformin", categories=["biolink:SmallMolecule"])
+        r = NodeResponse(
+            id="CHEBI:6801", name="Metformin", categories=["biolink:SmallMolecule"]
+        )
         assert r.id == "CHEBI:6801"
 
     def test_node_response_extra_fields(self):

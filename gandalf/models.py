@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 # ---------------------------------------------------------------------------
 # Query graph components (request validation)
 # ---------------------------------------------------------------------------
@@ -51,8 +50,7 @@ class QEdge(BaseModel):
     object: str = Field(..., description="Key of the object node in the query graph")
     predicates: Optional[List[str]] = Field(
         None,
-        description="Biolink predicates to filter edges "
-        "(e.g. 'biolink:treats')",
+        description="Biolink predicates to filter edges " "(e.g. 'biolink:treats')",
     )
     qualifier_constraints: Optional[List[Dict[str, Any]]] = Field(
         None, description="Qualifier constraints for edge filtering"
@@ -205,10 +203,12 @@ class TRAPIQuery(BaseModel):
     subclass_depth: Optional[int] = Field(
         None, description="Maximum subclass_of hops to traverse (default 1)"
     )
-    log_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = Field(
-        None,
-        description="Set logging level for this request "
-        "(e.g. 'DEBUG' to see serialization timings)",
+    log_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = (
+        Field(
+            None,
+            description="Set logging level for this request "
+            "(e.g. 'DEBUG' to see serialization timings)",
+        )
     )
 
     model_config = ConfigDict(
@@ -371,6 +371,4 @@ class MetadataResponse(BaseModel):
     predicates: Dict[str, int] = Field(
         ..., description="Predicate → edge count mapping"
     )
-    categories: Dict[str, int] = Field(
-        ..., description="Category → node count mapping"
-    )
+    categories: Dict[str, int] = Field(..., description="Category → node count mapping")

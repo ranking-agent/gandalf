@@ -22,7 +22,12 @@ import msgpack
 import numpy as np
 
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
-from gandalf.lmdb_store import LMDBPropertyStore, _INITIAL_WRITE_MAP_SIZE, _encode_key, _put_with_resize
+from gandalf.lmdb_store import (
+    LMDBPropertyStore,
+    _INITIAL_WRITE_MAP_SIZE,
+    _encode_key,
+    _put_with_resize,
+)
 
 import logging
 import lmdb
@@ -32,7 +37,12 @@ logger = logging.getLogger(__name__)
 
 # Fields that are structural (not stored as properties)
 _CORE_FIELDS = {
-    "id", "category", "subject", "object", "predicate", "sources",
+    "id",
+    "category",
+    "subject",
+    "object",
+    "predicate",
+    "sources",
 }
 
 # Node fields that become top-level TRAPI Node properties (not attributes)
@@ -73,15 +83,9 @@ def _extract_sources(data):
     # Find the top of the source chain: sources whose resource_id is NOT
     # referenced in any other source's upstream_resource_ids.  These are the
     # "leaf" providers that no one else aggregates from yet.
-    all_upstream = {
-        uid
-        for s in sources
-        for uid in s["upstream_resource_ids"]
-    }
+    all_upstream = {uid for s in sources for uid in s["upstream_resource_ids"]}
     top_ids = [
-        s["resource_id"]
-        for s in sources
-        if s["resource_id"] not in all_upstream
+        s["resource_id"] for s in sources if s["resource_id"] not in all_upstream
     ]
 
     # Prepend gandalf as aggregator_knowledge_source
@@ -102,10 +106,12 @@ def _extract_qualifiers(data):
     qualifiers = []
     for field in _QUALIFIER_FIELDS:
         if field in data:
-            qualifiers.append({
-                "qualifier_type_id": f"biolink:{field}",
-                "qualifier_value": data[field],
-            })
+            qualifiers.append(
+                {
+                    "qualifier_type_id": f"biolink:{field}",
+                    "qualifier_value": data[field],
+                }
+            )
 
     return qualifiers
 
@@ -120,11 +126,13 @@ def _extract_attributes(data):
     for field, value in data.items():
         if field in _CORE_FIELDS or field in _QUALIFIER_FIELDS or field == "qualifiers":
             continue
-        attributes.append({
-            "attribute_type_id": f"biolink:{field}",
-            "value": value,
-            "original_attribute_name": field,
-        })
+        attributes.append(
+            {
+                "attribute_type_id": f"biolink:{field}",
+                "value": value,
+                "original_attribute_name": field,
+            }
+        )
     return attributes
 
 
@@ -139,11 +147,13 @@ def _extract_node_attributes(node_data):
     for field, value in node_data.items():
         if field in _CORE_NODE_FIELDS:
             continue
-        attributes.append({
-            "attribute_type_id": "biolink:Attribute",
-            "value": value,
-            "original_attribute_name": field,
-        })
+        attributes.append(
+            {
+                "attribute_type_id": "biolink:Attribute",
+                "value": value,
+                "original_attribute_name": field,
+            }
+        )
     return attributes
 
 
@@ -179,8 +189,12 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
             if edge_count % 1_000_000 == 0:
                 logger.debug("  %s edges scanned...", f"{edge_count:,}")
 
-    logger.info("  Found %s unique nodes, %s predicates, %s edges",
-                f"{len(node_ids):,}", f"{len(predicates):,}", f"{edge_count:,}")
+    logger.info(
+        "  Found %s unique nodes, %s predicates, %s edges",
+        f"{len(node_ids):,}",
+        f"{len(predicates):,}",
+        f"{edge_count:,}",
+    )
 
     # Build vocabulary mappings
     node_id_to_idx = {nid: idx for idx, nid in enumerate(sorted(node_ids))}
@@ -209,7 +223,9 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # =================================================================
     # Pass 2: Build arrays + dedup store + temp LMDB
     # =================================================================
-    logger.info("Pass 2: Building arrays and property stores (%s edges)...", f"{edge_count:,}")
+    logger.info(
+        "Pass 2: Building arrays and property stores (%s edges)...", f"{edge_count:,}"
+    )
 
     # Pre-allocate numpy arrays
     src_indices = np.empty(edge_count, dtype=np.int32)
@@ -273,7 +289,9 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
                     txn = temp_env.begin(write=True)
 
                 if (i + 1) % 1_000_000 == 0:
-                    logger.debug("  %s/%s edges processed...", f"{i + 1:,}", f"{edge_count:,}")
+                    logger.debug(
+                        "  %s/%s edges processed...", f"{i + 1:,}", f"{edge_count:,}"
+                    )
 
         txn.commit()
     except BaseException:
@@ -310,9 +328,12 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     del prop_builder
 
     stats = edge_properties.dedup_stats()
-    logger.debug("  Edge property dedup: %s edges -> %s unique source configs, %s unique qualifier combos",
-                 f"{stats['total_edges']:,}", f"{stats['unique_sources']:,}",
-                 f"{stats['unique_qualifiers']:,}")
+    logger.debug(
+        "  Edge property dedup: %s edges -> %s unique source configs, %s unique qualifier combos",
+        f"{stats['total_edges']:,}",
+        f"{stats['unique_sources']:,}",
+        f"{stats['unique_qualifiers']:,}",
+    )
 
     # Rewrite temp LMDB in CSR-sorted order → final LMDB
     # This is the expensive build-time step, but ensures query-time
@@ -402,10 +423,14 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
         logger.info("  Avg degree (sampled): %.1f", np.mean(degrees))
         logger.info("  Max degree (sampled): %s", np.max(degrees))
         memory_mb = (
-            graph.fwd_targets.nbytes
-            + graph.fwd_offsets.nbytes
-            + graph.fwd_predicates.nbytes
-        ) / 1024 / 1024
+            (
+                graph.fwd_targets.nbytes
+                + graph.fwd_offsets.nbytes
+                + graph.fwd_predicates.nbytes
+            )
+            / 1024
+            / 1024
+        )
         logger.info("  CSR memory usage: ~%.1f MB", memory_mb)
 
     graph.build_metadata()

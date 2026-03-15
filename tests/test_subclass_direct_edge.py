@@ -60,13 +60,11 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
 
         kg_edges = response["message"]["knowledge_graph"]["edges"]
         subclass_edges = [
-            e for e in kg_edges.values()
-            if e["predicate"] == "biolink:subclass_of"
+            e for e in kg_edges.values() if e["predicate"] == "biolink:subclass_of"
         ]
         assert len(subclass_edges) == 0, (
             f"Expected no subclass_of edges in KG when direct edge exists, "
@@ -97,8 +95,7 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
 
         kg_nodes = set(response["message"]["knowledge_graph"]["nodes"].keys())
         assert "MONDO:0005148" not in kg_nodes, (
@@ -126,8 +123,7 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
 
         inferred = _get_inferred_edges(response)
         assert len(inferred) == 0, (
@@ -155,8 +151,7 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
 
         aux_graphs = response["message"]["auxiliary_graphs"]
         assert len(aux_graphs) == 0, (
@@ -185,8 +180,7 @@ class TestDirectEdgePriorityOverSubclass:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
 
         results = response["message"]["results"]
         assert len(results) == 1
@@ -223,8 +217,8 @@ class TestSubclassCompositeStillCreatedWhenNoDirectEdge:
             "message": {
                 "query_graph": {
                     "nodes": {
-                        "n0": {"ids": ["HP:0001943"]},       # Hypoglycemia
-                        "n1": {"ids": ["MONDO:0005015"]},    # Diabetes Mellitus
+                        "n0": {"ids": ["HP:0001943"]},  # Hypoglycemia
+                        "n1": {"ids": ["MONDO:0005015"]},  # Diabetes Mellitus
                     },
                     "edges": {
                         "e0": {
@@ -237,8 +231,7 @@ class TestSubclassCompositeStillCreatedWhenNoDirectEdge:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
 
         results = response["message"]["results"]
         assert len(results) >= 1
@@ -284,13 +277,11 @@ class TestSubclassCompositeStillCreatedWhenNoDirectEdge:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
 
         kg_edges = response["message"]["knowledge_graph"]["edges"]
         subclass_edges = [
-            e for e in kg_edges.values()
-            if e["predicate"] == "biolink:subclass_of"
+            e for e in kg_edges.values() if e["predicate"] == "biolink:subclass_of"
         ]
         assert len(subclass_edges) > 0, (
             "Expected subclass_of edges in KG when no direct edge exists "
@@ -320,8 +311,7 @@ class TestSubclassCompositeStillCreatedWhenNoDirectEdge:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
 
         kg_nodes = set(response["message"]["knowledge_graph"]["nodes"].keys())
         assert "MONDO:0005148" in kg_nodes, (
@@ -358,8 +348,7 @@ class TestDirectEdgePriorityWithInverse:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
 
         results = response["message"]["results"]
         assert len(results) >= 1
@@ -367,8 +356,7 @@ class TestDirectEdgePriorityWithInverse:
         # No subclass_of edges should be in KG
         kg_edges = response["message"]["knowledge_graph"]["edges"]
         subclass_edges = [
-            e for e in kg_edges.values()
-            if e["predicate"] == "biolink:subclass_of"
+            e for e in kg_edges.values() if e["predicate"] == "biolink:subclass_of"
         ]
         assert len(subclass_edges) == 0, (
             f"Expected no subclass_of edges with inverse lookup when direct "
@@ -377,9 +365,9 @@ class TestDirectEdgePriorityWithInverse:
 
         # No inferred composite edges
         inferred = _get_inferred_edges(response)
-        assert len(inferred) == 0, (
-            "Expected no inferred edges with inverse lookup when direct edge exists"
-        )
+        assert (
+            len(inferred) == 0
+        ), "Expected no inferred edges with inverse lookup when direct edge exists"
 
         # No child node in KG
         kg_nodes = set(response["message"]["knowledge_graph"]["nodes"].keys())

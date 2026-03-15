@@ -67,9 +67,9 @@ def _orjson_default(obj):
 class CustomORJSONResponse(JSONResponse):
     media_type = "application/json"
 
-    def render(self, content) -> bytes:
+    def render(self, content: Any) -> bytes:
         t0 = time.perf_counter()
-        data = orjson.dumps(content, default=_orjson_default)
+        data: bytes = orjson.dumps(content, default=_orjson_default)
         dt_ms = (time.perf_counter() - t0) * 1000
         size_kb = len(data) / 1024
         logger.debug("orjson serialization: %.2f ms, %.1f KB", dt_ms, size_kb)
@@ -122,18 +122,19 @@ def load_graph(path: str, format: str = "auto") -> CSRGraph:
     Returns:
         Loaded CSRGraph
     """
-    path = Path(path)
+    resolved_path = Path(path)
 
     if format == "auto":
-        if path.is_dir():
+        if resolved_path.is_dir():
             format = "mmap"
         else:
             raise ValueError(
-                f"Cannot auto-detect format for: {path}. Expected a directory."
+                f"Cannot auto-detect format for: {resolved_path}. Expected a directory."
             )
 
     if format == "mmap":
-        return CSRGraph.load_mmap(path)
+        graph: CSRGraph = CSRGraph.load_mmap(resolved_path)
+        return graph
     else:
         raise ValueError(f"Unknown format: {format}")
 
@@ -479,7 +480,7 @@ def edge_summary(curie: str):
     if node_idx is None:
         raise HTTPException(404, f"Node not found: {curie}")
 
-    summary = defaultdict(int)
+    summary: defaultdict[tuple[str, str], int] = defaultdict(int)
 
     # Outgoing edges: group by (predicate, target_category)
     fwd_start = int(GRAPH.fwd_offsets[node_idx])
@@ -535,7 +536,7 @@ def simple_spec(
         return spec
 
     # Filter by source and/or target
-    filtered = {}
+    filtered: dict[str, dict] = {}
     for src_cat, targets in spec.items():
         if source is not None and src_cat != source:
             continue

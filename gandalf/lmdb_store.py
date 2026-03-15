@@ -65,7 +65,7 @@ def _encode_key(edge_idx: int) -> bytes:
 
 def _decode_key(key: bytes) -> int:
     """Decode 4-byte big-endian key back to edge index."""
-    return struct.unpack(">I", key)[0]
+    return int(struct.unpack(">I", key)[0])
 
 
 class LMDBPropertyStore:

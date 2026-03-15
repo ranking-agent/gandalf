@@ -8,7 +8,6 @@ from gandalf.enrichment import enrich_knowledge_graph
 from gandalf.loader import build_graph_from_jsonl
 from gandalf.search import lookup
 
-
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 NODES_FILE = os.path.join(FIXTURES_DIR, "nodes.jsonl")
 EDGES_FILE = os.path.join(FIXTURES_DIR, "edges.jsonl")
@@ -75,7 +74,11 @@ class TestEnrichNodes:
 
         node = msg["knowledge_graph"]["nodes"]["CHEBI:6801"]
         print(node)
-        eq_attrs = [a for a in node["attributes"] if a["original_attribute_name"] == "equivalent_identifiers"]
+        eq_attrs = [
+            a
+            for a in node["attributes"]
+            if a["original_attribute_name"] == "equivalent_identifiers"
+        ]
         assert len(eq_attrs) == 1
         assert "DRUGBANK:DB00331" in eq_attrs[0]["value"]
 
@@ -87,7 +90,11 @@ class TestEnrichNodes:
         enrich_knowledge_graph(msg, graph)
 
         node = msg["knowledge_graph"]["nodes"]["CHEBI:6801"]
-        ic_attrs = [a for a in node["attributes"] if a["original_attribute_name"] == "information_content"]
+        ic_attrs = [
+            a
+            for a in node["attributes"]
+            if a["original_attribute_name"] == "information_content"
+        ]
         assert len(ic_attrs) == 1
         assert ic_attrs[0]["value"] == 85.5
 
@@ -152,8 +159,11 @@ class TestEnrichEdges:
         found_pubs = False
         for edge_id, edge in msg["knowledge_graph"]["edges"].items():
             assert "attributes" in edge, f"Edge {edge_id} missing 'attributes'"
-            pub_attrs = [a for a in edge["attributes"]
-                         if a["attribute_type_id"] == "biolink:publications"]
+            pub_attrs = [
+                a
+                for a in edge["attributes"]
+                if a["attribute_type_id"] == "biolink:publications"
+            ]
             if pub_attrs:
                 assert isinstance(pub_attrs[0]["value"], list)
                 found_pubs = True
@@ -178,11 +188,21 @@ class TestEnrichEdges:
         # Pick the first edge and pre-set sources
         first_edge_id = next(iter(msg["knowledge_graph"]["edges"]))
         edge = msg["knowledge_graph"]["edges"][first_edge_id]
-        edge["sources"] = [{"resource_id": "infores:custom", "resource_role": "primary_knowledge_source"}]
+        edge["sources"] = [
+            {
+                "resource_id": "infores:custom",
+                "resource_role": "primary_knowledge_source",
+            }
+        ]
 
         enrich_knowledge_graph(msg, graph)
 
-        assert edge["sources"] == [{"resource_id": "infores:custom", "resource_role": "primary_knowledge_source"}]
+        assert edge["sources"] == [
+            {
+                "resource_id": "infores:custom",
+                "resource_role": "primary_knowledge_source",
+            }
+        ]
 
 
 class TestEnrichEdgesWithQualifiers:

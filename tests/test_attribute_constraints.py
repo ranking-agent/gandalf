@@ -7,10 +7,10 @@ from tests.search_fixtures import graph  # noqa: F401
 
 from gandalf.search.lookup import lookup
 
-
 # ---------------------------------------------------------------------------
 # Unit tests for the matching function
 # ---------------------------------------------------------------------------
+
 
 class TestMatchesAttributeConstraints:
     """Unit tests for matches_attribute_constraints."""
@@ -21,93 +21,241 @@ class TestMatchesAttributeConstraints:
         assert matches_attribute_constraints(attrs, None) is True
 
     def test_no_attributes_with_constraints_returns_false(self):
-        constraints = [{
-            "id": "biolink:p_value",
-            "name": "p-value",
-            "operator": "<",
-            "value": 0.05,
-        }]
+        constraints = [
+            {
+                "id": "biolink:p_value",
+                "name": "p-value",
+                "operator": "<",
+                "value": 0.05,
+            }
+        ]
         assert matches_attribute_constraints([], constraints) is False
         assert matches_attribute_constraints(None, constraints) is False
 
     def test_equals_operator(self):
-        attrs = [{"attribute_type_id": "biolink:knowledge_level", "value": "knowledge_assertion"}]
-        constraint_match = [{
-            "id": "biolink:knowledge_level",
-            "name": "knowledge level",
-            "operator": "==",
-            "value": "knowledge_assertion",
-        }]
-        constraint_no_match = [{
-            "id": "biolink:knowledge_level",
-            "name": "knowledge level",
-            "operator": "==",
-            "value": "prediction",
-        }]
+        attrs = [
+            {
+                "attribute_type_id": "biolink:knowledge_level",
+                "value": "knowledge_assertion",
+            }
+        ]
+        constraint_match = [
+            {
+                "id": "biolink:knowledge_level",
+                "name": "knowledge level",
+                "operator": "==",
+                "value": "knowledge_assertion",
+            }
+        ]
+        constraint_no_match = [
+            {
+                "id": "biolink:knowledge_level",
+                "name": "knowledge level",
+                "operator": "==",
+                "value": "prediction",
+            }
+        ]
         assert matches_attribute_constraints(attrs, constraint_match) is True
         assert matches_attribute_constraints(attrs, constraint_no_match) is False
 
     def test_greater_than_operator(self):
         attrs = [{"attribute_type_id": "biolink:p_value", "value": 0.03}]
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:p_value", "name": "p", "operator": ">", "value": 0.01,
-        }]) is True
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:p_value", "name": "p", "operator": ">", "value": 0.05,
-        }]) is False
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:p_value",
+                        "name": "p",
+                        "operator": ">",
+                        "value": 0.01,
+                    }
+                ],
+            )
+            is True
+        )
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:p_value",
+                        "name": "p",
+                        "operator": ">",
+                        "value": 0.05,
+                    }
+                ],
+            )
+            is False
+        )
 
     def test_less_than_operator(self):
         attrs = [{"attribute_type_id": "biolink:p_value", "value": 0.03}]
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:p_value", "name": "p", "operator": "<", "value": 0.05,
-        }]) is True
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:p_value", "name": "p", "operator": "<", "value": 0.01,
-        }]) is False
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:p_value",
+                        "name": "p",
+                        "operator": "<",
+                        "value": 0.05,
+                    }
+                ],
+            )
+            is True
+        )
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:p_value",
+                        "name": "p",
+                        "operator": "<",
+                        "value": 0.01,
+                    }
+                ],
+            )
+            is False
+        )
 
     def test_matches_operator_regex(self):
-        attrs = [{"attribute_type_id": "biolink:description", "value": "Metformin treats diabetes"}]
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:description", "name": "desc", "operator": "matches",
-            "value": "treats.*diabetes",
-        }]) is True
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:description", "name": "desc", "operator": "matches",
-            "value": "^prevents",
-        }]) is False
+        attrs = [
+            {
+                "attribute_type_id": "biolink:description",
+                "value": "Metformin treats diabetes",
+            }
+        ]
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:description",
+                        "name": "desc",
+                        "operator": "matches",
+                        "value": "treats.*diabetes",
+                    }
+                ],
+            )
+            is True
+        )
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:description",
+                        "name": "desc",
+                        "operator": "matches",
+                        "value": "^prevents",
+                    }
+                ],
+            )
+            is False
+        )
 
     def test_strict_equals_operator(self):
         attrs = [{"attribute_type_id": "biolink:score", "value": 42}]
         # Same type and value
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:score", "name": "score", "operator": "===", "value": 42,
-        }]) is True
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:score",
+                        "name": "score",
+                        "operator": "===",
+                        "value": 42,
+                    }
+                ],
+            )
+            is True
+        )
         # Different type (float vs int)
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:score", "name": "score", "operator": "===", "value": 42.0,
-        }]) is False
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:score",
+                        "name": "score",
+                        "operator": "===",
+                        "value": 42.0,
+                    }
+                ],
+            )
+            is False
+        )
 
     def test_strict_equals_list_order(self):
         attrs = [{"attribute_type_id": "biolink:tags", "value": ["a", "b", "c"]}]
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:tags", "name": "tags", "operator": "===", "value": ["a", "b", "c"],
-        }]) is True
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:tags", "name": "tags", "operator": "===", "value": ["c", "b", "a"],
-        }]) is False
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:tags",
+                        "name": "tags",
+                        "operator": "===",
+                        "value": ["a", "b", "c"],
+                    }
+                ],
+            )
+            is True
+        )
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:tags",
+                        "name": "tags",
+                        "operator": "===",
+                        "value": ["c", "b", "a"],
+                    }
+                ],
+            )
+            is False
+        )
 
     def test_not_negation(self):
-        attrs = [{"attribute_type_id": "biolink:knowledge_level", "value": "prediction"}]
+        attrs = [
+            {"attribute_type_id": "biolink:knowledge_level", "value": "prediction"}
+        ]
         # "not prediction" should pass for "prediction" -> negated match -> False
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:knowledge_level", "name": "kl", "operator": "==",
-            "value": "prediction", "not": True,
-        }]) is False
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:knowledge_level",
+                        "name": "kl",
+                        "operator": "==",
+                        "value": "prediction",
+                        "not": True,
+                    }
+                ],
+            )
+            is False
+        )
         # "not knowledge_assertion" should pass for "prediction" -> no match -> negated -> True
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:knowledge_level", "name": "kl", "operator": "==",
-            "value": "knowledge_assertion", "not": True,
-        }]) is True
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:knowledge_level",
+                        "name": "kl",
+                        "operator": "==",
+                        "value": "knowledge_assertion",
+                        "not": True,
+                    }
+                ],
+            )
+            is True
+        )
 
     def test_and_logic_multiple_constraints(self):
         attrs = [
@@ -130,40 +278,95 @@ class TestMatchesAttributeConstraints:
 
     def test_missing_attribute_fails(self):
         attrs = [{"attribute_type_id": "biolink:score", "value": 0.95}]
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:p_value", "name": "p", "operator": "<", "value": 0.05,
-        }]) is False
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:p_value",
+                        "name": "p",
+                        "operator": "<",
+                        "value": 0.05,
+                    }
+                ],
+            )
+            is False
+        )
 
     def test_numeric_comparison_with_list_value_or_logic(self):
         """Per TRAPI spec: with lists and > or <, at least one must be true (OR)."""
         attrs = [{"attribute_type_id": "biolink:score", "value": 5}]
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:score", "name": "s", "operator": ">", "value": [10, 3],
-        }]) is True  # 5 > 3 is true
-        assert matches_attribute_constraints(attrs, [{
-            "id": "biolink:score", "name": "s", "operator": ">", "value": [10, 20],
-        }]) is False  # neither
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:score",
+                        "name": "s",
+                        "operator": ">",
+                        "value": [10, 3],
+                    }
+                ],
+            )
+            is True
+        )  # 5 > 3 is true
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "biolink:score",
+                        "name": "s",
+                        "operator": ">",
+                        "value": [10, 20],
+                    }
+                ],
+            )
+            is False
+        )  # neither
 
     def test_match_by_original_attribute_name(self):
         """Constraints should also match on original_attribute_name."""
-        attrs = [{"attribute_type_id": "biolink:Attribute",
-                  "original_attribute_name": "information_content", "value": 92.3}]
-        assert matches_attribute_constraints(attrs, [{
-            "id": "information_content", "name": "IC", "operator": ">", "value": 90,
-        }]) is True
+        attrs = [
+            {
+                "attribute_type_id": "biolink:Attribute",
+                "original_attribute_name": "information_content",
+                "value": 92.3,
+            }
+        ]
+        assert (
+            matches_attribute_constraints(
+                attrs,
+                [
+                    {
+                        "id": "information_content",
+                        "name": "IC",
+                        "operator": ">",
+                        "value": 90,
+                    }
+                ],
+            )
+            is True
+        )
 
     def test_no_attributes_all_negated_returns_true(self):
         """If all constraints are negated and there are no attributes, they all pass."""
-        constraints = [{
-            "id": "biolink:p_value", "name": "p", "operator": "<",
-            "value": 0.05, "not": True,
-        }]
+        constraints = [
+            {
+                "id": "biolink:p_value",
+                "name": "p",
+                "operator": "<",
+                "value": 0.05,
+                "not": True,
+            }
+        ]
         assert matches_attribute_constraints([], constraints) is True
 
 
 # ---------------------------------------------------------------------------
 # Integration tests: node constraints filtering through lookup
 # ---------------------------------------------------------------------------
+
 
 class TestNodeConstraintsIntegration:
     """Test node attribute constraints in full TRAPI queries."""
@@ -181,12 +384,14 @@ class TestNodeConstraintsIntegration:
                         "n0": {"ids": ["CHEBI:6801"]},
                         "n1": {
                             "categories": ["biolink:Gene"],
-                            "constraints": [{
-                                "id": "information_content",
-                                "name": "information content",
-                                "operator": ">",
-                                "value": 90,
-                            }],
+                            "constraints": [
+                                {
+                                    "id": "information_content",
+                                    "name": "information content",
+                                    "operator": ">",
+                                    "value": 90,
+                                }
+                            ],
                         },
                     },
                     "edges": {
@@ -220,12 +425,14 @@ class TestNodeConstraintsIntegration:
                         "n0": {"ids": ["CHEBI:6801"]},
                         "n1": {
                             "categories": ["biolink:Gene"],
-                            "constraints": [{
-                                "id": "information_content",
-                                "name": "information content",
-                                "operator": "<",
-                                "value": 85,
-                            }],
+                            "constraints": [
+                                {
+                                    "id": "information_content",
+                                    "name": "information content",
+                                    "operator": "<",
+                                    "value": 85,
+                                }
+                            ],
                         },
                     },
                     "edges": {
@@ -257,13 +464,15 @@ class TestNodeConstraintsIntegration:
                     "nodes": {
                         "n0": {
                             "categories": ["biolink:Gene"],
-                            "constraints": [{
-                                "id": "information_content",
-                                "name": "IC",
-                                "operator": ">",
-                                "value": 90,
-                                "not": True,
-                            }],
+                            "constraints": [
+                                {
+                                    "id": "information_content",
+                                    "name": "IC",
+                                    "operator": ">",
+                                    "value": 90,
+                                    "not": True,
+                                }
+                            ],
                         },
                         "n1": {"ids": ["MONDO:0005148"]},
                     },
@@ -370,12 +579,14 @@ class TestNodeConstraintsIntegration:
                         "n0": {"ids": ["CHEBI:6801"]},
                         "n1": {
                             "categories": ["biolink:Gene"],
-                            "constraints": [{
-                                "id": "information_content",
-                                "name": "IC",
-                                "operator": ">",
-                                "value": 999,
-                            }],
+                            "constraints": [
+                                {
+                                    "id": "information_content",
+                                    "name": "IC",
+                                    "operator": ">",
+                                    "value": 999,
+                                }
+                            ],
                         },
                     },
                     "edges": {
@@ -398,6 +609,7 @@ class TestNodeConstraintsIntegration:
 # Integration tests: edge attribute_constraints filtering through lookup
 # ---------------------------------------------------------------------------
 
+
 class TestEdgeAttributeConstraintsIntegration:
     """Test edge attribute_constraints in full TRAPI queries."""
 
@@ -419,12 +631,14 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:knowledge_level",
-                                "name": "knowledge level",
-                                "operator": "==",
-                                "value": "knowledge_assertion",
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:knowledge_level",
+                                    "name": "knowledge level",
+                                    "operator": "==",
+                                    "value": "knowledge_assertion",
+                                }
+                            ],
                         },
                     },
                 },
@@ -449,12 +663,14 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:knowledge_level",
-                                "name": "knowledge level",
-                                "operator": "==",
-                                "value": "prediction",
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:knowledge_level",
+                                    "name": "knowledge level",
+                                    "operator": "==",
+                                    "value": "prediction",
+                                }
+                            ],
                         },
                     },
                 },
@@ -487,12 +703,14 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:publications",
-                                "name": "publications",
-                                "operator": "matches",
-                                "value": "23456789",
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:publications",
+                                    "name": "publications",
+                                    "operator": "matches",
+                                    "value": "23456789",
+                                }
+                            ],
                         },
                     },
                 },
@@ -523,13 +741,15 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:knowledge_level",
-                                "name": "knowledge level",
-                                "operator": "==",
-                                "value": "knowledge_assertion",
-                                "not": True,
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:knowledge_level",
+                                    "name": "knowledge level",
+                                    "operator": "==",
+                                    "value": "knowledge_assertion",
+                                    "not": True,
+                                }
+                            ],
                         },
                     },
                 },
@@ -554,12 +774,14 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:fake_attribute",
-                                "name": "fake",
-                                "operator": "==",
-                                "value": "anything",
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:fake_attribute",
+                                    "name": "fake",
+                                    "operator": "==",
+                                    "value": "anything",
+                                }
+                            ],
                         },
                     },
                 },
@@ -611,12 +833,14 @@ class TestEdgeAttributeConstraintsIntegration:
                         "n0": {"ids": ["CHEBI:6801"]},
                         "n1": {
                             "categories": ["biolink:Gene"],
-                            "constraints": [{
-                                "id": "information_content",
-                                "name": "IC",
-                                "operator": ">",
-                                "value": 90,
-                            }],
+                            "constraints": [
+                                {
+                                    "id": "information_content",
+                                    "name": "IC",
+                                    "operator": ">",
+                                    "value": 90,
+                                }
+                            ],
                         },
                     },
                     "edges": {
@@ -624,12 +848,14 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:publications",
-                                "name": "publications",
-                                "operator": "matches",
-                                "value": "23456789",
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:publications",
+                                    "name": "publications",
+                                    "operator": "matches",
+                                    "value": "23456789",
+                                }
+                            ],
                         },
                     },
                 },
@@ -665,12 +891,14 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:gene_associated_with_condition"],
-                            "attribute_constraints": [{
-                                "id": "biolink:publications",
-                                "name": "publications",
-                                "operator": "matches",
-                                "value": "34567890",
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:publications",
+                                    "name": "publications",
+                                    "operator": "matches",
+                                    "value": "34567890",
+                                }
+                            ],
                         },
                     },
                 },
@@ -705,12 +933,14 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:treats"],
-                            "attribute_constraints": [{
-                                "id": "biolink:publications",
-                                "name": "publications",
-                                "operator": "matches",
-                                "value": "55555555",
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:publications",
+                                    "name": "publications",
+                                    "operator": "matches",
+                                    "value": "55555555",
+                                }
+                            ],
                         },
                     },
                 },
@@ -723,10 +953,15 @@ class TestEdgeAttributeConstraintsIntegration:
         assert len(results) == 1
         # Only the chembl edge should be in the KG
         kg_edges = response["message"]["knowledge_graph"]["edges"]
-        treats_edges = [e for e in kg_edges.values() if e["predicate"] == "biolink:treats"]
+        treats_edges = [
+            e for e in kg_edges.values() if e["predicate"] == "biolink:treats"
+        ]
         assert len(treats_edges) == 1
-        pubs = [a for a in treats_edges[0].get("attributes", [])
-                if a.get("original_attribute_name") == "publications"]
+        pubs = [
+            a
+            for a in treats_edges[0].get("attributes", [])
+            if a.get("original_attribute_name") == "publications"
+        ]
         assert len(pubs) == 1
         assert "PMID:55555555" in pubs[0]["value"]
 
@@ -734,6 +969,7 @@ class TestEdgeAttributeConstraintsIntegration:
 # ---------------------------------------------------------------------------
 # Integration tests: numeric edge attribute constraints (p_value, evidence_count)
 # ---------------------------------------------------------------------------
+
 
 class TestNumericEdgeConstraints:
     """Test numeric edge attribute constraints using p_value and evidence_count.
@@ -760,12 +996,14 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:p_value",
-                                "name": "p-value",
-                                "operator": "<",
-                                "value": 0.01,
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:p_value",
+                                    "name": "p-value",
+                                    "operator": "<",
+                                    "value": 0.01,
+                                }
+                            ],
                         },
                     },
                 },
@@ -793,12 +1031,14 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:evidence_count",
-                                "name": "evidence count",
-                                "operator": ">",
-                                "value": 10,
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:evidence_count",
+                                    "name": "evidence count",
+                                    "operator": ">",
+                                    "value": 10,
+                                }
+                            ],
                         },
                     },
                 },
@@ -874,12 +1114,14 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:p_value",
-                                "name": "p-value",
-                                "operator": "<",
-                                "value": 0.0001,
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:p_value",
+                                    "name": "p-value",
+                                    "operator": "<",
+                                    "value": 0.0001,
+                                }
+                            ],
                         },
                     },
                 },
@@ -904,12 +1146,14 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:evidence_count",
-                                "name": "evidence count",
-                                "operator": "==",
-                                "value": 20,
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:evidence_count",
+                                    "name": "evidence count",
+                                    "operator": "==",
+                                    "value": 20,
+                                }
+                            ],
                         },
                     },
                 },
@@ -944,12 +1188,14 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:gene_associated_with_condition"],
-                            "attribute_constraints": [{
-                                "id": "biolink:p_value",
-                                "name": "p-value",
-                                "operator": "<",
-                                "value": 0.05,
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:p_value",
+                                    "name": "p-value",
+                                    "operator": "<",
+                                    "value": 0.05,
+                                }
+                            ],
                         },
                     },
                 },
@@ -987,12 +1233,14 @@ class TestNumericEdgeConstraints:
                             "subject": "n1",
                             "object": "n2",
                             "predicates": ["biolink:gene_associated_with_condition"],
-                            "attribute_constraints": [{
-                                "id": "biolink:evidence_count",
-                                "name": "evidence count",
-                                "operator": ">",
-                                "value": 10,
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:evidence_count",
+                                    "name": "evidence count",
+                                    "operator": ">",
+                                    "value": 10,
+                                }
+                            ],
                         },
                     },
                 },
@@ -1020,12 +1268,14 @@ class TestNumericEdgeConstraints:
                         "n0": {"ids": ["CHEBI:6801"]},
                         "n1": {
                             "categories": ["biolink:Gene"],
-                            "constraints": [{
-                                "id": "information_content",
-                                "name": "IC",
-                                "operator": ">",
-                                "value": 90,
-                            }],
+                            "constraints": [
+                                {
+                                    "id": "information_content",
+                                    "name": "IC",
+                                    "operator": ">",
+                                    "value": 90,
+                                }
+                            ],
                         },
                     },
                     "edges": {
@@ -1033,12 +1283,14 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [{
-                                "id": "biolink:p_value",
-                                "name": "p-value",
-                                "operator": "<",
-                                "value": 0.001,
-                            }],
+                            "attribute_constraints": [
+                                {
+                                    "id": "biolink:p_value",
+                                    "name": "p-value",
+                                    "operator": "<",
+                                    "value": 0.001,
+                                }
+                            ],
                         },
                     },
                 },

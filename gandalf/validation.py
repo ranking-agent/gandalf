@@ -32,7 +32,8 @@ def _get_inverse_predicate(predicate: str) -> Optional[str]:
     bmt = _get_bmt()
     try:
         if bmt.has_inverse(predicate):
-            return bmt.get_inverse_predicate(predicate, formatted=True)
+            result: Optional[str] = bmt.get_inverse_predicate(predicate, formatted=True)
+            return result
     except (AttributeError, ValueError, KeyError):
         logger.debug("Could not get inverse for predicate: %s", predicate)
     return None
@@ -42,7 +43,8 @@ def _is_symmetric(predicate: str) -> bool:
     """Check if a predicate is symmetric."""
     bmt = _get_bmt()
     try:
-        return bmt.is_symmetric(predicate)
+        result: bool = bmt.is_symmetric(predicate)
+        return result
     except (AttributeError, ValueError, KeyError):
         logger.debug("Could not check symmetry for predicate: %s", predicate)
         return False
@@ -481,7 +483,7 @@ def find_edge_in_graph(
     Returns:
         List of edge dicts with direction, predicate, and properties
     """
-    results = []
+    results: list[dict] = []
 
     subj_idx = graph.get_node_idx(subject_id)
     obj_idx = graph.get_node_idx(object_id)

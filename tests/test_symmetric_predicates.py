@@ -300,10 +300,14 @@ class TestSymmetricBothPinnedDedup:
             binding_pairs.add((sn_id, h_id))
 
         # Must have both directions
-        assert ("NCBIGene:5468", "NCBIGene:3643") in binding_pairs, (
-            "Missing (SN=PPARG, h=INSR) result"
-        )
-        assert ("NCBIGene:3643", "NCBIGene:5468") in binding_pairs, (
+        assert (
+            "NCBIGene:5468",
+            "NCBIGene:3643",
+        ) in binding_pairs, "Missing (SN=PPARG, h=INSR) result"
+        assert (
+            "NCBIGene:3643",
+            "NCBIGene:5468",
+        ) in binding_pairs, (
             "Missing (SN=INSR, h=PPARG) result — inverse direction dropped by dedup"
         )
 

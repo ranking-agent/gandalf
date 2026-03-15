@@ -98,7 +98,9 @@ class TestSubclassHandling:
         }
 
         response_no_subclass = lookup(graph, query, bmt=bmt, subclass=False)
-        response_depth_zero = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=0)
+        response_depth_zero = lookup(
+            graph, query, bmt=bmt, subclass=True, subclass_depth=0
+        )
 
         results_no = response_no_subclass["message"]["results"]
         results_zero = response_depth_zero["message"]["results"]
@@ -166,7 +168,9 @@ class TestSubclassHandling:
         if aux_graphs:
             for ag_id, ag in aux_graphs.items():
                 assert "edges" in ag
-                assert len(ag["edges"]) >= 2  # At least the real edge + the subclass edge
+                assert (
+                    len(ag["edges"]) >= 2
+                )  # At least the real edge + the subclass edge
 
     def test_subclass_inferred_edges_have_logical_entailment(self, graph, bmt):
         """Inferred composite edges should have knowledge_level=logical_entailment."""
@@ -193,7 +197,8 @@ class TestSubclassHandling:
 
         # Find inferred edges (those with support_graphs attribute)
         inferred_edges = [
-            e for e in kg_edges.values()
+            e
+            for e in kg_edges.values()
             if any(
                 attr.get("attribute_type_id") == "biolink:support_graphs"
                 for attr in e.get("attributes", [])
@@ -203,7 +208,9 @@ class TestSubclassHandling:
         # There should be at least one inferred edge (from subclass expansion)
         if inferred_edges:
             for edge in inferred_edges:
-                attr_map = {a["attribute_type_id"]: a["value"] for a in edge["attributes"]}
+                attr_map = {
+                    a["attribute_type_id"]: a["value"] for a in edge["attributes"]
+                }
                 assert attr_map["biolink:knowledge_level"] == "logical_entailment"
                 assert attr_map["biolink:agent_type"] == "automated_agent"
 

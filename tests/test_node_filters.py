@@ -242,7 +242,6 @@ class TestMinInformationContent:
         response_filtered = lookup(graph, query, bmt=bmt, min_information_content=85)
         assert len(response_filtered["message"]["results"]) == 0
 
-
     def test_min_ic_filters_backward_discovered_nodes(self, graph, bmt):
         """min_information_content should filter discovered nodes in backward search.
 
@@ -315,8 +314,11 @@ class TestCombinedFilters:
         }
 
         response = lookup(
-            graph, query, bmt=bmt,
-            max_node_degree=2, min_information_content=90,
+            graph,
+            query,
+            bmt=bmt,
+            max_node_degree=2,
+            min_information_content=90,
         )
         results = response["message"]["results"]
 

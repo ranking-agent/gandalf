@@ -1,4 +1,5 @@
 """General Diagnostic tools for different path types."""
+
 import logging
 from collections import Counter, defaultdict
 
@@ -73,7 +74,9 @@ def diagnose_path_explosion(graph: CSRGraph, start_id, end_id):
     logger.info("4. MIDDLE NODE OVERLAP")
     overlap_count = sum(1 for node in two_hop_nodes if node in end_neighbors)
     overlap_pct = (overlap_count / len(two_hop_nodes) * 100) if two_hop_nodes else 0
-    logger.info("   Nodes that connect start (2-hop) to end (1-hop): %s", f"{overlap_count:,}")
+    logger.info(
+        "   Nodes that connect start (2-hop) to end (1-hop): %s", f"{overlap_count:,}"
+    )
     logger.info("   Overlap percentage: %s%%", f"{overlap_pct:.1f}")
     logger.info("")
 
@@ -82,7 +85,7 @@ def diagnose_path_explosion(graph: CSRGraph, start_id, end_id):
     logger.info("   Analyzing how many ways to reach middle nodes...")
 
     # Count how many 1-hop nodes lead to each 2-hop node
-    two_hop_incoming = defaultdict(int)
+    two_hop_incoming: defaultdict[int, int] = defaultdict(int)
     for n1_idx in start_neighbors[: min(1000, len(start_neighbors))]:
         for n2_idx in graph.neighbors(n1_idx):
             two_hop_incoming[n2_idx] += 1
@@ -90,7 +93,10 @@ def diagnose_path_explosion(graph: CSRGraph, start_id, end_id):
     multiplicities = []
     if two_hop_incoming:
         multiplicities = list(two_hop_incoming.values())
-        logger.info("   Average ways to reach a 2-hop node: %s", f"{np.mean(multiplicities):.1f}")
+        logger.info(
+            "   Average ways to reach a 2-hop node: %s",
+            f"{np.mean(multiplicities):.1f}",
+        )
         logger.info("   Max ways to reach a 2-hop node: %s", np.max(multiplicities))
         logger.info("   Median: %s", f"{np.median(multiplicities):.1f}")
 
@@ -98,7 +104,9 @@ def diagnose_path_explosion(graph: CSRGraph, start_id, end_id):
         mult_dist = Counter(multiplicities)
         logger.info("   Distribution of multiplicities:")
         for mult in sorted(mult_dist.keys())[:10]:
-            logger.info("      %s paths to node: %s nodes", mult, f"{mult_dist[mult]:,}")
+            logger.info(
+                "      %s paths to node: %s nodes", mult, f"{mult_dist[mult]:,}"
+            )
     logger.info("")
 
     # 6. Compute actual path count with formula
@@ -109,7 +117,7 @@ def diagnose_path_explosion(graph: CSRGraph, start_id, end_id):
 
     # 7. Find heaviest contributors
     logger.info("7. HEAVIEST MIDDLE NODES (Top 10)")
-    middle_node_contributions = defaultdict(int)
+    middle_node_contributions: defaultdict[int, int] = defaultdict(int)
 
     # For each potential middle node (2-hop from start, 1-hop from end)
     end_neighbors_set = set(end_neighbors)
@@ -127,7 +135,9 @@ def diagnose_path_explosion(graph: CSRGraph, start_id, end_id):
         node_id = graph.get_node_id(node_idx)
         node_deg = graph.degree(node_idx)
         logger.info("   %s. %s", rank, node_id)
-        logger.info("      Contributes %s paths (degree: %s)", f"{count:,}", f"{node_deg:,}")
+        logger.info(
+            "      Contributes %s paths (degree: %s)", f"{count:,}", f"{node_deg:,}"
+        )
     logger.info("")
 
     # 8. Recommendations
@@ -138,11 +148,15 @@ def diagnose_path_explosion(graph: CSRGraph, start_id, end_id):
 
     if avg_2hop_fanout > 50:
         logger.info("   ⚠️  High fanout at hop 2!")
-        logger.info("      Many hub nodes in the path - consider constraining middle nodes")
+        logger.info(
+            "      Many hub nodes in the path - consider constraining middle nodes"
+        )
 
     if overlap_pct > 50:
         logger.info("   ℹ️  High overlap suggests these nodes are well-connected")
-        logger.info("      Paths may be redundant - consider deduplication by middle nodes")
+        logger.info(
+            "      Paths may be redundant - consider deduplication by middle nodes"
+        )
 
     return {
         "start_degree": start_deg,
@@ -247,7 +261,8 @@ def analyze_predicates(graph: CSRGraph, start_id, end_id, max_sample=1000):
         if sampled >= max_sample:
             break
 
-        pred1 = graph.get_edge_property(start_idx, n1_idx, "predicate")
+        edges_1 = graph.get_all_edges_between(start_idx, n1_idx)
+        pred1 = edges_1[0][0] if edges_1 else None
 
         for n2_idx in graph.neighbors(n1_idx):
             if sampled >= max_sample:
@@ -255,8 +270,10 @@ def analyze_predicates(graph: CSRGraph, start_id, end_id, max_sample=1000):
             if n2_idx == start_idx or n2_idx not in end_neighbors_set:
                 continue
 
-            pred2 = graph.get_edge_property(n1_idx, n2_idx, "predicate")
-            pred3 = graph.get_edge_property(n2_idx, end_idx, "predicate")
+            edges_2 = graph.get_all_edges_between(n1_idx, n2_idx)
+            pred2 = edges_2[0][0] if edges_2 else None
+            edges_3 = graph.get_all_edges_between(n2_idx, end_idx)
+            pred3 = edges_3[0][0] if edges_3 else None
 
             edge1_predicates.append(pred1)
             edge2_predicates.append(pred2)

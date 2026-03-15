@@ -175,9 +175,9 @@ class PredicateExpander:
                     self._canonical_cache[predicate] = False
                 else:
                     # Check for canonical_predicate annotation
-                    annotations = getattr(element, 'annotations', {}) or {}
+                    annotations = getattr(element, "annotations", {}) or {}
                     self._canonical_cache[predicate] = bool(
-                        annotations.get('canonical_predicate', False)
+                        annotations.get("canonical_predicate", False)
                     )
             except Exception:
                 self._canonical_cache[predicate] = False
@@ -225,7 +225,9 @@ class PredicateExpander:
         descendants = self.get_descendants(predicate)
         return [d for d in descendants if self.is_canonical_or_symmetric(d)]
 
-    def expand_predicates(self, predicates: list[str]) -> tuple[list[str], list[str] | None]:
+    def expand_predicates(
+        self, predicates: list[str]
+    ) -> tuple[list[str], list[str] | None]:
         """Expand predicates following reasoner-transpiler rules.
 
         This method:
@@ -246,7 +248,7 @@ class PredicateExpander:
               (empty list means match all, None means don't check inverse)
         """
         # Handle 'related_to' or no predicates as "any predicate" in both directions
-        if not predicates or 'biolink:related_to' in predicates:
+        if not predicates or "biolink:related_to" in predicates:
             return [], []
 
         # Collect inverse predicates

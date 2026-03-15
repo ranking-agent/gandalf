@@ -55,9 +55,9 @@ class TestNodeBindingGrouping:
         for result in results:
             # Every node binding must have exactly one entry
             for qnode_id, bindings in result["node_bindings"].items():
-                assert len(bindings) == 1, (
-                    f"node_bindings[{qnode_id!r}] has {len(bindings)} entries, expected 1"
-                )
+                assert (
+                    len(bindings) == 1
+                ), f"node_bindings[{qnode_id!r}] has {len(bindings)} entries, expected 1"
 
             # Pinned endpoints should match the query
             assert result["node_bindings"]["n0"][0]["id"] == "CHEBI:6801"
@@ -114,9 +114,9 @@ class TestNodeBindingGrouping:
         for result in results:
             # Every node binding must have exactly one entry
             for qnode_id, bindings in result["node_bindings"].items():
-                assert len(bindings) == 1, (
-                    f"node_bindings[{qnode_id!r}] has {len(bindings)} entries, expected 1"
-                )
+                assert (
+                    len(bindings) == 1
+                ), f"node_bindings[{qnode_id!r}] has {len(bindings)} entries, expected 1"
 
     def test_two_hop_each_result_has_single_node_per_binding(self, graph, bmt):
         """Two-hop query: each result must have exactly one node per binding."""
@@ -151,9 +151,9 @@ class TestNodeBindingGrouping:
 
         for result in results:
             for qnode_id, bindings in result["node_bindings"].items():
-                assert len(bindings) == 1, (
-                    f"node_bindings[{qnode_id!r}] has {len(bindings)} entries, expected 1"
-                )
+                assert (
+                    len(bindings) == 1
+                ), f"node_bindings[{qnode_id!r}] has {len(bindings)} entries, expected 1"
 
     def test_subclass_grouping_no_duplicate_results(self, graph, bmt):
         """Subclass expansion should not produce duplicate results with identical node_bindings.
@@ -194,13 +194,13 @@ class TestNodeBindingGrouping:
             fingerprints.append(fp)
 
         # No two results should have the same fingerprint (no duplicates)
-        assert len(fingerprints) == len(set(fingerprints)), (
-            f"Duplicate results found: {fingerprints}"
-        )
+        assert len(fingerprints) == len(
+            set(fingerprints)
+        ), f"Duplicate results found: {fingerprints}"
 
         # Every result should have exactly one node per binding
         for result in results:
             for qnode_id, bindings in result["node_bindings"].items():
-                assert len(bindings) == 1, (
-                    f"node_bindings[{qnode_id!r}] has {len(bindings)} entries, expected 1"
-                )
+                assert (
+                    len(bindings) == 1
+                ), f"node_bindings[{qnode_id!r}] has {len(bindings)} entries, expected 1"

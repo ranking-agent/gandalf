@@ -23,13 +23,20 @@ class GCMonitor:
             duration = time.perf_counter() - self._start_time
             generation = info.get("generation", "?")
             collected = info.get("collected", 0)
-            self.gc_events.append({
-                "generation": generation,
-                "duration": duration,
-                "collected": collected,
-            })
+            self.gc_events.append(
+                {
+                    "generation": generation,
+                    "duration": duration,
+                    "collected": collected,
+                }
+            )
             if duration > 0.1:  # Only log slow GC (>100ms)
-                logger.debug("  [GC] Gen %s: %.2fs, collected %s objects", generation, duration, collected)
+                logger.debug(
+                    "  [GC] Gen %s: %.2fs, collected %s objects",
+                    generation,
+                    duration,
+                    collected,
+                )
             self._start_time = None
 
     def start(self):

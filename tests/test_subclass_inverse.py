@@ -46,9 +46,9 @@ def _assert_all_results_connected(response):
                 for eb in ebindings:
                     eid = eb["id"]
                     kg_edge = kg_edges.get(eid)
-                    assert kg_edge is not None, (
-                        f"result[{ri}] references missing KG edge {eid}"
-                    )
+                    assert (
+                        kg_edge is not None
+                    ), f"result[{ri}] references missing KG edge {eid}"
                     subj = kg_edge["subject"]
                     obj = kg_edge["object"]
                     assert subj in bound_node_ids, (
@@ -79,8 +79,8 @@ class TestSubclassInverseEdgeDirection:
             "message": {
                 "query_graph": {
                     "nodes": {
-                        "n0": {"ids": ["MONDO:0005015"]},   # Diabetes Mellitus
-                        "n1": {"ids": ["CHEBI:6801"]},       # Metformin
+                        "n0": {"ids": ["MONDO:0005015"]},  # Diabetes Mellitus
+                        "n1": {"ids": ["CHEBI:6801"]},  # Metformin
                     },
                     "edges": {
                         "e0": {
@@ -93,16 +93,15 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
         assert len(results) >= 1
 
         # Direct edge exists, so no inferred composite edges should be present
         inferred = _get_inferred_edges(response)
-        assert len(inferred) == 0, (
-            "Expected no inferred edges when a direct edge exists between queried nodes"
-        )
+        assert (
+            len(inferred) == 0
+        ), "Expected no inferred edges when a direct edge exists between queried nodes"
 
         _assert_all_results_connected(response)
 
@@ -128,8 +127,8 @@ class TestSubclassInverseEdgeDirection:
             "message": {
                 "query_graph": {
                     "nodes": {
-                        "n0": {"ids": ["HP:0001943"]},       # Hypoglycemia
-                        "n1": {"ids": ["MONDO:0005015"]},    # Diabetes Mellitus
+                        "n0": {"ids": ["HP:0001943"]},  # Hypoglycemia
+                        "n1": {"ids": ["MONDO:0005015"]},  # Diabetes Mellitus
                     },
                     "edges": {
                         "e0": {
@@ -142,13 +141,14 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
         assert len(results) >= 1
 
         inferred = _get_inferred_edges(response)
-        assert len(inferred) > 0, "Expected inferred composite edges from subclass expansion"
+        assert (
+            len(inferred) > 0
+        ), "Expected inferred composite edges from subclass expansion"
 
         for eid, edge in inferred.items():
             # Inferred edge should connect phenotype to superclass disease,
@@ -196,8 +196,7 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
         assert len(results) >= 1
 
@@ -237,18 +236,11 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         for eid, edge in response["message"]["knowledge_graph"]["edges"].items():
-            assert "_query_subject" not in edge, (
-                f"KG edge {eid} leaks _query_subject"
-            )
-            assert "_query_object" not in edge, (
-                f"KG edge {eid} leaks _query_object"
-            )
-            assert "_edge_id" not in edge, (
-                f"KG edge {eid} leaks _edge_id"
-            )
+            assert "_query_subject" not in edge, f"KG edge {eid} leaks _query_subject"
+            assert "_query_object" not in edge, f"KG edge {eid} leaks _query_object"
+            assert "_edge_id" not in edge, f"KG edge {eid} leaks _edge_id"
 
     def test_two_hop_inverse_with_subclass(self, graph, bmt):
         """Two-hop query where one hop is inverse + subclass expanded.
@@ -291,8 +283,7 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         results = response["message"]["results"]
         assert len(results) >= 1
 
@@ -324,15 +315,14 @@ class TestSubclassInverseEdgeDirection:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt,
-                          subclass=True, subclass_depth=1)
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         kg_nodes = set(response["message"]["knowledge_graph"]["nodes"].keys())
         kg_edges = response["message"]["knowledge_graph"]["edges"]
 
         for eid, edge in kg_edges.items():
-            assert edge["subject"] in kg_nodes, (
-                f"KG edge {eid}: subject {edge['subject']} not in KG nodes"
-            )
-            assert edge["object"] in kg_nodes, (
-                f"KG edge {eid}: object {edge['object']} not in KG nodes"
-            )
+            assert (
+                edge["subject"] in kg_nodes
+            ), f"KG edge {eid}: subject {edge['subject']} not in KG nodes"
+            assert (
+                edge["object"] in kg_nodes
+            ), f"KG edge {eid}: object {edge['object']} not in KG nodes"

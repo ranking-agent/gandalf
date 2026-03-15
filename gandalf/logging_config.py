@@ -40,6 +40,7 @@ def configure_logging(level=logging.INFO, fmt: str = "text"):
     """
     handler = logging.StreamHandler(sys.stderr)
 
+    formatter: logging.Formatter
     if fmt == "json":
         formatter = _JSONFormatter(datefmt="%Y-%m-%dT%H:%M:%S")
     else:

@@ -32,8 +32,10 @@ class EdgePropertyStore:
     """
 
     __slots__ = (
-        '_sources_pool', '_quals_pool',
-        '_sources_idx', '_quals_idx',
+        "_sources_pool",
+        "_quals_pool",
+        "_sources_idx",
+        "_quals_idx",
     )
 
     def __init__(self):
@@ -46,9 +48,9 @@ class EdgePropertyStore:
     def _make_hashable(obj):
         """Convert a JSON-compatible value to a hashable key for interning."""
         if isinstance(obj, dict):
-            return tuple(sorted(
-                (k, EdgePropertyStore._make_hashable(v)) for k, v in obj.items()
-            ))
+            return tuple(
+                sorted((k, EdgePropertyStore._make_hashable(v)) for k, v in obj.items())
+            )
         elif isinstance(obj, (list, tuple)):
             return tuple(EdgePropertyStore._make_hashable(item) for item in obj)
         return obj
@@ -309,12 +311,14 @@ class CSRGraph:
         self.edge_properties = EdgePropertyStore.from_property_list(props_list)
 
         stats = self.edge_properties.dedup_stats()
-        logger.debug("  Edge property dedup: %s edges -> "
-                     "%s unique source configs, "
-                     "%s unique qualifier combos",
-                     stats['total_edges'],
-                     stats['unique_sources'],
-                     stats['unique_qualifiers'])
+        logger.debug(
+            "  Edge property dedup: %s edges -> "
+            "%s unique source configs, "
+            "%s unique qualifier combos",
+            stats["total_edges"],
+            stats["unique_sources"],
+            stats["unique_qualifiers"],
+        )
 
         # Build forward offsets
         self.fwd_offsets = np.zeros(self.num_nodes + 1, dtype=np.int64)
@@ -343,7 +347,9 @@ class CSRGraph:
         # (dst, src, pred_id, original_index)
         reverse_edges = [
             (dst, src, pred_id, orig_idx)
-            for orig_idx, ((src, dst), pred_id) in enumerate(zip(edges, edge_predicates))
+            for orig_idx, ((src, dst), pred_id) in enumerate(
+                zip(edges, edge_predicates)
+            )
         ]
         reverse_edges.sort(key=lambda x: (x[0], x[1], x[2]))
 
@@ -359,7 +365,7 @@ class CSRGraph:
         # The forward CSR was built from edges sorted by (src, dst, pred).
         # We need to map each original edge index to its forward position.
         # _fwd_sort_order[orig_idx] = forward CSR position of that edge.
-        if hasattr(self, '_fwd_sort_order') and self._fwd_sort_order is not None:
+        if hasattr(self, "_fwd_sort_order") and self._fwd_sort_order is not None:
             fwd_pos = self._fwd_sort_order  # already inverse-mapped
         else:
             # Fallback: build fwd_pos from the forward CSR structure.
@@ -422,8 +428,10 @@ class CSRGraph:
                 fwd_end = int(self.fwd_offsets[src + 1])
                 count = 0
                 for fwd_pos in range(fwd_start, fwd_end):
-                    if (int(self.fwd_targets[fwd_pos]) == node_idx
-                            and int(self.fwd_predicates[fwd_pos]) == pred):
+                    if (
+                        int(self.fwd_targets[fwd_pos]) == node_idx
+                        and int(self.fwd_predicates[fwd_pos]) == pred
+                    ):
                         if count == ordinal:
                             self.rev_to_fwd[rev_pos] = fwd_pos
                             break
@@ -450,8 +458,8 @@ class CSRGraph:
 
         # Binary search for dst_idx within targets[start:end]
         targets_slice = self.fwd_targets[start:end]
-        left = int(np.searchsorted(targets_slice, dst_idx, side='left'))
-        right = int(np.searchsorted(targets_slice, dst_idx, side='right'))
+        left = int(np.searchsorted(targets_slice, dst_idx, side="left"))
+        right = int(np.searchsorted(targets_slice, dst_idx, side="right"))
 
         if left == right:
             return None  # dst_idx not found
@@ -718,7 +726,9 @@ class CSRGraph:
             return self.edge_ids[int(fwd_edge_idx)]
         return None
 
-    def get_all_edges_between(self, src_idx, dst_idx, predicate_filter: Optional[list] = None):
+    def get_all_edges_between(
+        self, src_idx, dst_idx, predicate_filter: Optional[list] = None
+    ):
         """Get all edges (with different predicates or qualifiers) between two nodes."""
         start = int(self.fwd_offsets[src_idx])
         end = int(self.fwd_offsets[src_idx + 1])
@@ -840,13 +850,15 @@ class CSRGraph:
             meta_nodes[cat] = {"id_prefixes": sorted(prefixes)}
 
         meta_edges = []
-        for (subj_cat, pred, obj_cat) in sorted(triple_counts):
-            meta_edges.append({
-                "subject": subj_cat,
-                "predicate": pred,
-                "object": obj_cat,
-                "count": triple_counts[(subj_cat, pred, obj_cat)],
-            })
+        for subj_cat, pred, obj_cat in sorted(triple_counts):
+            meta_edges.append(
+                {
+                    "subject": subj_cat,
+                    "predicate": pred,
+                    "object": obj_cat,
+                    "count": triple_counts[(subj_cat, pred, obj_cat)],
+                }
+            )
 
         self.meta_kg = {"nodes": meta_nodes, "edges": meta_edges}
 
@@ -888,16 +900,18 @@ class CSRGraph:
             "predicate_count": len(self.predicate_to_idx),
             "category_count": len(category_prefixes),
             "predicates": pred_counts,
-            "categories": {cat: len(prefixes) for cat, prefixes in category_prefixes.items()},
+            "categories": {
+                cat: len(prefixes) for cat, prefixes in category_prefixes.items()
+            },
         }
 
         t1 = time.perf_counter()
-        logger.debug("  Metadata built in %.2fs: "
-                     "%s unique triples, "
-                     "%s categories",
-                     t1 - t0,
-                     len(triple_counts),
-                     len(category_prefixes))
+        logger.debug(
+            "  Metadata built in %.2fs: " "%s unique triples, " "%s categories",
+            t1 - t0,
+            len(triple_counts),
+            len(category_prefixes),
+        )
 
     # ------------------------------------------------------------------
     # Serialization
@@ -964,15 +978,17 @@ class CSRGraph:
 
         # Print file sizes
         total_size = 0
-        for f in sorted(directory.iterdir()):
-            if f.is_file():
-                size = f.stat().st_size
+        for entry in sorted(directory.iterdir()):
+            if entry.is_file():
+                size = entry.stat().st_size
                 total_size += size
-                logger.debug("  %s: %.1f MB", f.name, size / 1024 / 1024)
-            elif f.is_dir():
-                dir_size = sum(ff.stat().st_size for ff in f.iterdir() if ff.is_file())
+                logger.debug("  %s: %.1f MB", entry.name, size / 1024 / 1024)
+            elif entry.is_dir():
+                dir_size = sum(
+                    ff.stat().st_size for ff in entry.iterdir() if ff.is_file()
+                )
                 total_size += dir_size
-                logger.debug("  %s/: %.1f MB", f.name, dir_size / 1024 / 1024)
+                logger.debug("  %s/: %.1f MB", entry.name, dir_size / 1024 / 1024)
         logger.debug("  Total: %.1f MB", total_size / 1024 / 1024)
 
     @staticmethod
@@ -989,24 +1005,16 @@ class CSRGraph:
         graph = CSRGraph.__new__(CSRGraph)
 
         # Load NumPy arrays with memory mapping
-        graph.fwd_targets = np.load(
-            directory / "fwd_targets.npy", mmap_mode=mmap_mode
-        )
+        graph.fwd_targets = np.load(directory / "fwd_targets.npy", mmap_mode=mmap_mode)
         graph.fwd_predicates = np.load(
             directory / "fwd_predicates.npy", mmap_mode=mmap_mode
         )
-        graph.fwd_offsets = np.load(
-            directory / "fwd_offsets.npy", mmap_mode=mmap_mode
-        )
-        graph.rev_sources = np.load(
-            directory / "rev_sources.npy", mmap_mode=mmap_mode
-        )
+        graph.fwd_offsets = np.load(directory / "fwd_offsets.npy", mmap_mode=mmap_mode)
+        graph.rev_sources = np.load(directory / "rev_sources.npy", mmap_mode=mmap_mode)
         graph.rev_predicates = np.load(
             directory / "rev_predicates.npy", mmap_mode=mmap_mode
         )
-        graph.rev_offsets = np.load(
-            directory / "rev_offsets.npy", mmap_mode=mmap_mode
-        )
+        graph.rev_offsets = np.load(directory / "rev_offsets.npy", mmap_mode=mmap_mode)
         rev_to_fwd_path = directory / "rev_to_fwd.npy"
         if rev_to_fwd_path.exists():
             graph.rev_to_fwd = np.load(rev_to_fwd_path, mmap_mode=mmap_mode)
@@ -1045,9 +1053,7 @@ class CSRGraph:
                     graph.edge_properties
                 )
         else:
-            raise FileNotFoundError(
-                f"No edge property files found in {directory}"
-            )
+            raise FileNotFoundError(f"No edge property files found in {directory}")
 
         # Load LMDB store if present
         if lmdb_path.exists():
@@ -1067,12 +1073,14 @@ class CSRGraph:
 
         if isinstance(graph.edge_properties, EdgePropertyStore):
             stats = graph.edge_properties.dedup_stats()
-            logger.debug("  Edge property dedup: %s edges -> "
-                         "%s unique source configs, "
-                         "%s unique qualifier combos",
-                         stats['total_edges'],
-                         stats['unique_sources'],
-                         stats['unique_qualifiers'])
+            logger.debug(
+                "  Edge property dedup: %s edges -> "
+                "%s unique source configs, "
+                "%s unique qualifier combos",
+                stats["total_edges"],
+                stats["unique_sources"],
+                stats["unique_qualifiers"],
+            )
 
         if graph.lmdb_store is not None:
             logger.debug("  LMDB detail store: %s", lmdb_path)
@@ -1084,14 +1092,12 @@ class CSRGraph:
 
         t1 = time.perf_counter()
         logger.info(
-            "Graph loaded in %.2fs "
-            "(edge_properties: %.2fs)",
+            "Graph loaded in %.2fs " "(edge_properties: %.2fs)",
             t1 - t0,
             t_props_end - t_props_start,
         )
         logger.info(
-            "  %s nodes, %s edges, "
-            "%s predicates",
+            "  %s nodes, %s edges, " "%s predicates",
             graph.num_nodes,
             len(graph.fwd_targets),
             len(graph.predicate_to_idx),
