@@ -1,5 +1,6 @@
 """Main Gandalf CSR Graph class."""
 
+import json
 import os
 import pickle
 import shutil
@@ -9,6 +10,7 @@ from typing import Literal, Optional, Union
 
 import logging
 
+import msgpack
 import numpy as np
 
 from gandalf.lmdb_store import LMDBPropertyStore
@@ -784,30 +786,17 @@ class CSRGraph:
     # Metadata (Plater-compatible pre-computed summaries)
     # ------------------------------------------------------------------
 
-    def build_metadata(self):
-        """Pre-compute Plater-compatible metadata from the CSR graph.
-
-        Iterates all forward edges once to build:
-        - meta_kg: TRAPI MetaKnowledgeGraph (nodes + edge triples with counts)
-        - sri_testing_data: One representative edge per (subj_cat, pred, obj_cat) triple
-        - simple_spec: {source_cat: {target_cat: [predicates]}} connection schema
-        - graph_metadata: Graph statistics (node/edge counts, predicate distribution)
-
-        Stored as attributes on the graph object. Total memory: ~10-50 KB.
-        """
-        logger.debug("Building Plater-compatible metadata...")
-        t0 = time.perf_counter()
-
-        num_edges = len(self.fwd_targets)
-
-        # Pre-extract the primary category for each node (first in list, or fallback)
+    def _build_node_categories(self):
+        """Pre-extract the primary category for each node."""
         node_categories = {}
         for node_idx in range(self.num_nodes):
             props = self.node_properties.get(node_idx, {})
             cats = props.get("categories", ["biolink:NamedThing"])
             node_categories[node_idx] = cats[0] if cats else "biolink:NamedThing"
+        return node_categories
 
-        # Collect ID prefixes per category (for meta_kg nodes)
+    def _build_category_prefixes(self, node_categories):
+        """Collect ID prefixes per category."""
         category_prefixes = {}
         for node_id, node_idx in self.node_id_to_idx.items():
             cat = node_categories[node_idx]
@@ -815,10 +804,12 @@ class CSRGraph:
             if cat not in category_prefixes:
                 category_prefixes[cat] = set()
             category_prefixes[cat].add(prefix)
+        return category_prefixes
 
-        # Single pass over all forward edges
-        triple_counts = {}  # (subj_cat, pred, obj_cat) -> count
-        triple_examples = {}  # (subj_cat, pred, obj_cat) -> (subj_id, obj_id)
+    def _scan_edge_triples(self, node_categories):
+        """Single pass over forward edges to collect triple counts and examples."""
+        triple_counts = {}
+        triple_examples = {}
 
         for src_idx in range(self.num_nodes):
             start = int(self.fwd_offsets[src_idx])
@@ -837,30 +828,187 @@ class CSRGraph:
                 key = (subj_cat, pred, obj_cat)
                 triple_counts[key] = triple_counts.get(key, 0) + 1
 
-                # Store first example edge for SRI testing data
                 if key not in triple_examples:
                     triple_examples[key] = (
                         self.idx_to_node_id[src_idx],
                         self.idx_to_node_id[tgt_idx],
                     )
 
-        # Build meta_kg in TRAPI MetaKnowledgeGraph format
+        return triple_counts, triple_examples
+
+    def build_meta_kg(self):
+        """Build the TRAPI MetaKnowledgeGraph with full attribute metadata.
+
+        Scans all nodes and edges to produce:
+        - nodes: keyed by category, with id_prefixes and attribute descriptors
+        - edges: list of (subject, predicate, object) with attribute and qualifier
+                 descriptors
+
+        This is the expensive step (full LMDB scan for edge attributes).
+        The result is stored as self.meta_kg and can be persisted as meta_kg.json.
+        """
+        logger.debug("Building meta knowledge graph...")
+        t0 = time.perf_counter()
+
+        node_categories = self._build_node_categories()
+        category_prefixes = self._build_category_prefixes(node_categories)
+        triple_counts, _ = self._scan_edge_triples(node_categories)
+
+        # -- Node attributes: collect unique (attribute_type_id, attribute_source,
+        #    original_attribute_name) per category --
+        # cat -> {(type_id, source) -> set of original_attribute_names}
+        cat_attr_map = {}
+        for node_idx in range(self.num_nodes):
+            props = self.node_properties.get(node_idx, {})
+            cat = node_categories[node_idx]
+            if cat not in cat_attr_map:
+                cat_attr_map[cat] = {}
+            for attr in props.get("attributes", []):
+                type_id = attr.get("attribute_type_id", "biolink:Attribute")
+                source = attr.get("attribute_source", None)
+                orig_name = attr.get("original_attribute_name")
+                group_key = (type_id, source)
+                if group_key not in cat_attr_map[cat]:
+                    cat_attr_map[cat][group_key] = set()
+                if orig_name:
+                    cat_attr_map[cat][group_key].add(orig_name)
+
         meta_nodes = {}
         for cat, prefixes in category_prefixes.items():
-            meta_nodes[cat] = {"id_prefixes": sorted(prefixes)}
+            attrs = []
+            for (type_id, source), orig_names in sorted(
+                cat_attr_map.get(cat, {}).items()
+            ):
+                attrs.append(
+                    {
+                        "attribute_type_id": type_id,
+                        "attribute_source": source,
+                        "original_attribute_names": sorted(orig_names),
+                        "constraint_use": False,
+                        "constraint_name": None,
+                    }
+                )
+            meta_nodes[cat] = {
+                "id_prefixes": sorted(prefixes),
+                "attributes": attrs,
+            }
+
+        # -- Edge attributes: full scan of LMDB + hot-path qualifiers --
+        # triple_key -> {(type_id, source) -> set of original_attribute_names}
+        triple_attr_map = {key: {} for key in triple_counts}
+        # triple_key -> set of qualifier_type_ids
+        triple_qual_map = {key: set() for key in triple_counts}
+
+        # Build a mapping from edge position -> triple key for the full scan
+        edge_to_triple = {}
+        for src_idx in range(self.num_nodes):
+            start = int(self.fwd_offsets[src_idx])
+            end = int(self.fwd_offsets[src_idx + 1])
+            if start == end:
+                continue
+            subj_cat = node_categories[src_idx]
+            for pos in range(start, end):
+                tgt_idx = int(self.fwd_targets[pos])
+                pred_id = int(self.fwd_predicates[pos])
+                pred = self.id_to_predicate[pred_id]
+                obj_cat = node_categories[tgt_idx]
+                edge_to_triple[pos] = (subj_cat, pred, obj_cat)
+
+                # Collect qualifiers from hot-path store
+                if isinstance(self.edge_properties, EdgePropertyStore):
+                    quals = self.edge_properties.get_qualifiers(pos)
+                    for q in quals:
+                        qtype = q.get("qualifier_type_id")
+                        if qtype:
+                            triple_qual_map[(subj_cat, pred, obj_cat)].add(qtype)
+
+        # Full scan of LMDB for edge attribute types
+        if self.lmdb_store is not None:
+            logger.debug("  Scanning LMDB for edge attribute types...")
+            with self.lmdb_store._env.begin(buffers=True) as txn:
+                cursor = txn.cursor()
+                for key_buf, val_buf in cursor:
+                    edge_idx = int.from_bytes(bytes(key_buf), "big")
+                    triple_key = edge_to_triple.get(edge_idx)
+                    if triple_key is None:
+                        continue
+                    detail = msgpack.unpackb(val_buf, raw=False)
+                    for attr in detail.get("attributes", []):
+                        type_id = attr.get("attribute_type_id", "biolink:Attribute")
+                        source = attr.get("attribute_source", None)
+                        orig_name = attr.get("original_attribute_name")
+                        group_key = (type_id, source)
+                        if group_key not in triple_attr_map[triple_key]:
+                            triple_attr_map[triple_key][group_key] = set()
+                        if orig_name:
+                            triple_attr_map[triple_key][group_key].add(orig_name)
+
+        del edge_to_triple
 
         meta_edges = []
         for subj_cat, pred, obj_cat in sorted(triple_counts):
+            triple_key = (subj_cat, pred, obj_cat)
+            attrs = []
+            for (type_id, source), orig_names in sorted(
+                triple_attr_map.get(triple_key, {}).items()
+            ):
+                attrs.append(
+                    {
+                        "attribute_type_id": type_id,
+                        "attribute_source": source,
+                        "original_attribute_names": sorted(orig_names),
+                        "constraint_use": False,
+                        "constraint_name": None,
+                    }
+                )
+            # Add qualifier type IDs as attributes in the qualifiers list
+            qualifiers = []
+            for qtype in sorted(triple_qual_map.get(triple_key, set())):
+                qualifiers.append({"qualifier_type_id": qtype})
+
             meta_edges.append(
                 {
                     "subject": subj_cat,
                     "predicate": pred,
                     "object": obj_cat,
-                    "count": triple_counts[(subj_cat, pred, obj_cat)],
+                    "attributes": attrs,
+                    "qualifiers": qualifiers,
                 }
             )
 
         self.meta_kg = {"nodes": meta_nodes, "edges": meta_edges}
+
+        t1 = time.perf_counter()
+        logger.debug(
+            "  Meta KG built in %.2fs: %s edge triples, %s categories",
+            t1 - t0,
+            len(triple_counts),
+            len(category_prefixes),
+        )
+
+    def build_metadata(self):
+        """Pre-compute Plater-compatible metadata from the CSR graph.
+
+        Builds:
+        - meta_kg: TRAPI MetaKnowledgeGraph (via build_meta_kg if not already set)
+        - sri_testing_data: One representative edge per (subj_cat, pred, obj_cat) triple
+        - simple_spec: {source_cat: {target_cat: [predicates]}} connection schema
+        - graph_metadata: Graph statistics (node/edge counts, predicate distribution)
+
+        Stored as attributes on the graph object.
+        """
+        logger.debug("Building Plater-compatible metadata...")
+        t0 = time.perf_counter()
+
+        num_edges = len(self.fwd_targets)
+
+        node_categories = self._build_node_categories()
+        category_prefixes = self._build_category_prefixes(node_categories)
+        triple_counts, triple_examples = self._scan_edge_triples(node_categories)
+
+        # Build meta_kg if not already loaded from disk
+        if not hasattr(self, "meta_kg") or self.meta_kg is None:
+            self.build_meta_kg()
 
         # Build SRI testing data
         self.sri_testing_data = {
@@ -963,6 +1111,11 @@ class CSRGraph:
         if self.edge_ids is not None:
             with open(directory / "edge_ids.pkl", "wb") as f:
                 pickle.dump(self.edge_ids, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # Save meta_kg as JSON for fast loading at query time
+        if hasattr(self, "meta_kg") and self.meta_kg is not None:
+            with open(directory / "meta_kg.json", "w", encoding="utf-8") as f:
+                json.dump(self.meta_kg, f, separators=(",", ":"))
 
         # Copy LMDB store if present
         if self.lmdb_store is not None:
@@ -1104,6 +1257,16 @@ class CSRGraph:
             len(graph.fwd_targets),
             len(graph.predicate_to_idx),
         )
+
+        # Load pre-computed meta_kg from disk if available (avoids
+        # expensive full LMDB scan at query-time startup).
+        meta_kg_path = directory / "meta_kg.json"
+        if meta_kg_path.exists():
+            with open(meta_kg_path, "r", encoding="utf-8") as f:
+                graph.meta_kg = json.load(f)
+            logger.debug("  Loaded meta_kg from %s", meta_kg_path)
+        else:
+            graph.meta_kg = None  # will be built by build_metadata()
 
         graph.build_metadata()
 
