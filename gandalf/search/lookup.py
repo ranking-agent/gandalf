@@ -105,10 +105,11 @@ def _lookup_inner(
     min_information_content=None,
 ):
     """Inner implementation of lookup with all the core logic."""
+    logger.info("Starting lookup.")
     if bmt is None:
         bmt = Toolkit()
         t_bmt = time.perf_counter()
-        logger.debug("BMT initialization: %.2fs", t_bmt - t_start)
+        logger.warning("BMT initialization: %.2fs", t_bmt - t_start)
     else:
         logger.debug("Using provided BMT instance")
 
@@ -338,7 +339,8 @@ def _lookup_inner(
             gc_summary["total_collected"],
         )
 
-    logger.info(f"Returning {len(response['message']['results'])} results.")
+    t_stop = time.perf_counter()
+    logger.info(f"Returning {len(response['message']['results'])} results in {t_stop - t_start} seconds.")
     return response
 
 
