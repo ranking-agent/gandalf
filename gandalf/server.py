@@ -41,10 +41,6 @@ configure_logging(
 )
 logger = logging.getLogger(__name__)
 
-GRAPH = None
-BMT = None
-
-
 # ---------------------------------------------------------------------------
 # orjson-based response class (3-10x faster than stdlib json)
 # ---------------------------------------------------------------------------
@@ -130,14 +126,16 @@ def load_graph(path: str, format: str = "auto") -> CSRGraph:
 
 
 # ---------------------------------------------------------------------------
-# App lifecycle
+# Module-level graph loading (runs once in master with gunicorn --preload,
+# so every forked worker shares graph RAM via Copy-on-Write).
 # ---------------------------------------------------------------------------
 
+_SKIP_PRELOAD = os.getenv("GANDALF_SKIP_PRELOAD", "").lower() in ("1", "true", "yes")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Handle graph and BMT loading on startup."""
-    global GRAPH, BMT
+GRAPH: Optional[CSRGraph] = None
+BMT: Optional[Toolkit] = None
+
+if not _SKIP_PRELOAD:
     logger.info(
         "Loading graph from %s (format=%s)...",
         settings.graph_path,
@@ -155,7 +153,18 @@ async def lifespan(app: FastAPI):
     # Raise thresholds so Gen 2 collections are less frequent even for
     # the (now-small) unfrozen query-time object set.
     gc.set_threshold(50_000, 50, 50)
-    logger.info("Server ready!")
+    logger.info("Graph and BMT loaded at module level (PID=%d).", os.getpid())
+
+
+# ---------------------------------------------------------------------------
+# App lifecycle
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Worker lifecycle — only handles shutdown cleanup."""
+    logger.info("Worker started (PID=%d).", os.getpid())
     yield
     logger.info("Shutting down — releasing resources...")
     if (
@@ -164,8 +173,6 @@ async def lifespan(app: FastAPI):
         and GRAPH.lmdb_store is not None
     ):
         GRAPH.lmdb_store.close()
-    GRAPH = None
-    BMT = None
     logger.info("Shutdown complete.")
 
 

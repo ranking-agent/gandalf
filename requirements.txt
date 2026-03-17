@@ -6,3 +6,4 @@ msgpack>=1.0.0
 numpy>=1.20.0
 orjson>=3.9.0
 uvicorn>=0.20.0
+gunicorn>=21.2.0

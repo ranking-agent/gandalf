@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -U pip setuptools wheel && \
 COPY gandalf/ gandalf/
 COPY scripts/ scripts/
 COPY static/ static/
+COPY gunicorn.conf.py .
 
 EXPOSE 6429
 
@@ -20,4 +21,4 @@ EXPOSE 6429
 ENV GANDALF_GRAPH_PATH=/data/graph
 ENV GANDALF_LOG_FORMAT=json
 
-CMD ["uvicorn", "gandalf.server:APP", "--host", "0.0.0.0", "--port", "6429"]
+CMD ["gunicorn", "gandalf.server:APP", "-c", "gunicorn.conf.py"]
