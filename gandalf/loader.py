@@ -13,13 +13,13 @@ Pass 3: Sort numpy arrays by (src, dst, pred) via np.lexsort. Rewrite the temp
         dedup indices to match. Build CSR offset arrays.
 """
 
-import json
 import shutil
 import tempfile
 from pathlib import Path
 
 import msgpack
 import numpy as np
+import orjson
 
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import (
@@ -180,7 +180,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
 
     with open(edge_jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
-            data = json.loads(line)
+            data = orjson.loads(line)
             node_ids.add(data["subject"])
             node_ids.add(data["object"])
             predicates.add(data["predicate"])
@@ -208,7 +208,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
         logger.debug("Reading node properties from %s...", node_jsonl_path)
         with open(node_jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
-                node_data = json.loads(line)
+                node_data = orjson.loads(line)
                 node_id = node_data.get("id")
                 if node_id:
                     idx = node_id_to_idx.get(node_id)
@@ -256,7 +256,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     try:
         with open(edge_jsonl_path, "r", encoding="utf-8") as f:
             for i, line in enumerate(f):
-                data = json.loads(line)
+                data = orjson.loads(line)
 
                 # Fill numpy arrays
                 src_indices[i] = node_id_to_idx[data["subject"]]
