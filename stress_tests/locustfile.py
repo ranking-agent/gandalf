@@ -18,17 +18,17 @@ from locust import HttpUser, between, task
 # ---------------------------------------------------------------------------
 
 SAMPLE_CURIES = [
-    "CHEBI:6801",       # Metformin (SmallMolecule/Drug)
-    "NCBIGene:5468",    # PPARG (Gene)
-    "NCBIGene:3643",    # INSR (Gene)
-    "MONDO:0005148",    # Type 2 Diabetes (Disease)
-    "HP:0001943",       # Hypoglycemia (PhenotypicFeature)
-    "CHEBI:17234",      # Glucose (SmallMolecule)
-    "GO:0006006",       # Glucose metabolic process (BiologicalProcess)
-    "NCBIGene:2645",    # GCK (Gene)
-    "NCBIGene:7124",    # TNF (Gene)
-    "MONDO:0005015",    # Diabetes Mellitus (Disease)
-    "MONDO:0004995",    # Cardiovascular Disease (Disease)
+    "CHEBI:6801",  # Metformin (SmallMolecule/Drug)
+    "NCBIGene:5468",  # PPARG (Gene)
+    "NCBIGene:3643",  # INSR (Gene)
+    "MONDO:0005148",  # Type 2 Diabetes (Disease)
+    "HP:0001943",  # Hypoglycemia (PhenotypicFeature)
+    "CHEBI:17234",  # Glucose (SmallMolecule)
+    "GO:0006006",  # Glucose metabolic process (BiologicalProcess)
+    "NCBIGene:2645",  # GCK (Gene)
+    "NCBIGene:7124",  # TNF (Gene)
+    "MONDO:0005015",  # Diabetes Mellitus (Disease)
+    "MONDO:0004995",  # Cardiovascular Disease (Disease)
 ]
 
 GENE_CURIES = [c for c in SAMPLE_CURIES if c.startswith("NCBIGene:")]

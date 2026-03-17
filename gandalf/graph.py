@@ -874,9 +874,7 @@ class CSRGraph:
         meta_nodes = {}
         for cat, prefixes in category_prefixes.items():
             attrs = []
-            for type_id, source, orig_name in sorted(
-                cat_attr_set.get(cat, set())
-            ):
+            for type_id, source, orig_name in sorted(cat_attr_set.get(cat, set())):
                 attrs.append(
                     {
                         "attribute_type_id": type_id,
