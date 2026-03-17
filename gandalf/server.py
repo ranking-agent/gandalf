@@ -44,7 +44,7 @@ LOG_LEVEL = os.environ.get("GANDALF_LOG_LEVEL", "INFO").upper()
 LOG_FORMAT = os.environ.get("GANDALF_LOG_FORMAT", "text")  # "text" or "json"
 CORS_ORIGINS = os.environ.get("GANDALF_CORS_ORIGINS", "*")
 MAX_REQUEST_SIZE_MB = int(os.environ.get("GANDALF_MAX_REQUEST_SIZE_MB", "10"))
-RATE_LIMIT_PER_MINUTE = int(os.environ.get("GANDALF_RATE_LIMIT", "100"))
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("GANDALF_RATE_LIMIT", "0"))
 
 configure_logging(getattr(logging, LOG_LEVEL, logging.INFO), fmt=LOG_FORMAT)
 logger = logging.getLogger(__name__)
