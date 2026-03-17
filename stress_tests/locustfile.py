@@ -125,37 +125,6 @@ class GandalfUser(HttpUser):
     def meta_knowledge_graph(self):
         self.client.get("/meta_knowledge_graph")
 
-    @task(0)
-    def simple_spec(self):
-        self.client.get("/simple_spec")
-
-    # -- node / edge lookups ------------------------------------------------
-
-    @task(0)
-    def node_lookup(self):
-        curie = random.choice(SAMPLE_CURIES)
-        self.client.get(f"/node/{curie}", name="/node/[curie]")
-
-    @task(0)
-    def edges_lookup(self):
-        curie = random.choice(SAMPLE_CURIES)
-        params = {}
-        # Randomly add optional filters
-        if random.random() < 0.3:
-            params["category"] = random.choice(CATEGORIES)
-        if random.random() < 0.3:
-            params["predicate"] = random.choice(PREDICATES)
-        if random.random() < 0.2:
-            params["limit"] = random.choice([10, 50, 100])
-        if random.random() < 0.1:
-            params["count_only"] = "true"
-        self.client.get(f"/edges/{curie}", params=params, name="/edges/[curie]")
-
-    @task(0)
-    def edge_summary(self):
-        curie = random.choice(SAMPLE_CURIES)
-        self.client.get(f"/edge_summary/{curie}", name="/edge_summary/[curie]")
-
     # -- TRAPI queries (the heavy hitters) ----------------------------------
 
     @task(5)

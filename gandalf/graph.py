@@ -995,8 +995,6 @@ class CSRGraph:
         logger.debug("Building Plater-compatible metadata...")
         t0 = time.perf_counter()
 
-        num_edges = len(self.fwd_targets)
-
         node_categories = self._build_node_categories()
         category_prefixes = self._build_category_prefixes(node_categories)
         triple_counts, triple_examples = self._scan_edge_triples(node_categories)
@@ -1017,35 +1015,6 @@ class CSRGraph:
                 }
                 for (subj_cat, pred, obj_cat), example in triple_examples.items()
             ]
-        }
-
-        # Build simple_spec
-        simple_spec = {}
-        for subj_cat, pred, obj_cat in triple_counts:
-            if subj_cat not in simple_spec:
-                simple_spec[subj_cat] = {}
-            if obj_cat not in simple_spec[subj_cat]:
-                simple_spec[subj_cat][obj_cat] = []
-            simple_spec[subj_cat][obj_cat].append(pred)
-        self.simple_spec = simple_spec
-
-        # Build graph_metadata
-        pred_counts = {}
-        for pred_id in range(len(self.id_to_predicate)):
-            pred_str = self.id_to_predicate[pred_id]
-            count = int(np.sum(self.fwd_predicates == pred_id))
-            if count > 0:
-                pred_counts[pred_str] = count
-
-        self.graph_metadata = {
-            "node_count": self.num_nodes,
-            "edge_count": num_edges,
-            "predicate_count": len(self.predicate_to_idx),
-            "category_count": len(category_prefixes),
-            "predicates": pred_counts,
-            "categories": {
-                cat: len(prefixes) for cat, prefixes in category_prefixes.items()
-            },
         }
 
         t1 = time.perf_counter()
@@ -1262,6 +1231,14 @@ class CSRGraph:
             logger.debug("  Loaded meta_kg from %s", meta_kg_path)
         else:
             graph.meta_kg = None  # will be built by build_metadata()
+
+        metadata_path = directory / "graph-metadata.json"
+        if metadata_path.exists():
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                graph.graph_metadata = json.load(f)
+            logger.debug("  Loaded metadata from %s", metadata_path)
+        else:
+            graph.graph_metadata = None
 
         graph.build_metadata()
 
