@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     server_maturity: str = "development"
     server_location: str = "RENCI"
 
+    # Heartbeat (Automat cluster registration)
+    automat_host: str = ""  # e.g. "http://automat:8080"; empty = disabled
+    heart_rate: int = 30  # seconds between heartbeats
+    service_address: str = ""  # reachable address of this Gandalf instance
+    web_port: int = 8080  # port Gandalf is serving on
+    plater_title: str = ""
+
     otel_enabled: bool = True
     otel_service_name: str = "gandalf"
     otel_use_console_exporter: bool = False
