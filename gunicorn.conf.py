@@ -1,4 +1,5 @@
 """Gunicorn configuration for GANDALF."""
+
 import os
 
 # Bind to all interfaces on port 6429

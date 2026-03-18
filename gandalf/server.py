@@ -231,7 +231,9 @@ if settings.otel_enabled:
         tracer_provider=_otel_provider,
         excluded_urls="docs,openapi.json",
     )
-    logger.info("OpenTelemetry tracing enabled (service=%s).", settings.otel_service_name)
+    logger.info(
+        "OpenTelemetry tracing enabled (service=%s).", settings.otel_service_name
+    )
 
 
 # ---------------------------------------------------------------------------
