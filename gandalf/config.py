@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     server_location: str = "RENCI"
 
     otel_enabled: bool = True
+    otel_service_name: str = "gandalf"
+    otel_use_console_exporter: bool = False
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317
 

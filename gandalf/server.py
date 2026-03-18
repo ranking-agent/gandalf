@@ -197,6 +197,44 @@ STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.exists():
     APP.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# ---------------------------------------------------------------------------
+# OpenTelemetry / Jaeger tracing (Plater-compatible)
+# ---------------------------------------------------------------------------
+
+if settings.otel_enabled:
+    from opentelemetry import trace
+    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    _otel_resource = Resource(attributes={SERVICE_NAME: settings.otel_service_name})
+
+    if settings.otel_use_console_exporter:
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+
+        _otel_exporter = ConsoleSpanExporter()
+    else:
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter,
+        )
+
+        _otel_exporter = OTLPSpanExporter(
+            endpoint=f"{settings.jaeger_host}:{settings.jaeger_port}",
+        )
+
+    _otel_provider = TracerProvider(resource=_otel_resource)
+    _otel_provider.add_span_processor(BatchSpanProcessor(_otel_exporter))
+    trace.set_tracer_provider(_otel_provider)
+    FastAPIInstrumentor.instrument_app(
+        APP,
+        tracer_provider=_otel_provider,
+        excluded_urls="docs,openapi.json",
+    )
+    logger.info(
+        "OpenTelemetry tracing enabled (service=%s).", settings.otel_service_name
+    )
+
 
 # ---------------------------------------------------------------------------
 # Middleware: request ID, access logging, request size limit, rate limiting
