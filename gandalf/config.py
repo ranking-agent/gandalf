@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     graph_path: str = "/data/graph"
     graph_format: str = "auto"  # "auto" or "mmap"
+    load_mmaps_into_memory: bool = True
     log_level: str = "INFO"
     log_format: str = "text"  # "text" or "json"
     cors_origins: str = "*"
