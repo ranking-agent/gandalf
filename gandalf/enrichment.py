@@ -57,7 +57,7 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
 def _enrich_nodes(nodes: dict, graph: CSRGraph) -> None:
     """Fill in missing properties for every node in the knowledge graph."""
     for node_id, node in nodes.items():
-        node_idx = graph.node_id_to_idx.get(node_id)
+        node_idx = graph.get_node_idx(node_id)
         if node_idx is None:
             # Node not in graph (e.g. synthetic inferred node) — skip
             continue
@@ -97,8 +97,8 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
         if subj_id is None or obj_id is None or predicate is None:
             continue
 
-        subj_idx = graph.node_id_to_idx.get(subj_id)
-        obj_idx = graph.node_id_to_idx.get(obj_id)
+        subj_idx = graph.get_node_idx(subj_id)
+        obj_idx = graph.get_node_idx(obj_id)
         if subj_idx is None or obj_idx is None:
             continue
 

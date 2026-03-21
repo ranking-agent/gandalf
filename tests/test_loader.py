@@ -279,6 +279,9 @@ class TestGraphMmapSaveLoad:
                     os.path.join(temp_dir, filename)
                 ), f"Missing {filename}"
 
+            # Node store LMDB should exist
+            assert os.path.isdir(os.path.join(temp_dir, "node_store.lmdb"))
+
     def test_mmap_save_and_load_roundtrip(self, graph):
         """Should correctly save and load graph in mmap format."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -288,8 +291,12 @@ class TestGraphMmapSaveLoad:
             # Verify key attributes match
             assert loaded_graph.num_nodes == graph.num_nodes
             assert len(loaded_graph.fwd_targets) == len(graph.fwd_targets)
-            assert loaded_graph.node_id_to_idx == graph.node_id_to_idx
             assert loaded_graph.predicate_to_idx == graph.predicate_to_idx
+
+            # Node ID mappings should round-trip via LMDB-backed store
+            for node_id, node_idx in graph.node_id_to_idx.items():
+                assert loaded_graph.get_node_idx(node_id) == node_idx
+                assert loaded_graph.get_node_id(node_idx) == node_id
 
     def test_mmap_loaded_graph_neighbors_work(self, graph):
         """Should be able to query neighbors after mmap load."""
@@ -297,7 +304,7 @@ class TestGraphMmapSaveLoad:
             graph.save_mmap(temp_dir)
             loaded_graph = CSRGraph.load_mmap(temp_dir)
 
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
+            metformin_idx = loaded_graph.get_node_idx("CHEBI:6801")
             neighbors = loaded_graph.neighbors(metformin_idx)
             # Metformin has 11 outgoing edges (including duplicate s,o,p edges)
             assert len(neighbors) == 11
@@ -309,8 +316,8 @@ class TestGraphMmapSaveLoad:
             loaded_graph = CSRGraph.load_mmap(temp_dir)
 
             # Test edge property lookup
-            src_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
-            dst_idx = loaded_graph.node_id_to_idx["MONDO:0005148"]
+            src_idx = loaded_graph.get_node_idx("CHEBI:6801")
+            dst_idx = loaded_graph.get_node_idx("MONDO:0005148")
             predicate = loaded_graph.get_edge_property(
                 src_idx, dst_idx, "biolink:treats", "predicate"
             )
@@ -322,7 +329,7 @@ class TestGraphMmapSaveLoad:
             graph.save_mmap(temp_dir)
             loaded_graph = CSRGraph.load_mmap(temp_dir)
 
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
+            metformin_idx = loaded_graph.get_node_idx("CHEBI:6801")
             name = loaded_graph.get_node_property(metformin_idx, "name")
             assert name == "Metformin"
 
@@ -333,8 +340,8 @@ class TestGraphMmapSaveLoad:
             loaded_graph = CSRGraph.load_mmap(temp_dir)
 
             # Check an edge with qualifiers
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
-            insr_idx = loaded_graph.node_id_to_idx["NCBIGene:3643"]
+            metformin_idx = loaded_graph.get_node_idx("CHEBI:6801")
+            insr_idx = loaded_graph.get_node_idx("NCBIGene:3643")
 
             qualifiers = loaded_graph.get_edge_property(
                 metformin_idx, insr_idx, "biolink:affects", "qualifiers"
@@ -350,7 +357,7 @@ class TestGraphMmapSaveLoad:
 
             # Verify it still works
             assert loaded_graph.num_nodes == graph.num_nodes
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
+            metformin_idx = loaded_graph.get_node_idx("CHEBI:6801")
             neighbors = loaded_graph.neighbors(metformin_idx)
             assert len(neighbors) == 11
 
@@ -466,8 +473,8 @@ class TestDuplicateEdges:
             graph.save_mmap(temp_dir)
             loaded = CSRGraph.load_mmap(temp_dir)
 
-            metformin_idx = loaded.node_id_to_idx["CHEBI:6801"]
-            diabetes_idx = loaded.node_id_to_idx["MONDO:0005148"]
+            metformin_idx = loaded.get_node_idx("CHEBI:6801")
+            diabetes_idx = loaded.get_node_idx("MONDO:0005148")
 
             treats_results = [
                 (src, pred, props, eidx)

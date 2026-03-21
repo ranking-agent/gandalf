@@ -4,6 +4,7 @@ import json
 import logging
 import pickle
 import shutil
+import struct
 import time
 from pathlib import Path
 from typing import Literal, Optional, Union
@@ -13,6 +14,7 @@ import numpy as np
 
 from gandalf.config import settings
 from gandalf.lmdb_store import LMDBPropertyStore
+from gandalf.node_store import NodeStore
 
 logger = logging.getLogger(__name__)
 
@@ -278,11 +280,15 @@ class CSRGraph:
         self.predicate_to_idx = predicate_to_idx
         self.id_to_predicate = {idx: pred for pred, idx in predicate_to_idx.items()}
 
+        # Node store (LMDB) — None when using in-memory dicts (build time)
+        self.node_store = None
+
         # LMDB store (cold path) — set later by loader or load_mmap
         self.lmdb_store = None
 
         # Edge IDs from the original data — set later by loader or load_mmap
         self.edge_ids = None
+        self._edge_ids_env = None
 
         # Graph Metadata - set later by loader or load_mmap
         self.meta_kg = None
@@ -735,6 +741,10 @@ class CSRGraph:
 
     def get_edge_id(self, fwd_edge_idx):
         """Return the original edge ID for a forward-CSR position, or None."""
+        if getattr(self, "_edge_ids_env", None) is not None:
+            return self._load_edge_id_from_lmdb(
+                self._edge_ids_env, int(fwd_edge_idx)
+            )
         if self.edge_ids is not None:
             return self.edge_ids[int(fwd_edge_idx)]
         return None
@@ -763,10 +773,14 @@ class CSRGraph:
 
     def get_node_property(self, node_idx, key, default=None):
         """Get a specific property for a node"""
+        if self.node_store is not None:
+            return self.node_store.get_property(node_idx, key, default)
         return self.node_properties.get(node_idx, {}).get(key, default)
 
     def get_all_node_properties(self, node_idx):
         """Get all properties for a node as a dict"""
+        if self.node_store is not None:
+            return self.node_store.get_properties(node_idx)
         return self.node_properties.get(node_idx, {})
 
     def degree(self, node_idx, predicate_filter=None):
@@ -778,10 +792,14 @@ class CSRGraph:
 
     def get_node_idx(self, node_id):
         """Convert original node ID to internal index"""
+        if self.node_store is not None:
+            return self.node_store.get_node_idx(node_id)
         return self.node_id_to_idx.get(node_id)
 
     def get_node_id(self, node_idx):
         """Convert internal index to original node ID"""
+        if self.node_store is not None:
+            return self.node_store.get_node_id(node_idx)
         return self.idx_to_node_id.get(node_idx)
 
     def get_predicate_stats(self):
@@ -801,7 +819,7 @@ class CSRGraph:
         """Pre-extract the primary category for each node."""
         node_categories = {}
         for node_idx in range(self.num_nodes):
-            props = self.node_properties.get(node_idx, {})
+            props = self.get_all_node_properties(node_idx)
             cats = props.get("categories", ["biolink:NamedThing"])
             node_categories[node_idx] = cats[0] if cats else "biolink:NamedThing"
         return node_categories
@@ -809,7 +827,12 @@ class CSRGraph:
     def _build_category_prefixes(self, node_categories):
         """Collect ID prefixes per category."""
         category_prefixes = {}
-        for node_id, node_idx in self.node_id_to_idx.items():
+        id_iter = (
+            self.node_store.iter_id_to_idx()
+            if self.node_store is not None
+            else self.node_id_to_idx.items()
+        )
+        for node_id, node_idx in id_iter:
             cat = node_categories[node_idx]
             prefix = node_id.split(":")[0] if ":" in node_id else node_id
             if cat not in category_prefixes:
@@ -841,8 +864,8 @@ class CSRGraph:
 
                 if key not in triple_examples:
                     triple_examples[key] = (
-                        self.idx_to_node_id[src_idx],
-                        self.idx_to_node_id[tgt_idx],
+                        self.get_node_id(src_idx),
+                        self.get_node_id(tgt_idx),
                     )
 
         return triple_counts, triple_examples
@@ -871,7 +894,7 @@ class CSRGraph:
         # cat -> set of (type_id, source, orig_name)
         cat_attr_set = {}
         for node_idx in range(self.num_nodes):
-            props = self.node_properties.get(node_idx, {})
+            props = self.get_all_node_properties(node_idx)
             cat = node_categories[node_idx]
             if cat not in cat_attr_set:
                 cat_attr_set[cat] = set()
@@ -1040,6 +1063,49 @@ class CSRGraph:
     # Serialization
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _save_edge_ids_lmdb(db_path, edge_ids, commit_every=50_000):
+        """Save edge IDs list to an LMDB file."""
+        import shutil as _shutil
+
+        db_path = Path(db_path)
+        if db_path.exists():
+            _shutil.rmtree(db_path)
+        db_path.mkdir(parents=True, exist_ok=True)
+
+        import lmdb as _lmdb
+        env = _lmdb.open(
+            str(db_path), map_size=4 * 1024 * 1024 * 1024,
+            readonly=False, max_dbs=0, readahead=False,
+        )
+        txn = env.begin(write=True)
+        try:
+            for idx, eid in enumerate(edge_ids):
+                if eid is not None:
+                    key = struct.pack(">I", idx)
+                    val = eid.encode("utf-8") if isinstance(eid, str) else str(eid).encode("utf-8")
+                    txn.put(key, val)
+                if (idx + 1) % commit_every == 0:
+                    txn.commit()
+                    txn = env.begin(write=True)
+            txn.commit()
+        except BaseException:
+            txn.abort()
+            raise
+        finally:
+            env.close()
+        logger.debug("  Edge IDs LMDB: wrote %s entries to %s", f"{len(edge_ids):,}", db_path)
+
+    @staticmethod
+    def _load_edge_id_from_lmdb(env, edge_idx):
+        """Look up a single edge ID from an LMDB environment."""
+        key = struct.pack(">I", edge_idx)
+        with env.begin(buffers=True) as txn:
+            val = txn.get(key)
+            if val is None:
+                return None
+            return bytes(val).decode("utf-8")
+
     def save_mmap(self, directory: Union[str, Path]):
         """Save graph in memory-mappable format for fast loading.
 
@@ -1064,15 +1130,30 @@ class CSRGraph:
         np.save(directory / "rev_offsets.npy", self.rev_offsets)
         np.save(directory / "rev_to_fwd.npy", self.rev_to_fwd)
 
-        # Save small metadata as pickle (no edge_prop_index — binary search instead)
+        # Save small metadata as pickle (predicates + num_nodes only)
         metadata = {
             "num_nodes": self.num_nodes,
-            "node_id_to_idx": self.node_id_to_idx,
             "predicate_to_idx": self.predicate_to_idx,
-            "node_properties": self.node_properties,
         }
         with open(directory / "metadata.pkl", "wb") as f:
             pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # Save node ID mappings and properties as LMDB
+        node_id_to_idx = (
+            dict(self.node_store.iter_id_to_idx())
+            if isinstance(getattr(self, "node_store", None), NodeStore)
+            else self.node_id_to_idx
+        )
+        node_properties = (
+            dict(self.node_store.iter_properties())
+            if isinstance(getattr(self, "node_store", None), NodeStore)
+            else self.node_properties
+        )
+        NodeStore.build(
+            directory / "node_store.lmdb",
+            node_id_to_idx,
+            node_properties,
+        )
 
         # Save hot-path edge properties (qualifier + source dedup store)
         if isinstance(self.edge_properties, EdgePropertyStore):
@@ -1082,10 +1163,9 @@ class CSRGraph:
             with open(directory / "edge_properties.pkl", "wb") as f:
                 pickle.dump(self.edge_properties, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        # Save edge IDs if present
+        # Save edge IDs as LMDB if present
         if self.edge_ids is not None:
-            with open(directory / "edge_ids.pkl", "wb") as f:
-                pickle.dump(self.edge_ids, f, protocol=pickle.HIGHEST_PROTOCOL)
+            self._save_edge_ids_lmdb(directory / "edge_ids.lmdb", self.edge_ids)
 
         # Save meta_kg as JSON for fast loading at query time
         if hasattr(self, "meta_kg") and self.meta_kg is not None:
@@ -1169,13 +1249,27 @@ class CSRGraph:
             metadata = pickle.load(f)
 
         graph.num_nodes = metadata["num_nodes"]
-        graph.node_id_to_idx = metadata["node_id_to_idx"]
-        graph.idx_to_node_id = {idx: nid for nid, idx in graph.node_id_to_idx.items()}
         graph.predicate_to_idx = metadata["predicate_to_idx"]
         graph.id_to_predicate = {
             idx: pred for pred, idx in graph.predicate_to_idx.items()
         }
-        graph.node_properties = metadata["node_properties"]
+
+        # Load node store (LMDB) or fall back to legacy pickle
+        node_store_path = directory / "node_store.lmdb"
+        if node_store_path.exists():
+            graph.node_store = NodeStore(node_store_path, readonly=True)
+            # No in-memory dicts needed
+            graph.node_id_to_idx = None
+            graph.idx_to_node_id = None
+            graph.node_properties = None
+        else:
+            # Legacy: node data was in metadata.pkl
+            graph.node_store = None
+            graph.node_id_to_idx = metadata["node_id_to_idx"]
+            graph.idx_to_node_id = {
+                idx: nid for nid, idx in graph.node_id_to_idx.items()
+            }
+            graph.node_properties = metadata["node_properties"]
 
         # Load edge properties - detect format
         t_props_start = time.perf_counter()
@@ -1204,13 +1298,23 @@ class CSRGraph:
         else:
             graph.lmdb_store = None
 
-        # Load edge IDs if present
-        edge_ids_path = directory / "edge_ids.pkl"
-        if edge_ids_path.exists():
-            with open(edge_ids_path, "rb") as f:
+        # Load edge IDs — prefer LMDB, fall back to pickle
+        edge_ids_lmdb_path = directory / "edge_ids.lmdb"
+        edge_ids_pkl_path = directory / "edge_ids.pkl"
+        if edge_ids_lmdb_path.exists():
+            import lmdb as _lmdb
+            graph._edge_ids_env = _lmdb.open(
+                str(edge_ids_lmdb_path), readonly=True, max_dbs=0,
+                map_size=256 * 1024 * 1024 * 1024, readahead=False, lock=False,
+            )
+            graph.edge_ids = None  # signal: use LMDB
+        elif edge_ids_pkl_path.exists():
+            with open(edge_ids_pkl_path, "rb") as f:
                 graph.edge_ids = pickle.load(f)
+            graph._edge_ids_env = None
         else:
             graph.edge_ids = None
+            graph._edge_ids_env = None
 
         t_props_end = time.perf_counter()
 

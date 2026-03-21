@@ -399,6 +399,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     graph.predicate_to_idx = predicate_to_idx
     graph.id_to_predicate = {idx: pred for pred, idx in predicate_to_idx.items()}
     graph.node_properties = node_properties
+    graph.node_store = None
 
     graph.fwd_targets = dst_sorted
     graph.fwd_predicates = pred_sorted
@@ -411,6 +412,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
 
     graph.edge_properties = edge_properties
     graph.edge_ids = edge_ids_sorted
+    graph._edge_ids_env = None
     graph.lmdb_store = lmdb_store
 
     # Print statistics
