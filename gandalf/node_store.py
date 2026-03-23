@@ -46,8 +46,9 @@ def _put_with_resize(env, txn, db, key, val, pending):
         txn.abort()
         new_size = env.info()["map_size"] * 2
         env.set_mapsize(new_size)
-        logger.warning("    NodeStore LMDB: map full, resized to %.0f GB",
-                        new_size / (1024**3))
+        logger.warning(
+            "    NodeStore LMDB: map full, resized to %.0f GB", new_size / (1024**3)
+        )
         txn = env.begin(write=True)
         for pdb, pk, pv in pending:
             txn.put(pk, pv, db=pdb)
@@ -148,8 +149,9 @@ class NodeStore:
         return False
 
     @staticmethod
-    def build(db_path, node_id_to_idx: dict, node_properties: dict,
-              commit_every=50_000):
+    def build(
+        db_path, node_id_to_idx: dict, node_properties: dict, commit_every=50_000
+    ):
         """Build a NodeStore LMDB from in-memory dicts.
 
         Args:
@@ -178,7 +180,9 @@ class NodeStore:
         db_properties = env.open_db(b"properties", create=True)
 
         # Write id_to_idx and idx_to_id mappings
-        logger.debug("  NodeStore: writing %s ID mappings...", f"{len(node_id_to_idx):,}")
+        logger.debug(
+            "  NodeStore: writing %s ID mappings...", f"{len(node_id_to_idx):,}"
+        )
         pending = []
         txn = env.begin(write=True)
         count = 0
@@ -186,8 +190,12 @@ class NodeStore:
             for node_id, node_idx in node_id_to_idx.items():
                 key_str = node_id.encode("utf-8")
                 key_idx = _encode_idx(node_idx)
-                txn = _put_with_resize(env, txn, db_id_to_idx, key_str, key_idx, pending)
-                txn = _put_with_resize(env, txn, db_idx_to_id, key_idx, key_str, pending)
+                txn = _put_with_resize(
+                    env, txn, db_id_to_idx, key_str, key_idx, pending
+                )
+                txn = _put_with_resize(
+                    env, txn, db_idx_to_id, key_idx, key_str, pending
+                )
                 count += 1
                 if count % commit_every == 0:
                     txn.commit()
@@ -200,8 +208,9 @@ class NodeStore:
             raise
 
         # Write node properties
-        logger.debug("  NodeStore: writing %s node properties...",
-                      f"{len(node_properties):,}")
+        logger.debug(
+            "  NodeStore: writing %s node properties...", f"{len(node_properties):,}"
+        )
         pending = []
         txn = env.begin(write=True)
         count = 0

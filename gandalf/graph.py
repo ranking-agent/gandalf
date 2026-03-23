@@ -742,9 +742,7 @@ class CSRGraph:
     def get_edge_id(self, fwd_edge_idx):
         """Return the original edge ID for a forward-CSR position, or None."""
         if getattr(self, "_edge_ids_env", None) is not None:
-            return self._load_edge_id_from_lmdb(
-                self._edge_ids_env, int(fwd_edge_idx)
-            )
+            return self._load_edge_id_from_lmdb(self._edge_ids_env, int(fwd_edge_idx))
         if self.edge_ids is not None:
             return self.edge_ids[int(fwd_edge_idx)]
         return None
@@ -1075,8 +1073,11 @@ class CSRGraph:
 
         _INITIAL = 4 * 1024 * 1024 * 1024  # 4 GB
         env = _lmdb.open(
-            str(db_path), map_size=_INITIAL,
-            readonly=False, max_dbs=0, readahead=False,
+            str(db_path),
+            map_size=_INITIAL,
+            readonly=False,
+            max_dbs=0,
+            readahead=False,
         )
         pending = []
         txn = env.begin(write=True)
@@ -1084,7 +1085,11 @@ class CSRGraph:
             for idx, eid in enumerate(edge_ids):
                 if eid is not None:
                     key = struct.pack(">I", idx)
-                    val = eid.encode("utf-8") if isinstance(eid, str) else str(eid).encode("utf-8")
+                    val = (
+                        eid.encode("utf-8")
+                        if isinstance(eid, str)
+                        else str(eid).encode("utf-8")
+                    )
                     try:
                         txn.put(key, val)
                         pending.append((key, val))
@@ -1092,8 +1097,10 @@ class CSRGraph:
                         txn.abort()
                         new_size = env.info()["map_size"] * 2
                         env.set_mapsize(new_size)
-                        logger.warning("    Edge IDs LMDB: map full, resized to %.0f GB",
-                                        new_size / (1024**3))
+                        logger.warning(
+                            "    Edge IDs LMDB: map full, resized to %.0f GB",
+                            new_size / (1024**3),
+                        )
                         txn = env.begin(write=True)
                         for pk, pv in pending:
                             txn.put(pk, pv)
@@ -1109,7 +1116,9 @@ class CSRGraph:
             raise
         finally:
             env.close()
-        logger.debug("  Edge IDs LMDB: wrote %s entries to %s", f"{len(edge_ids):,}", db_path)
+        logger.debug(
+            "  Edge IDs LMDB: wrote %s entries to %s", f"{len(edge_ids):,}", db_path
+        )
 
     @staticmethod
     def _load_edge_id_from_lmdb(env, edge_idx):
@@ -1318,9 +1327,14 @@ class CSRGraph:
         edge_ids_pkl_path = directory / "edge_ids.pkl"
         if edge_ids_lmdb_path.exists():
             import lmdb as _lmdb
+
             graph._edge_ids_env = _lmdb.open(
-                str(edge_ids_lmdb_path), readonly=True, max_dbs=0,
-                map_size=256 * 1024 * 1024 * 1024, readahead=False, lock=False,
+                str(edge_ids_lmdb_path),
+                readonly=True,
+                max_dbs=0,
+                map_size=256 * 1024 * 1024 * 1024,
+                readahead=False,
+                lock=False,
             )
             graph.edge_ids = None  # signal: use LMDB
         elif edge_ids_pkl_path.exists():
