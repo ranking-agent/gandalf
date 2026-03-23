@@ -62,7 +62,8 @@ def _encode_idx(idx: int) -> bytes:
 
 
 def _decode_idx(key: bytes) -> int:
-    return struct.unpack(">I", key)[0]
+    result: int = struct.unpack(">I", key)[0]
+    return result
 
 
 class NodeStore:
@@ -108,7 +109,8 @@ class NodeStore:
             val = txn.get(_encode_idx(node_idx))
             if val is None:
                 return {}
-            return msgpack.unpackb(val, raw=False)
+            result: dict = msgpack.unpackb(val, raw=False)
+            return result
 
     def get_property(self, node_idx: int, key: str, default=None):
         """Get a specific property for a node."""
@@ -183,7 +185,7 @@ class NodeStore:
         logger.debug(
             "  NodeStore: writing %s ID mappings...", f"{len(node_id_to_idx):,}"
         )
-        pending = []
+        pending: list[tuple[object, bytes, bytes]] = []
         txn = env.begin(write=True)
         count = 0
         try:
