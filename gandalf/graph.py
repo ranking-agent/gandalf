@@ -1066,27 +1066,42 @@ class CSRGraph:
     @staticmethod
     def _save_edge_ids_lmdb(db_path, edge_ids, commit_every=50_000):
         """Save edge IDs list to an LMDB file."""
-        import shutil as _shutil
+        import lmdb as _lmdb
 
         db_path = Path(db_path)
         if db_path.exists():
-            _shutil.rmtree(db_path)
+            shutil.rmtree(db_path)
         db_path.mkdir(parents=True, exist_ok=True)
 
-        import lmdb as _lmdb
+        _INITIAL = 4 * 1024 * 1024 * 1024  # 4 GB
         env = _lmdb.open(
-            str(db_path), map_size=4 * 1024 * 1024 * 1024,
+            str(db_path), map_size=_INITIAL,
             readonly=False, max_dbs=0, readahead=False,
         )
+        pending = []
         txn = env.begin(write=True)
         try:
             for idx, eid in enumerate(edge_ids):
                 if eid is not None:
                     key = struct.pack(">I", idx)
                     val = eid.encode("utf-8") if isinstance(eid, str) else str(eid).encode("utf-8")
-                    txn.put(key, val)
+                    try:
+                        txn.put(key, val)
+                        pending.append((key, val))
+                    except _lmdb.MapFullError:
+                        txn.abort()
+                        new_size = env.info()["map_size"] * 2
+                        env.set_mapsize(new_size)
+                        logger.warning("    Edge IDs LMDB: map full, resized to %.0f GB",
+                                        new_size / (1024**3))
+                        txn = env.begin(write=True)
+                        for pk, pv in pending:
+                            txn.put(pk, pv)
+                        txn.put(key, val)
+                        pending.append((key, val))
                 if (idx + 1) % commit_every == 0:
                     txn.commit()
+                    pending.clear()
                     txn = env.begin(write=True)
             txn.commit()
         except BaseException:

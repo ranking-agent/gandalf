@@ -27,6 +27,35 @@ _DEFAULT_READ_MAP_SIZE = 256 * 1024 * 1024 * 1024  # 256 GB (virtual only)
 _INITIAL_WRITE_MAP_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
 
 
+def _put_with_resize(env, txn, db, key, val, pending):
+    """Put key/value, auto-resizing the map on MapFullError.
+
+    After a failed put(), LMDB invalidates the transaction — it must be
+    aborted, not committed.  We abort, double the map, replay all writes
+    since the last commit (*pending*), and retry.
+
+    Callers must clear *pending* after every successful commit.
+
+    Returns the (possibly new) write transaction.
+    """
+    try:
+        txn.put(key, val, db=db)
+        pending.append((db, key, val))
+        return txn
+    except lmdb.MapFullError:
+        txn.abort()
+        new_size = env.info()["map_size"] * 2
+        env.set_mapsize(new_size)
+        logger.warning("    NodeStore LMDB: map full, resized to %.0f GB",
+                        new_size / (1024**3))
+        txn = env.begin(write=True)
+        for pdb, pk, pv in pending:
+            txn.put(pk, pv, db=pdb)
+        txn.put(key, val, db=db)
+        pending.append((db, key, val))
+        return txn
+
+
 def _encode_idx(idx: int) -> bytes:
     return struct.pack(">I", idx)
 
@@ -150,19 +179,22 @@ class NodeStore:
 
         # Write id_to_idx and idx_to_id mappings
         logger.debug("  NodeStore: writing %s ID mappings...", f"{len(node_id_to_idx):,}")
+        pending = []
         txn = env.begin(write=True)
         count = 0
         try:
             for node_id, node_idx in node_id_to_idx.items():
                 key_str = node_id.encode("utf-8")
                 key_idx = _encode_idx(node_idx)
-                txn.put(key_str, key_idx, db=db_id_to_idx)
-                txn.put(key_idx, key_str, db=db_idx_to_id)
+                txn = _put_with_resize(env, txn, db_id_to_idx, key_str, key_idx, pending)
+                txn = _put_with_resize(env, txn, db_idx_to_id, key_idx, key_str, pending)
                 count += 1
                 if count % commit_every == 0:
                     txn.commit()
+                    pending.clear()
                     txn = env.begin(write=True)
             txn.commit()
+            pending.clear()
         except BaseException:
             txn.abort()
             raise
@@ -170,18 +202,21 @@ class NodeStore:
         # Write node properties
         logger.debug("  NodeStore: writing %s node properties...",
                       f"{len(node_properties):,}")
+        pending = []
         txn = env.begin(write=True)
         count = 0
         try:
             for node_idx, props in node_properties.items():
                 key = _encode_idx(node_idx)
                 val = msgpack.packb(props, use_bin_type=True)
-                txn.put(key, val, db=db_properties)
+                txn = _put_with_resize(env, txn, db_properties, key, val, pending)
                 count += 1
                 if count % commit_every == 0:
                     txn.commit()
+                    pending.clear()
                     txn = env.begin(write=True)
             txn.commit()
+            pending.clear()
         except BaseException:
             txn.abort()
             raise
