@@ -311,12 +311,12 @@ def reconstruct_paths(
     )
 
     if DEBUG_PATHS_TSV:
-        _dump_debug_tsv(path_arrays, query_graph, join_order)
+        _dump_debug_tsv(path_arrays, query_graph, join_order, graph)
 
     return path_arrays
 
 
-def _dump_debug_tsv(path_arrays, query_graph, join_order):
+def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
     """Write all reconstructed paths to a TSV file for debugging.
 
     Each row is one path.  Columns are dynamically generated based on the
@@ -325,9 +325,8 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order):
     Column layout (interleaved nodes and edges in path order):
         path_index,
         n0_qnode, n0_curie, n0_name, n0_category,
-        e0_qedge, e0_predicate, e0_via_inverse,
+        e0_qedge, e0_predicate, e0_via_inverse, e0_fwd_edge_idx, e0_sources, e0_qualifiers,
         n1_qnode, n1_curie, n1_name, n1_category,
-        e1_qedge, e1_predicate, e1_via_inverse,
         ...
         nN_qnode, nN_curie, nN_name, nN_category
     """
@@ -346,7 +345,8 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order):
 
     if num_paths > 1_000_000:
         logger.warning(
-            "  Debug TSV: writing %s paths — file may be very large", f"{num_paths:,}"
+            "  Debug TSV: writing %s paths — file may be very large",
+            f"{num_paths:,}",
         )
 
     # Build ordered sequence of (node_qid, edge_qid) pairs along the path.
@@ -398,6 +398,9 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order):
                 visited_nodes.add(subj_qnode)
                 visited_nodes.add(obj_qnode)
 
+    # Check if we can look up edge properties (sources, qualifiers)
+    has_edge_props = hasattr(graph, "edge_properties") and graph.edge_properties is not None
+
     # Build header
     header = ["path_index"]
     for i, qnode_id in enumerate(ordered_nodes):
@@ -413,7 +416,14 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order):
         if i < len(ordered_edges):
             eprefix = f"e{i}"
             header.extend(
-                [f"{eprefix}_qedge", f"{eprefix}_predicate", f"{eprefix}_via_inverse"]
+                [
+                    f"{eprefix}_qedge",
+                    f"{eprefix}_predicate",
+                    f"{eprefix}_via_inverse",
+                    f"{eprefix}_fwd_edge_idx",
+                    f"{eprefix}_sources",
+                    f"{eprefix}_qualifiers",
+                ]
             )
 
     try:
@@ -445,14 +455,57 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order):
                             pred_idx = int(pa.paths_preds[path_idx, ecol])
                             predicate = pa.idx_to_predicate[pred_idx]
                             via_inv = bool(pa.paths_via_inverse[path_idx, ecol])
+                            fwd_eidx = int(
+                                pa.paths_fwd_edge_idx[path_idx, ecol]
+                            )
                         else:
                             predicate = ""
                             via_inv = ""
-                        row.extend([edge_id, predicate, via_inv])
+                            fwd_eidx = -1
+
+                        # Look up sources and qualifiers from edge properties
+                        sources_str = ""
+                        quals_str = ""
+                        if has_edge_props and fwd_eidx >= 0:
+                            try:
+                                sources = graph.edge_properties.get_sources(
+                                    fwd_eidx
+                                )
+                                if sources:
+                                    sources_str = "|".join(
+                                        f"{s.get('resource_id', '')}:{s.get('resource_role', '')}"
+                                        for s in sources
+                                    )
+                            except Exception:
+                                sources_str = "<error>"
+                            try:
+                                quals = graph.edge_properties.get_qualifiers(
+                                    fwd_eidx
+                                )
+                                if quals:
+                                    quals_str = "|".join(
+                                        f"{q.get('qualifier_type_id', '')}={q.get('qualifier_value', '')}"
+                                        for q in quals
+                                    )
+                            except Exception:
+                                quals_str = "<error>"
+
+                        row.extend(
+                            [
+                                edge_id,
+                                predicate,
+                                via_inv,
+                                fwd_eidx,
+                                sources_str,
+                                quals_str,
+                            ]
+                        )
 
                 writer.writerow(row)
 
-        logger.info("  Debug TSV: wrote %s paths to %s", f"{num_paths:,}", tsv_path)
+        logger.info(
+            "  Debug TSV: wrote %s paths to %s", f"{num_paths:,}", tsv_path
+        )
     except OSError as exc:
         logger.error("  Debug TSV: failed to write %s: %s", tsv_path, exc)
 
