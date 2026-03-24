@@ -402,10 +402,19 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order):
     header = ["path_index"]
     for i, qnode_id in enumerate(ordered_nodes):
         prefix = f"n{i}"
-        header.extend([f"{prefix}_qnode", f"{prefix}_curie", f"{prefix}_name", f"{prefix}_category"])
+        header.extend(
+            [
+                f"{prefix}_qnode",
+                f"{prefix}_curie",
+                f"{prefix}_name",
+                f"{prefix}_category",
+            ]
+        )
         if i < len(ordered_edges):
             eprefix = f"e{i}"
-            header.extend([f"{eprefix}_qedge", f"{eprefix}_predicate", f"{eprefix}_via_inverse"])
+            header.extend(
+                [f"{eprefix}_qedge", f"{eprefix}_predicate", f"{eprefix}_via_inverse"]
+            )
 
     try:
         with open(tsv_path, "w", newline="") as fh:
