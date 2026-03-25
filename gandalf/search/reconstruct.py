@@ -399,7 +399,9 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
                 visited_nodes.add(obj_qnode)
 
     # Check if we can look up edge properties (sources, qualifiers)
-    has_edge_props = hasattr(graph, "edge_properties") and graph.edge_properties is not None
+    has_edge_props = (
+        hasattr(graph, "edge_properties") and graph.edge_properties is not None
+    )
 
     # Build header
     header = ["path_index"]
@@ -455,9 +457,7 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
                             pred_idx = int(pa.paths_preds[path_idx, ecol])
                             predicate = pa.idx_to_predicate[pred_idx]
                             via_inv = bool(pa.paths_via_inverse[path_idx, ecol])
-                            fwd_eidx = int(
-                                pa.paths_fwd_edge_idx[path_idx, ecol]
-                            )
+                            fwd_eidx = int(pa.paths_fwd_edge_idx[path_idx, ecol])
                         else:
                             predicate = ""
                             via_inv = ""
@@ -468,9 +468,7 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
                         quals_str = ""
                         if has_edge_props and fwd_eidx >= 0:
                             try:
-                                sources = graph.edge_properties.get_sources(
-                                    fwd_eidx
-                                )
+                                sources = graph.edge_properties.get_sources(fwd_eidx)
                                 if sources:
                                     sources_str = "|".join(
                                         f"{s.get('resource_id', '')}:{s.get('resource_role', '')}"
@@ -479,9 +477,7 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
                             except Exception:
                                 sources_str = "<error>"
                             try:
-                                quals = graph.edge_properties.get_qualifiers(
-                                    fwd_eidx
-                                )
+                                quals = graph.edge_properties.get_qualifiers(fwd_eidx)
                                 if quals:
                                     quals_str = "|".join(
                                         f"{q.get('qualifier_type_id', '')}={q.get('qualifier_value', '')}"
@@ -503,9 +499,7 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
 
                 writer.writerow(row)
 
-        logger.info(
-            "  Debug TSV: wrote %s paths to %s", f"{num_paths:,}", tsv_path
-        )
+        logger.info("  Debug TSV: wrote %s paths to %s", f"{num_paths:,}", tsv_path)
     except OSError as exc:
         logger.error("  Debug TSV: failed to write %s: %s", tsv_path, exc)
 
