@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     web_port: int = 8080  # port Gandalf is serving on
     plater_title: str = ""
 
+    # Infores identifiers
+    infores_gandalf: str = "infores:gandalf"
+    infores_shepherd: str = "infores:shepherd"
+
     otel_enabled: bool = True
     otel_service_name: str = "gandalf"
     otel_use_console_exporter: bool = False

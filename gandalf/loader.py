@@ -21,6 +21,7 @@ import msgpack
 import numpy as np
 import orjson
 
+from gandalf.config import settings
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import (
     LMDBPropertyStore,
@@ -90,7 +91,7 @@ def _extract_sources(data):
 
     # Prepend gandalf as aggregator_knowledge_source
     gandalf_source = {
-        "resource_id": "infores:gandalf",
+        "resource_id": settings.infores_gandalf,
         "resource_role": "aggregator_knowledge_source",
         "upstream_resource_ids": top_ids,
     }

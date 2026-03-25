@@ -11,6 +11,7 @@ from bmt.toolkit import Toolkit
 
 logger = logging.getLogger(__name__)
 
+from gandalf.config import settings
 from gandalf.logging_config import TRAPILogCollector
 from gandalf.query_planner import get_next_qedge, remove_orphaned
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
@@ -440,7 +441,7 @@ def _build_response(
             "node_bindings": {},
             "analyses": [
                 {
-                    "resource_id": "infores:gandalf",
+                    "resource_id": settings.infores_gandalf,
                     "edge_bindings": {},
                 }
             ],
@@ -678,7 +679,7 @@ def _build_response(
                                 ],
                                 "sources": [
                                     {
-                                        "resource_id": "infores:gandalf",
+                                        "resource_id": settings.infores_gandalf,
                                         "resource_role": "primary_knowledge_source",
                                     }
                                 ],
