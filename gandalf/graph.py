@@ -292,6 +292,7 @@ class CSRGraph:
 
         # Graph Metadata - set later by loader or load_mmap
         self.meta_kg = None
+        self.sri_testing_data = None
         self.graph_metadata = None
 
         # Build both forward and reverse CSR structures
@@ -1016,15 +1017,25 @@ class CSRGraph:
     def build_metadata(self):
         """Pre-compute Plater-compatible metadata from the CSR graph.
 
-        Builds:
+        Builds (if not already present):
         - meta_kg: TRAPI MetaKnowledgeGraph (via build_meta_kg if not already set)
         - sri_testing_data: One representative edge per (subj_cat, pred, obj_cat) triple
-        - simple_spec: {source_cat: {target_cat: [predicates]}} connection schema
-        - graph_metadata: Graph statistics (node/edge counts, predicate distribution)
 
-        Stored as attributes on the graph object.
+        Ideally both are created offline during graph building and loaded
+        from disk.  This method only regenerates them as a fallback.
         """
-        logger.debug("Building Plater-compatible metadata...")
+        # If both are already loaded (e.g. from disk), nothing to do.
+        if (
+            getattr(self, "meta_kg", None) is not None
+            and getattr(self, "sri_testing_data", None) is not None
+        ):
+            return
+
+        logger.warning(
+            "meta_kg and/or sri_testing_data not pre-loaded; "
+            "generating on the fly (consider building offline first)"
+        )
+
         t0 = time.perf_counter()
 
         node_categories = self._build_node_categories()
@@ -1035,19 +1046,20 @@ class CSRGraph:
         if not hasattr(self, "meta_kg") or self.meta_kg is None:
             self.build_meta_kg()
 
-        # Build SRI testing data
-        self.sri_testing_data = {
-            "edges": [
-                {
-                    "subject_category": subj_cat,
-                    "object_category": obj_cat,
-                    "predicate": pred,
-                    "subject_id": example[0],
-                    "object_id": example[1],
-                }
-                for (subj_cat, pred, obj_cat), example in triple_examples.items()
-            ]
-        }
+        # Build SRI testing data if not already loaded from disk
+        if not hasattr(self, "sri_testing_data") or self.sri_testing_data is None:
+            self.sri_testing_data = {
+                "edges": [
+                    {
+                        "subject_category": subj_cat,
+                        "object_category": obj_cat,
+                        "predicate": pred,
+                        "subject_id": example[0],
+                        "object_id": example[1],
+                    }
+                    for (subj_cat, pred, obj_cat), example in triple_examples.items()
+                ]
+            }
 
         t1 = time.perf_counter()
         logger.debug(
@@ -1195,6 +1207,11 @@ class CSRGraph:
         if hasattr(self, "meta_kg") and self.meta_kg is not None:
             with open(directory / "meta_kg.json", "w", encoding="utf-8") as f:
                 json.dump(self.meta_kg, f, separators=(",", ":"))
+
+        # Save sri_testing_data as JSON for fast loading at query time
+        if hasattr(self, "sri_testing_data") and self.sri_testing_data is not None:
+            with open(directory / "sri_testing_data.json", "w", encoding="utf-8") as f:
+                json.dump(self.sri_testing_data, f, separators=(",", ":"))
 
         # Copy LMDB store if present
         if self.lmdb_store is not None:
@@ -1388,6 +1405,15 @@ class CSRGraph:
             logger.debug("  Loaded meta_kg from %s", meta_kg_path)
         else:
             graph.meta_kg = None  # will be built by build_metadata()
+
+        # Load pre-computed sri_testing_data from disk if available.
+        sri_testing_path = directory / "sri_testing_data.json"
+        if sri_testing_path.exists():
+            with open(sri_testing_path, "r", encoding="utf-8") as f:
+                graph.sri_testing_data = json.load(f)
+            logger.debug("  Loaded sri_testing_data from %s", sri_testing_path)
+        else:
+            graph.sri_testing_data = None  # will be built by build_metadata()
 
         metadata_path = directory / "graph-metadata.json"
         if metadata_path.exists():
