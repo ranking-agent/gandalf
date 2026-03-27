@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     graph_path: str = "/data/graph"
     graph_format: str = "auto"  # "auto" or "mmap"
-    load_mmaps_into_memory: bool = True
+    load_mmaps_into_memory: bool = False
     log_level: str = "INFO"
     log_format: str = "text"  # "text" or "json"
     cors_origins: str = "*"
@@ -33,8 +33,10 @@ class Settings(BaseSettings):
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="allow",
+    )
 
 
 settings = Settings()

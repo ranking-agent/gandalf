@@ -1,6 +1,8 @@
 # Use RENCI python base image
 FROM ghcr.io/translatorsri/renci-python-image:3.11.5
 
+ENV PYSTOW_HOME=/tmp/pystow
+
 WORKDIR /app
 
 # make sure all is writeable for the nru USER later on

@@ -44,6 +44,8 @@ _CORE_FIELDS = {
     "object",
     "predicate",
     "sources",
+    "primary_knowledge_source",
+    "aggregator_knowledge_source",
 }
 
 # Node fields that become top-level TRAPI Node properties (not attributes)
@@ -71,15 +73,43 @@ def _extract_sources(data):
     """
     raw = data.get("sources", [])
 
-    # Normalize: guarantee upstream_resource_ids on every source
-    sources = [
-        {
-            "resource_id": s["resource_id"],
-            "resource_role": s["resource_role"],
-            "upstream_resource_ids": s.get("upstream_resource_ids", []),
-        }
-        for s in raw
-    ]
+    if len(raw) == 0:
+        # this is most likely from an automat kgx
+        sources = [
+            {
+                "resource_id": data["primary_knowledge_source"],
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": [],
+            }
+        ]
+
+        if (
+            "aggregator_knowledge_source" in data
+            and len(data["aggregator_knowledge_source"]) > 0
+        ):
+            data["aggregator_knowledge_source"].reverse()
+            previous_source = data["primary_knowledge_source"]
+            for aggregator_source in data["aggregator_knowledge_source"]:
+                sources.append(
+                    {
+                        "resource_id": aggregator_source,
+                        "resource_role": "aggregator_knowledge_source",
+                        "upstream_resource_ids": [previous_source],
+                    }
+                )
+                previous_source = aggregator_source
+    else:
+        # new translatorkg format
+
+        # Normalize: guarantee upstream_resource_ids on every source
+        sources = [
+            {
+                "resource_id": s["resource_id"],
+                "resource_role": s["resource_role"],
+                "upstream_resource_ids": s.get("upstream_resource_ids", []),
+            }
+            for s in raw
+        ]
 
     # Find the top of the source chain: sources whose resource_id is NOT
     # referenced in any other source's upstream_resource_ids.  These are the
