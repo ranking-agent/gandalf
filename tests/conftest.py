@@ -78,13 +78,16 @@ class MockBMT:
         }
     )
 
-    # Predicate hierarchy: parent -> list of children.
-    # Only predicates whose descendants matter for tests are listed.
+    # Hierarchy: parent -> list of children.
+    # Covers both predicates and categories used in tests.
     _DESCENDANTS = {
         "biolink:treats": [
             "biolink:ameliorates_condition",
             "biolink:preventative_for_condition",
         ],
+        "biolink:Drug": ["biolink:SmallMolecule"],
+        "biolink:GeneOrGeneProduct": ["biolink:Gene"],
+        "biolink:ChemicalEntity": ["biolink:SmallMolecule", "biolink:Drug"],
     }
 
     # Qualifier enum values used for qualifier expansion.

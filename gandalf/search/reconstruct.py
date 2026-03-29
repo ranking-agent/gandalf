@@ -31,6 +31,30 @@ LARGE_RESULT_PATH_THRESHOLD = int(
 MAX_PATH_LIMIT = int(os.environ.get("GANDALF_MAX_PATH_LIMIT", "0"))
 
 
+def _get_most_specific_category(categories, bmt):
+    """Return a single-element list with the most specific category.
+
+    Uses BMT's ``get_descendants`` to find the leaf category — the one
+    whose descendant set contains none of the other categories in the list.
+    """
+    if len(categories) <= 1:
+        return list(categories)
+
+    cat_set = set(categories)
+    for cat in categories:
+        try:
+            descendants = set(bmt.get_descendants(cat, formatted=True))
+        except Exception:
+            descendants = set()
+        if descendants & (cat_set - {cat}):
+            # This category has a more-specific sibling in the list
+            continue
+        return [cat]
+
+    # Fallback: return first element
+    return [categories[0]]
+
+
 def reconstruct_paths(
     graph,
     query_graph,
@@ -38,6 +62,7 @@ def reconstruct_paths(
     edge_order,
     edge_inverse_preds=None,
     dehydrated=None,
+    bmt=None,
 ):
     """Reconstruct complete paths by iteratively joining edge results.
 
@@ -290,12 +315,21 @@ def reconstruct_paths(
     node_cache = {}
     node_id_cache = {}
     for node_idx in unique_node_indices:
-        node_props = graph.get_all_node_properties(node_idx).copy()
-        if "categories" not in node_props:
-            node_props["categories"] = []
-        if "attributes" not in node_props:
-            node_props["attributes"] = []
-        node_cache[node_idx] = node_props
+        if lightweight and bmt is not None:
+            all_props = graph.get_all_node_properties(node_idx)
+            node_cache[node_idx] = {
+                "name": all_props.get("name"),
+                "categories": _get_most_specific_category(
+                    all_props.get("categories", []), bmt
+                ),
+            }
+        else:
+            node_props = graph.get_all_node_properties(node_idx).copy()
+            if "categories" not in node_props:
+                node_props["categories"] = []
+            if "attributes" not in node_props:
+                node_props["attributes"] = []
+            node_cache[node_idx] = node_props
         node_id_cache[node_idx] = graph.get_node_id(node_idx)
 
     t_cache_end = time.perf_counter()

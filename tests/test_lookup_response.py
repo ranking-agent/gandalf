@@ -297,6 +297,102 @@ class TestMetforminType2DiabetesEdges:
         assert len(edge_bindings) == 4
 
 
+class TestDehydratedNodeProperties:
+    """Tests for simplified node properties in dehydrated/lightweight mode."""
+
+    def test_dehydrated_nodes_only_have_name_and_categories(self, graph, bmt):
+        """In dehydrated mode, KG nodes should only contain name and categories."""
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"ids": ["MONDO:0005148"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:treats"],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, dehydrated=True)
+        kg_nodes = response["message"]["knowledge_graph"]["nodes"]
+
+        assert len(kg_nodes) > 0
+        for node_id, node in kg_nodes.items():
+            assert set(node.keys()) == {"name", "categories"}, (
+                f"Node {node_id} has unexpected keys: {set(node.keys())}"
+            )
+
+    def test_dehydrated_categories_trimmed_to_most_specific(self, graph, bmt):
+        """In dehydrated mode, categories should be trimmed to the most specific."""
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"ids": ["MONDO:0005148"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:treats"],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, dehydrated=True)
+        kg_nodes = response["message"]["knowledge_graph"]["nodes"]
+
+        # Metformin has ["biolink:SmallMolecule", "biolink:Drug"] in fixture;
+        # SmallMolecule is more specific (Drug has SmallMolecule as descendant)
+        metformin = kg_nodes["CHEBI:6801"]
+        assert metformin["categories"] == ["biolink:SmallMolecule"]
+
+        # Type 2 Diabetes has only ["biolink:Disease"] — stays as-is
+        diabetes = kg_nodes["MONDO:0005148"]
+        assert diabetes["categories"] == ["biolink:Disease"]
+
+    def test_non_dehydrated_preserves_all_properties(self, graph, bmt):
+        """Without dehydration, nodes should keep all their properties."""
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"ids": ["MONDO:0005148"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:treats"],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, dehydrated=False)
+        kg_nodes = response["message"]["knowledge_graph"]["nodes"]
+
+        metformin = kg_nodes["CHEBI:6801"]
+        # Should have all original properties
+        assert "name" in metformin
+        assert "categories" in metformin
+        assert "attributes" in metformin
+        # Full categories list preserved
+        assert metformin["categories"] == ["biolink:SmallMolecule", "biolink:Drug"]
+
+
 class TestTRAPILogs:
     """Tests for TRAPI-spec logs in the response root."""
 

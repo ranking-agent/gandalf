@@ -304,6 +304,7 @@ def _lookup_inner(
         original_edges,
         edge_inverse_preds=edge_inverse_preds,
         dehydrated=dehydrated,
+        bmt=bmt,
     )
 
     num_paths = len(path_data) if path_data is not None else 0
