@@ -2,7 +2,7 @@
 
 Graph Analysis Navigator for Discovery And Link Finding
 
-A high-performance Python library and [Translator](https://ncats.nih.gov/translator)-compatible TRAPI server for fast 3-hop path finding in large biomedical knowledge graphs.
+A high-performance Python library and [Translator](https://ncats.nih.gov/translator)-compatible TRAPI server for fast path finding in large biomedical knowledge graphs.
 
 ## Features
 
@@ -16,7 +16,7 @@ A high-performance Python library and [Translator](https://ncats.nih.gov/transla
 - **Diagnostic tools** to understand path counts and explosion
 - **TRAPI 1.5 compatible** REST API with Plater-compatible endpoints
 - **Async query support** with callback URLs
-- **Dehydrated mode** for lightweight responses that skip edge attribute enrichment
+- **Dehydrated mode** for lightweight responses that skip edge and node attribute enrichment
 - **OpenTelemetry tracing** with Jaeger integration
 
 ## Installation
@@ -62,11 +62,10 @@ from gandalf import build_graph_from_jsonl
 graph = build_graph_from_jsonl(
     edges_path="data/raw/edges.jsonl",
     nodes_path="data/raw/nodes.jsonl",
-    excluded_predicates={'biolink:subclass_of'}
 )
 
 # Save for fast loading
-graph.save_mmap("data/processed/graph_filtered")
+graph.save_mmap("data/processed/gandalf_mmap")
 ```
 
 ### Query paths (TRAPI format)
@@ -75,7 +74,7 @@ graph.save_mmap("data/processed/graph_filtered")
 from gandalf import CSRGraph, lookup
 
 # Load graph (takes ~1-2 seconds)
-graph = CSRGraph.load_mmap("data/processed/graph")
+graph = CSRGraph.load_mmap("data/processed/gandalf_mmap")
 
 # Execute a TRAPI query
 response = lookup(
@@ -100,26 +99,6 @@ response = lookup(
 )
 
 print(f"Found {len(response['message']['results'])} paths")
-```
-
-### Filter by predicates (direct API)
-
-```python
-from gandalf import CSRGraph, find_3hop_paths_filtered
-
-graph = CSRGraph.load_mmap("data/processed/graph")
-
-# Only mechanistic relationships
-paths = find_3hop_paths_filtered(
-    graph,
-    start_id="CHEBI:45783",
-    end_id="MONDO:0004979",
-    allowed_predicates={
-        'biolink:treats',
-        'biolink:affects',
-        'biolink:has_metabolite'
-    }
-)
 ```
 
 ## Architecture
@@ -255,6 +234,7 @@ open http://localhost:6429/docs
 ```
 
 ## Releases
-
-Run this on the mmap folder:
-- `tar -czvf gandalf_mmap_<date>.tar.gz gandalf_mmap`
+- Make a release in GitHub to run a GitHub Action that pushes a gandalf to ghcr
+- Run this on the mmap folder: `tar -czvf gandalf_mmap_<date>.tar.gz gandalf_mmap`
+- Upload the tar.gz file to a public file server
+- Update any helm charts and deploy
