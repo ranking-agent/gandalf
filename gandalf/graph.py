@@ -921,8 +921,8 @@ class CSRGraph:
         # -- Edge attributes: full scan of LMDB + hot-path qualifiers --
         # triple_key -> set of (type_id, source, orig_name)
         triple_attr_set = {key: set() for key in triple_counts}
-        # triple_key -> set of qualifier_type_ids
-        triple_qual_map = {key: set() for key in triple_counts}
+        # triple_key -> dict of qualifier_type_id -> set of qualifier_values
+        triple_qual_map = {key: {} for key in triple_counts}
 
         # Build a mapping from edge position -> triple key for the full scan
         edge_to_triple = {}
@@ -945,7 +945,12 @@ class CSRGraph:
                     for q in quals:
                         qtype = q.get("qualifier_type_id")
                         if qtype:
-                            triple_qual_map[(subj_cat, pred, obj_cat)].add(qtype)
+                            qval = q.get("qualifier_value")
+                            qual_dict = triple_qual_map[(subj_cat, pred, obj_cat)]
+                            if qtype not in qual_dict:
+                                qual_dict[qtype] = set()
+                            if qval is not None:
+                                qual_dict[qtype].add(qval)
 
         # Full scan of LMDB for edge attribute types
         if self.lmdb_store is not None:
@@ -987,8 +992,11 @@ class CSRGraph:
                 )
             # Add qualifier type IDs as attributes in the qualifiers list
             qualifiers = []
-            for qtype in sorted(triple_qual_map.get(triple_key, set())):
-                qualifiers.append({"qualifier_type_id": qtype})
+            for qtype in sorted(triple_qual_map.get(triple_key, {})):
+                qualifiers.append({
+                    "qualifier_type_id": qtype,
+                    "applicable_values": sorted(triple_qual_map[triple_key][qtype]),
+                })
 
             meta_edges.append(
                 {
