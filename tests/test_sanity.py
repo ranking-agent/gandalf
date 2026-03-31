@@ -14,7 +14,6 @@ import pytest
 
 from gandalf.loader import build_graph_from_jsonl
 
-
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 NODES_FILE = os.path.join(FIXTURES_DIR, "nodes.jsonl")
 EDGES_FILE = os.path.join(FIXTURES_DIR, "edges.jsonl")
@@ -77,7 +76,9 @@ class TestForwardEdgeSanity:
         met = graph.node_id_to_idx["CHEBI:6801"]
         t2d = graph.node_id_to_idx["MONDO:0005148"]
 
-        edges = graph.get_all_edges_between(met, t2d, predicate_filter=["biolink:treats"])
+        edges = graph.get_all_edges_between(
+            met, t2d, predicate_filter=["biolink:treats"]
+        )
         assert len(edges) == 2
 
         primary_ids = {_primary_source_id(props["sources"]) for _, props in edges}
@@ -108,8 +109,8 @@ class TestForwardEdgeSanity:
             for pmid in self._get_publications(full_props):
                 pubs.add(pmid)
 
-        assert "PMID:12345678" in pubs   # drugcentral edge
-        assert "PMID:55555555" in pubs   # chembl edge
+        assert "PMID:12345678" in pubs  # drugcentral edge
+        assert "PMID:55555555" in pubs  # chembl edge
 
     def test_metformin_affects_pparg_no_qualifiers(self, graph):
         """CHEBI:6801 --affects--> NCBIGene:5468 should have empty qualifiers
@@ -120,7 +121,9 @@ class TestForwardEdgeSanity:
         sources = graph.get_edge_property(met, pparg, "biolink:affects", "sources")
         assert _primary_source_id(sources) == "infores:ctd"
 
-        qualifiers = graph.get_edge_property(met, pparg, "biolink:affects", "qualifiers")
+        qualifiers = graph.get_edge_property(
+            met, pparg, "biolink:affects", "qualifiers"
+        )
         assert qualifiers == []
 
         props = graph.get_all_edge_properties(met, pparg, "biolink:affects")
@@ -134,7 +137,9 @@ class TestForwardEdgeSanity:
         met = graph.node_id_to_idx["CHEBI:6801"]
         insr = graph.node_id_to_idx["NCBIGene:3643"]
 
-        edges = graph.get_all_edges_between(met, insr, predicate_filter=["biolink:affects"])
+        edges = graph.get_all_edges_between(
+            met, insr, predicate_filter=["biolink:affects"]
+        )
         assert len(edges) == 2
 
         seen = set()
@@ -155,7 +160,9 @@ class TestForwardEdgeSanity:
         met = graph.node_id_to_idx["CHEBI:6801"]
         gck = graph.node_id_to_idx["NCBIGene:2645"]
 
-        edges = graph.get_all_edges_between(met, gck, predicate_filter=["biolink:affects"])
+        edges = graph.get_all_edges_between(
+            met, gck, predicate_filter=["biolink:affects"]
+        )
         assert len(edges) == 1
 
         _, props = edges[0]
@@ -170,7 +177,9 @@ class TestForwardEdgeSanity:
         met = graph.node_id_to_idx["CHEBI:6801"]
         tnf = graph.node_id_to_idx["NCBIGene:7124"]
 
-        edges = graph.get_all_edges_between(met, tnf, predicate_filter=["biolink:affects"])
+        edges = graph.get_all_edges_between(
+            met, tnf, predicate_filter=["biolink:affects"]
+        )
         assert len(edges) == 1
 
         _, props = edges[0]
@@ -185,7 +194,9 @@ class TestForwardEdgeSanity:
         pparg = graph.node_id_to_idx["NCBIGene:5468"]
         insr = graph.node_id_to_idx["NCBIGene:3643"]
 
-        sources = graph.get_edge_property(pparg, insr, "biolink:interacts_with", "sources")
+        sources = graph.get_edge_property(
+            pparg, insr, "biolink:interacts_with", "sources"
+        )
         assert _primary_source_id(sources) == "infores:intact"
 
         props = graph.get_all_edge_properties(pparg, insr, "biolink:interacts_with")
@@ -253,7 +264,9 @@ class TestReverseEdgeSanity:
         ]
         assert len(incoming) == 2
 
-        primary_ids = {_primary_source_id(props["sources"]) for _, _, props, _ in incoming}
+        primary_ids = {
+            _primary_source_id(props["sources"]) for _, _, props, _ in incoming
+        }
         assert primary_ids == {"infores:drugcentral", "infores:chembl"}
 
     def test_insr_incoming_affects_qualified(self, graph):
@@ -318,7 +331,9 @@ class TestForwardReverseConsistency:
         """Walk every forward edge and confirm a matching incoming edge exists
         at the target node."""
         for src_idx in range(graph.num_nodes):
-            for target, pred, fwd_props, fwd_eidx in graph.neighbors_with_properties(src_idx):
+            for target, pred, fwd_props, fwd_eidx in graph.neighbors_with_properties(
+                src_idx
+            ):
                 # The target's incoming edges must include one from src_idx
                 # with the same predicate and same forward edge index.
                 incoming = graph.incoming_neighbors_with_properties(target)
@@ -337,7 +352,12 @@ class TestForwardReverseConsistency:
         """For every reverse-CSR position, the properties fetched via
         rev_to_fwd must equal the properties at the forward position."""
         for node_idx in range(graph.num_nodes):
-            for src, pred, rev_props, fwd_eidx in graph.incoming_neighbors_with_properties(node_idx):
+            for (
+                src,
+                pred,
+                rev_props,
+                fwd_eidx,
+            ) in graph.incoming_neighbors_with_properties(node_idx):
                 fwd_props = graph.edge_properties._get_props(fwd_eidx)
                 assert rev_props["sources"] == fwd_props["sources"], (
                     f"Source mismatch for rev edge "
@@ -364,18 +384,20 @@ class TestEdgeIndexConsistency:
         """For every edge, properties from by_index should match the inline
         props returned by neighbors_with_properties."""
         for src_idx in range(graph.num_nodes):
-            for target, pred, inline_props, fwd_eidx in graph.neighbors_with_properties(src_idx):
+            for target, pred, inline_props, fwd_eidx in graph.neighbors_with_properties(
+                src_idx
+            ):
                 by_index = graph.get_edge_properties_by_index(fwd_eidx)
 
-                assert by_index["sources"] == inline_props["sources"], (
-                    f"sources mismatch at fwd_idx={fwd_eidx}"
-                )
-                assert by_index["qualifiers"] == inline_props["qualifiers"], (
-                    f"qualifiers mismatch at fwd_idx={fwd_eidx}"
-                )
-                assert by_index["predicate"] == pred, (
-                    f"predicate mismatch at fwd_idx={fwd_eidx}"
-                )
+                assert (
+                    by_index["sources"] == inline_props["sources"]
+                ), f"sources mismatch at fwd_idx={fwd_eidx}"
+                assert (
+                    by_index["qualifiers"] == inline_props["qualifiers"]
+                ), f"qualifiers mismatch at fwd_idx={fwd_eidx}"
+                assert (
+                    by_index["predicate"] == pred
+                ), f"predicate mismatch at fwd_idx={fwd_eidx}"
 
     def test_duplicate_edges_have_distinct_indices(self, graph):
         """Duplicate (src, dst, pred) edges must have distinct forward edge

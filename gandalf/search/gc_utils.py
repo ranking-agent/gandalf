@@ -1,15 +1,17 @@
 """Garbage collection monitoring and control utilities."""
 
 import gc
+import logging
 import time
 from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
 
 
 class GCMonitor:
     """Monitor garbage collection events and log timing information."""
 
-    def __init__(self, verbose=True):
-        self.verbose = verbose
+    def __init__(self):
         self.gc_events = []
         self._start_time = None
 
@@ -21,13 +23,20 @@ class GCMonitor:
             duration = time.perf_counter() - self._start_time
             generation = info.get("generation", "?")
             collected = info.get("collected", 0)
-            self.gc_events.append({
-                "generation": generation,
-                "duration": duration,
-                "collected": collected,
-            })
-            if self.verbose and duration > 0.1:  # Only log slow GC (>100ms)
-                print(f"  [GC] Gen {generation}: {duration:.2f}s, collected {collected} objects")
+            self.gc_events.append(
+                {
+                    "generation": generation,
+                    "duration": duration,
+                    "collected": collected,
+                }
+            )
+            if duration > 0.1:  # Only log slow GC (>100ms)
+                logger.debug(
+                    "  [GC] Gen %s: %.2fs, collected %s objects",
+                    generation,
+                    duration,
+                    collected,
+                )
             self._start_time = None
 
     def start(self):

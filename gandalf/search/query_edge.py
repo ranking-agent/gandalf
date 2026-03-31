@@ -1,9 +1,13 @@
 """Edge query functions for graph traversal with predicate/qualifier filtering."""
 
+import logging
 import time
+from typing import Optional
 
 from gandalf.search.attribute_constraints import matches_attribute_constraints
 from gandalf.search.qualifiers import edge_matches_qualifier_constraints
+
+logger = logging.getLogger(__name__)
 
 
 def _get_information_content(graph, node_idx):
@@ -34,7 +38,7 @@ def _passes_node_filters(graph, node_idx, max_node_degree, min_information_conte
     return True
 
 
-def query_subclass_edge(graph, start_idxes, end_idxes, depth, verbose):
+def query_subclass_edge(graph, start_idxes, end_idxes, depth):
     """Traverse ``subclass_of`` edges to find subclass relationships.
 
     The synthetic subclass edge connects a child node (subject) to a
@@ -50,7 +54,6 @@ def query_subclass_edge(graph, start_idxes, end_idxes, depth, verbose):
         start_idxes: Indices for the child (subject) side, or None
         end_idxes: Indices for the superclass (object) side
         depth: Maximum subclass_of hops
-        verbose: Print progress
 
     Returns:
         List of (child_idx, "biolink:subclass_of", parent_idx, False, fwd_edge_idx) tuples.
@@ -77,20 +80,28 @@ def query_subclass_edge(graph, start_idxes, end_idxes, depth, verbose):
             next_frontier = set()
             for node_idx in frontier:
                 # Walk incoming subclass_of edges: child --subclass_of--> node_idx
-                for child_idx, predicate, _props, fwd_eidx in graph.incoming_neighbors_with_properties(node_idx):
+                for (
+                    child_idx,
+                    predicate,
+                    _props,
+                    fwd_eidx,
+                ) in graph.incoming_neighbors_with_properties(node_idx):
                     if predicate != subclass_pred:
                         continue
                     if child_idx in visited:
                         continue
                     visited.add(child_idx)
                     next_frontier.add(child_idx)
-                    matches.append((child_idx, subclass_pred, superclass_idx, False, fwd_eidx))
+                    matches.append(
+                        (child_idx, subclass_pred, superclass_idx, False, fwd_eidx)
+                    )
             frontier = next_frontier
             if not frontier:
                 break
 
-    if verbose:
-        print(f"  Subclass traversal: found {len(matches)} matches (depth={depth})")
+    logger.debug(
+        "  Subclass traversal: found %s matches (depth=%s)", len(matches), depth
+    )
 
     return matches
 
@@ -103,13 +114,12 @@ def query_edge(
     end_categories,
     allowed_predicates,
     qualifier_constraints,
-    verbose,
-    inverse_predicates: list[str] = None,
-    max_node_degree: int = None,
-    min_information_content: float = None,
-    attribute_constraints: list = None,
-    start_node_constraints: list = None,
-    end_node_constraints: list = None,
+    inverse_predicates: Optional[list[str]] = None,
+    max_node_degree: Optional[int] = None,
+    min_information_content: Optional[float] = None,
+    attribute_constraints: Optional[list] = None,
+    start_node_constraints: Optional[list] = None,
+    end_node_constraints: Optional[list] = None,
 ):
     """Query for a single edge with given constraints.
 
@@ -125,7 +135,6 @@ def query_edge(
         end_categories: List of allowed categories for end node
         allowed_predicates: List of forward predicate strings (canonical/symmetric descendants)
         qualifier_constraints: List of qualifier constraint dicts from query
-        verbose: Print progress information
         inverse_predicates: List of inverse predicate strings for reverse direction
             matching. None means don't check inverse direction. Empty list means
             match all predicates in inverse direction (wildcard).
@@ -173,9 +182,14 @@ def query_edge(
     # Case 1: Start pinned, end unpinned
     if start_idxes is not None and end_idxes is None:
         _query_forward(
-            graph, start_idxes, allowed_predicates, end_categories,
-            qualifier_constraints, check_inverse, inverse_pred_set,
-            add_match, verbose,
+            graph,
+            start_idxes,
+            allowed_predicates,
+            end_categories,
+            qualifier_constraints,
+            check_inverse,
+            inverse_pred_set,
+            add_match,
             max_node_degree=max_node_degree,
             min_information_content=min_information_content,
             attribute_constraints=attribute_constraints,
@@ -186,9 +200,14 @@ def query_edge(
     # Case 2: Start unpinned, end pinned
     elif start_idxes is None and end_idxes is not None:
         _query_backward(
-            graph, end_idxes, allowed_predicates, start_categories,
-            qualifier_constraints, check_inverse, inverse_pred_set,
-            add_match, verbose,
+            graph,
+            end_idxes,
+            allowed_predicates,
+            start_categories,
+            qualifier_constraints,
+            check_inverse,
+            inverse_pred_set,
+            add_match,
             max_node_degree=max_node_degree,
             min_information_content=min_information_content,
             attribute_constraints=attribute_constraints,
@@ -199,9 +218,14 @@ def query_edge(
     # Case 3: Both pinned
     elif start_idxes is not None and end_idxes is not None:
         _query_both_pinned(
-            graph, start_idxes, end_idxes, allowed_predicates,
-            qualifier_constraints, check_inverse, inverse_pred_set,
-            add_match, verbose,
+            graph,
+            start_idxes,
+            end_idxes,
+            allowed_predicates,
+            qualifier_constraints,
+            check_inverse,
+            inverse_pred_set,
+            add_match,
             max_node_degree=max_node_degree,
             min_information_content=min_information_content,
             attribute_constraints=attribute_constraints,
@@ -216,16 +240,22 @@ def query_edge(
 
 
 def _query_forward(
-    graph, start_idxes, allowed_predicates, end_categories,
-    qualifier_constraints, check_inverse, inverse_pred_set,
-    add_match, verbose,
-    max_node_degree=None, min_information_content=None,
-    attribute_constraints=None, start_node_constraints=None,
+    graph,
+    start_idxes,
+    allowed_predicates,
+    end_categories,
+    qualifier_constraints,
+    check_inverse,
+    inverse_pred_set,
+    add_match,
+    max_node_degree=None,
+    min_information_content=None,
+    attribute_constraints=None,
+    start_node_constraints=None,
     end_node_constraints=None,
 ):
     """Case 1: Start pinned, end unpinned - forward search from pinned nodes."""
-    if verbose:
-        print(f"  Forward search from {len(start_idxes)} pinned nodes")
+    logger.debug("  Forward search from %s pinned nodes", len(start_idxes))
 
     t0 = time.perf_counter()
 
@@ -243,7 +273,9 @@ def _query_forward(
         node_neighbors = 0
 
         # Check outgoing edges (direct matches)
-        for obj_idx, predicate, props, fwd_edge_idx in graph.neighbors_with_properties(start_idx):
+        for obj_idx, predicate, props, fwd_edge_idx in graph.neighbors_with_properties(
+            start_idx
+        ):
             node_neighbors += 1
             # Check predicate
             if allowed_predicates and predicate not in allowed_predicates:
@@ -256,7 +288,9 @@ def _query_forward(
                     continue
 
             # Check node filters (degree and information content)
-            if not _passes_node_filters(graph, obj_idx, max_node_degree, min_information_content):
+            if not _passes_node_filters(
+                graph, obj_idx, max_node_degree, min_information_content
+            ):
                 continue
 
             # Check end node attribute constraints
@@ -285,7 +319,12 @@ def _query_forward(
         # Check incoming edges for symmetric/inverse predicates
         # An incoming edge with inverse(P) represents an outgoing edge with P
         if check_inverse:
-            for other_idx, stored_pred, props, fwd_edge_idx in graph.incoming_neighbors_with_properties(start_idx):
+            for (
+                other_idx,
+                stored_pred,
+                props,
+                fwd_edge_idx,
+            ) in graph.incoming_neighbors_with_properties(start_idx):
                 node_neighbors += 1
 
                 # Check if stored predicate is one of our inverse predicates
@@ -299,13 +338,17 @@ def _query_forward(
                         continue
 
                 # Check node filters (degree and information content)
-                if not _passes_node_filters(graph, other_idx, max_node_degree, min_information_content):
+                if not _passes_node_filters(
+                    graph, other_idx, max_node_degree, min_information_content
+                ):
                     continue
 
                 # Check end node attribute constraints (other_idx is the "object" via inverse)
                 if end_node_constraints:
                     obj_attrs = graph.get_node_property(other_idx, "attributes", [])
-                    if not matches_attribute_constraints(obj_attrs, end_node_constraints):
+                    if not matches_attribute_constraints(
+                        obj_attrs, end_node_constraints
+                    ):
                         continue
 
                 # Check qualifier constraints
@@ -326,7 +369,9 @@ def _query_forward(
                 # Report the actual edge as stored in the graph
                 # The edge is: other_idx --[stored_pred]--> start_idx
                 # Mark as via_inverse since found through inverse lookup
-                add_match(other_idx, stored_pred, start_idx, fwd_edge_idx, via_inverse=True)
+                add_match(
+                    other_idx, stored_pred, start_idx, fwd_edge_idx, via_inverse=True
+                )
 
         t_node_end = time.perf_counter()
         node_time = t_node_end - t_node_start
@@ -336,26 +381,33 @@ def _query_forward(
             slow_nodes.append((start_idx, node_neighbors, node_time))
 
     t1 = time.perf_counter()
-    if verbose:
-        print(f"  Traversed {total_neighbors:,} total neighbors")
-        if slow_nodes:
-            print(f"  Slow nodes (>0.1s): {len(slow_nodes)}")
-            for node_idx, neighbors, node_time in slow_nodes[:5]:  # Show top 5
-                print(f"    Node {node_idx}: {neighbors:,} neighbors, {node_time:.2f}s")
-        print(f"  Forward search completed in {t1 - t0:.3f}s")
+    logger.debug("  Traversed %s total neighbors", total_neighbors)
+    if slow_nodes:
+        logger.debug("  Slow nodes (>0.1s): %s", len(slow_nodes))
+        for node_idx, neighbors, node_time in slow_nodes[:5]:  # Show top 5
+            logger.debug(
+                "    Node %s: %s neighbors, %.2fs", node_idx, neighbors, node_time
+            )
+    logger.debug("  Forward search completed in %.3fs", t1 - t0)
 
 
 def _query_backward(
-    graph, end_idxes, allowed_predicates, start_categories,
-    qualifier_constraints, check_inverse, inverse_pred_set,
-    add_match, verbose,
-    max_node_degree=None, min_information_content=None,
-    attribute_constraints=None, start_node_constraints=None,
+    graph,
+    end_idxes,
+    allowed_predicates,
+    start_categories,
+    qualifier_constraints,
+    check_inverse,
+    inverse_pred_set,
+    add_match,
+    max_node_degree=None,
+    min_information_content=None,
+    attribute_constraints=None,
+    start_node_constraints=None,
     end_node_constraints=None,
 ):
     """Case 2: Start unpinned, end pinned - backward search from pinned nodes."""
-    if verbose:
-        print(f"  Backward search from {len(end_idxes)} pinned nodes")
+    logger.debug("  Backward search from %s pinned nodes", len(end_idxes))
 
     t0 = time.perf_counter()
 
@@ -373,9 +425,12 @@ def _query_backward(
         node_neighbors = 0
 
         # Check incoming edges (direct matches)
-        for subj_idx, predicate, props, fwd_edge_idx in graph.incoming_neighbors_with_properties(
-            end_idx
-        ):
+        for (
+            subj_idx,
+            predicate,
+            props,
+            fwd_edge_idx,
+        ) in graph.incoming_neighbors_with_properties(end_idx):
             node_neighbors += 1
             # Check predicate
             if allowed_predicates and predicate not in allowed_predicates:
@@ -388,13 +443,17 @@ def _query_backward(
                     continue
 
             # Check node filters (degree and information content)
-            if not _passes_node_filters(graph, subj_idx, max_node_degree, min_information_content):
+            if not _passes_node_filters(
+                graph, subj_idx, max_node_degree, min_information_content
+            ):
                 continue
 
             # Check start node attribute constraints
             if start_node_constraints:
                 subj_attrs = graph.get_node_property(subj_idx, "attributes", [])
-                if not matches_attribute_constraints(subj_attrs, start_node_constraints):
+                if not matches_attribute_constraints(
+                    subj_attrs, start_node_constraints
+                ):
                     continue
 
             # Check qualifier constraints
@@ -417,7 +476,12 @@ def _query_backward(
         # Check outgoing edges for symmetric/inverse predicates
         # An outgoing edge with inverse(P) represents an incoming edge with P
         if check_inverse:
-            for other_idx, stored_pred, props, fwd_edge_idx in graph.neighbors_with_properties(end_idx):
+            for (
+                other_idx,
+                stored_pred,
+                props,
+                fwd_edge_idx,
+            ) in graph.neighbors_with_properties(end_idx):
                 node_neighbors += 1
 
                 # Check if stored predicate is one of our inverse predicates
@@ -431,13 +495,17 @@ def _query_backward(
                         continue
 
                 # Check node filters (degree and information content)
-                if not _passes_node_filters(graph, other_idx, max_node_degree, min_information_content):
+                if not _passes_node_filters(
+                    graph, other_idx, max_node_degree, min_information_content
+                ):
                     continue
 
                 # Check start node attribute constraints (other_idx is the "subject" via inverse)
                 if start_node_constraints:
                     subj_attrs = graph.get_node_property(other_idx, "attributes", [])
-                    if not matches_attribute_constraints(subj_attrs, start_node_constraints):
+                    if not matches_attribute_constraints(
+                        subj_attrs, start_node_constraints
+                    ):
                         continue
 
                 # Check qualifier constraints
@@ -458,7 +526,9 @@ def _query_backward(
                 # Report the actual edge as stored in the graph
                 # The edge is: end_idx --[stored_pred]--> other_idx
                 # Mark as via_inverse since found through inverse lookup
-                add_match(end_idx, stored_pred, other_idx, fwd_edge_idx, via_inverse=True)
+                add_match(
+                    end_idx, stored_pred, other_idx, fwd_edge_idx, via_inverse=True
+                )
 
         t_node_end = time.perf_counter()
         node_time = t_node_end - t_node_start
@@ -468,25 +538,34 @@ def _query_backward(
             slow_nodes.append((end_idx, node_neighbors, node_time))
 
     t1 = time.perf_counter()
-    if verbose:
-        print(f"  Traversed {total_neighbors:,} total incoming neighbors")
-        if slow_nodes:
-            print(f"  Slow nodes (>0.1s): {len(slow_nodes)}")
-            for node_idx, neighbors, node_time in slow_nodes[:5]:  # Show top 5
-                print(f"    Node {node_idx}: {neighbors:,} neighbors, {node_time:.2f}s")
+    logger.debug("  Traversed %s total incoming neighbors", total_neighbors)
+    if slow_nodes:
+        logger.debug("  Slow nodes (>0.1s): %s", len(slow_nodes))
+        for node_idx, neighbors, node_time in slow_nodes[:5]:  # Show top 5
+            logger.debug(
+                "    Node %s: %s neighbors, %.2fs", node_idx, neighbors, node_time
+            )
 
 
 def _query_both_pinned(
-    graph, start_idxes, end_idxes, allowed_predicates,
-    qualifier_constraints, check_inverse, inverse_pred_set,
-    add_match, verbose,
-    max_node_degree=None, min_information_content=None,
-    attribute_constraints=None, start_node_constraints=None,
+    graph,
+    start_idxes,
+    end_idxes,
+    allowed_predicates,
+    qualifier_constraints,
+    check_inverse,
+    inverse_pred_set,
+    add_match,
+    max_node_degree=None,
+    min_information_content=None,
+    attribute_constraints=None,
+    start_node_constraints=None,
     end_node_constraints=None,
 ):
     """Case 3: Both ends pinned - intersection search."""
-    if verbose:
-        print(f"  Both ends pinned: {len(start_idxes)} start, {len(end_idxes)} end")
+    logger.debug(
+        "  Both ends pinned: %s start, %s end", len(start_idxes), len(end_idxes)
+    )
 
     t0 = time.perf_counter()
 
@@ -503,7 +582,9 @@ def _query_both_pinned(
 
     for start_idx in start_idxes:
         # Check node filters on the start node
-        if not _passes_node_filters(graph, start_idx, max_node_degree, min_information_content):
+        if not _passes_node_filters(
+            graph, start_idx, max_node_degree, min_information_content
+        ):
             continue
 
         # Check start node attribute constraints
@@ -521,11 +602,18 @@ def _query_both_pinned(
         total_neighbors += node_neighbors
 
         # Only fetch properties for edges whose target is in end_set
-        for obj_idx, predicate, props, fwd_edge_idx in graph.neighbors_filtered_by_targets(
+        for (
+            obj_idx,
+            predicate,
+            props,
+            fwd_edge_idx,
+        ) in graph.neighbors_filtered_by_targets(
             start_idx, end_set, predicate_filter=pred_filter_set
         ):
             # Check node filters on the end node
-            if not _passes_node_filters(graph, obj_idx, max_node_degree, min_information_content):
+            if not _passes_node_filters(
+                graph, obj_idx, max_node_degree, min_information_content
+            ):
                 continue
 
             # Check end node attribute constraints
@@ -562,7 +650,9 @@ def _query_both_pinned(
         start_set = set(start_idxes)
         for end_idx in end_idxes:
             # Check node filters on the end node
-            if not _passes_node_filters(graph, end_idx, max_node_degree, min_information_content):
+            if not _passes_node_filters(
+                graph, end_idx, max_node_degree, min_information_content
+            ):
                 continue
 
             # Check end node attribute constraints
@@ -571,19 +661,28 @@ def _query_both_pinned(
                 if not matches_attribute_constraints(end_attrs, end_node_constraints):
                     continue
 
-            for obj_idx, stored_pred, props, fwd_edge_idx in graph.neighbors_filtered_by_targets(
+            for (
+                obj_idx,
+                stored_pred,
+                props,
+                fwd_edge_idx,
+            ) in graph.neighbors_filtered_by_targets(
                 end_idx, start_set, predicate_filter=inverse_pred_set or None
             ):
                 total_neighbors += 1
 
                 # Check node filters on the target (start) node
-                if not _passes_node_filters(graph, obj_idx, max_node_degree, min_information_content):
+                if not _passes_node_filters(
+                    graph, obj_idx, max_node_degree, min_information_content
+                ):
                     continue
 
                 # Check start node attribute constraints (obj_idx is a start node)
                 if start_node_constraints:
                     subj_attrs = graph.get_node_property(obj_idx, "attributes", [])
-                    if not matches_attribute_constraints(subj_attrs, start_node_constraints):
+                    if not matches_attribute_constraints(
+                        subj_attrs, start_node_constraints
+                    ):
                         continue
 
                 # Check qualifier constraints before adding
@@ -608,13 +707,17 @@ def _query_both_pinned(
                 add_match(end_idx, stored_pred, obj_idx, fwd_edge_idx, via_inverse=True)
 
     t1 = time.perf_counter()
-    if verbose:
-        print(f"    Neighbor traversal: {t1 - t_neighbors_start:.3f}s "
-              f"({total_neighbors:,} neighbors)")
-        if slow_nodes:
-            print(f"    Slow nodes (>0.1s): {len(slow_nodes)}")
-            for node_idx, neighbors, node_time in slow_nodes[:5]:
-                print(f"      Node {node_idx}: {neighbors:,} neighbors, {node_time:.2f}s")
+    logger.debug(
+        "    Neighbor traversal: %.3fs (%s neighbors)",
+        t1 - t_neighbors_start,
+        total_neighbors,
+    )
+    if slow_nodes:
+        logger.debug("    Slow nodes (>0.1s): %s", len(slow_nodes))
+        for node_idx, neighbors, node_time in slow_nodes[:5]:
+            logger.debug(
+                "      Node %s: %s neighbors, %.2fs", node_idx, neighbors, node_time
+            )
 
 
 def _edge_passes_attribute_constraints(graph, fwd_edge_idx, attribute_constraints):

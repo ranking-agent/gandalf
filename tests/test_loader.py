@@ -8,7 +8,6 @@ import pytest
 from gandalf.loader import build_graph_from_jsonl
 from gandalf.graph import CSRGraph
 
-
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 NODES_FILE = os.path.join(FIXTURES_DIR, "nodes.jsonl")
 EDGES_FILE = os.path.join(FIXTURES_DIR, "edges.jsonl")
@@ -94,7 +93,11 @@ class TestNodeProperties:
         """Should store information_content as a TRAPI attribute."""
         diabetes_idx = graph.node_id_to_idx["MONDO:0005148"]
         attributes = graph.get_node_property(diabetes_idx, "attributes")
-        ic_attrs = [a for a in attributes if a["original_attribute_name"] == "information_content"]
+        ic_attrs = [
+            a
+            for a in attributes
+            if a["original_attribute_name"] == "information_content"
+        ]
         assert len(ic_attrs) == 1
         assert ic_attrs[0]["value"] == pytest.approx(78.2)
         assert ic_attrs[0]["original_attribute_name"] == "information_content"
@@ -103,7 +106,11 @@ class TestNodeProperties:
         """Should store equivalent_identifiers as a TRAPI attribute."""
         metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
         attributes = graph.get_node_property(metformin_idx, "attributes")
-        eq_attrs = [a for a in attributes if a["original_attribute_name"] == "equivalent_identifiers"]
+        eq_attrs = [
+            a
+            for a in attributes
+            if a["original_attribute_name"] == "equivalent_identifiers"
+        ]
         assert len(eq_attrs) == 1
         assert "DRUGBANK:DB00331" in eq_attrs[0]["value"]
         assert eq_attrs[0]["original_attribute_name"] == "equivalent_identifiers"
@@ -130,7 +137,9 @@ class TestEdgeProperties:
         """Should correctly store predicate in edge properties."""
         src_idx = graph.node_id_to_idx["CHEBI:6801"]
         dst_idx = graph.node_id_to_idx["MONDO:0005148"]
-        predicate = graph.get_edge_property(src_idx, dst_idx, "biolink:treats", "predicate")
+        predicate = graph.get_edge_property(
+            src_idx, dst_idx, "biolink:treats", "predicate"
+        )
         assert predicate == "biolink:treats"
 
     def test_edge_source_property(self, graph):
@@ -164,8 +173,11 @@ class TestEdgeProperties:
         src_idx = graph.node_id_to_idx["CHEBI:6801"]
         dst_idx = graph.node_id_to_idx["NCBIGene:5468"]
         props = graph.get_all_edge_properties(src_idx, dst_idx, "biolink:affects")
-        pub_attrs = [a for a in props.get("attributes", [])
-                     if a["attribute_type_id"] == "biolink:publications"]
+        pub_attrs = [
+            a
+            for a in props.get("attributes", [])
+            if a["attribute_type_id"] == "biolink:publications"
+        ]
         assert len(pub_attrs) == 1
         assert "PMID:23456789" in pub_attrs[0]["value"]
         assert pub_attrs[0]["original_attribute_name"] == "publications"
@@ -239,43 +251,6 @@ class TestGraphStructure:
             assert predicate.startswith("biolink:")
 
 
-class TestGraphSaveLoad:
-    """Tests for graph serialization."""
-
-    def test_save_and_load_roundtrip(self, graph):
-        """Should correctly save and load graph."""
-        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
-            temp_path = f.name
-
-        try:
-            graph.save(temp_path)
-            loaded_graph = CSRGraph.load(temp_path)
-
-            # Verify key attributes match
-            assert loaded_graph.num_nodes == graph.num_nodes
-            assert len(loaded_graph.fwd_targets) == len(graph.fwd_targets)
-            assert loaded_graph.node_id_to_idx == graph.node_id_to_idx
-            assert loaded_graph.predicate_to_idx == graph.predicate_to_idx
-        finally:
-            os.unlink(temp_path)
-
-    def test_loaded_graph_neighbors_work(self, graph):
-        """Should be able to query neighbors after load."""
-        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
-            temp_path = f.name
-
-        try:
-            graph.save(temp_path)
-            loaded_graph = CSRGraph.load(temp_path)
-
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
-            neighbors = loaded_graph.neighbors(metformin_idx)
-            # Metformin has 11 outgoing edges (including duplicate s,o,p edges)
-            assert len(neighbors) == 11
-        finally:
-            os.unlink(temp_path)
-
-
 class TestGraphMmapSaveLoad:
     """Tests for memory-mapped graph serialization."""
 
@@ -300,7 +275,12 @@ class TestGraphMmapSaveLoad:
                 "edge_property_pools.pkl",
             ]
             for filename in expected_files:
-                assert os.path.exists(os.path.join(temp_dir, filename)), f"Missing {filename}"
+                assert os.path.exists(
+                    os.path.join(temp_dir, filename)
+                ), f"Missing {filename}"
+
+            # Node store LMDB should exist
+            assert os.path.isdir(os.path.join(temp_dir, "node_store.lmdb"))
 
     def test_mmap_save_and_load_roundtrip(self, graph):
         """Should correctly save and load graph in mmap format."""
@@ -311,8 +291,12 @@ class TestGraphMmapSaveLoad:
             # Verify key attributes match
             assert loaded_graph.num_nodes == graph.num_nodes
             assert len(loaded_graph.fwd_targets) == len(graph.fwd_targets)
-            assert loaded_graph.node_id_to_idx == graph.node_id_to_idx
             assert loaded_graph.predicate_to_idx == graph.predicate_to_idx
+
+            # Node ID mappings should round-trip via LMDB-backed store
+            for node_id, node_idx in graph.node_id_to_idx.items():
+                assert loaded_graph.get_node_idx(node_id) == node_idx
+                assert loaded_graph.get_node_id(node_idx) == node_id
 
     def test_mmap_loaded_graph_neighbors_work(self, graph):
         """Should be able to query neighbors after mmap load."""
@@ -320,7 +304,7 @@ class TestGraphMmapSaveLoad:
             graph.save_mmap(temp_dir)
             loaded_graph = CSRGraph.load_mmap(temp_dir)
 
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
+            metformin_idx = loaded_graph.get_node_idx("CHEBI:6801")
             neighbors = loaded_graph.neighbors(metformin_idx)
             # Metformin has 11 outgoing edges (including duplicate s,o,p edges)
             assert len(neighbors) == 11
@@ -332,8 +316,8 @@ class TestGraphMmapSaveLoad:
             loaded_graph = CSRGraph.load_mmap(temp_dir)
 
             # Test edge property lookup
-            src_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
-            dst_idx = loaded_graph.node_id_to_idx["MONDO:0005148"]
+            src_idx = loaded_graph.get_node_idx("CHEBI:6801")
+            dst_idx = loaded_graph.get_node_idx("MONDO:0005148")
             predicate = loaded_graph.get_edge_property(
                 src_idx, dst_idx, "biolink:treats", "predicate"
             )
@@ -345,7 +329,7 @@ class TestGraphMmapSaveLoad:
             graph.save_mmap(temp_dir)
             loaded_graph = CSRGraph.load_mmap(temp_dir)
 
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
+            metformin_idx = loaded_graph.get_node_idx("CHEBI:6801")
             name = loaded_graph.get_node_property(metformin_idx, "name")
             assert name == "Metformin"
 
@@ -356,8 +340,8 @@ class TestGraphMmapSaveLoad:
             loaded_graph = CSRGraph.load_mmap(temp_dir)
 
             # Check an edge with qualifiers
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
-            insr_idx = loaded_graph.node_id_to_idx["NCBIGene:3643"]
+            metformin_idx = loaded_graph.get_node_idx("CHEBI:6801")
+            insr_idx = loaded_graph.get_node_idx("NCBIGene:3643")
 
             qualifiers = loaded_graph.get_edge_property(
                 metformin_idx, insr_idx, "biolink:affects", "qualifiers"
@@ -373,7 +357,7 @@ class TestGraphMmapSaveLoad:
 
             # Verify it still works
             assert loaded_graph.num_nodes == graph.num_nodes
-            metformin_idx = loaded_graph.node_id_to_idx["CHEBI:6801"]
+            metformin_idx = loaded_graph.get_node_idx("CHEBI:6801")
             neighbors = loaded_graph.neighbors(metformin_idx)
             assert len(neighbors) == 11
 
@@ -395,7 +379,11 @@ class TestDuplicateEdges:
         # Each edge should have different sources
         source_ids = set()
         for _pred, props in treats_edges:
-            primary = [s for s in props["sources"] if s["resource_role"] == "primary_knowledge_source"]
+            primary = [
+                s
+                for s in props["sources"]
+                if s["resource_role"] == "primary_knowledge_source"
+            ]
             assert len(primary) == 1
             source_ids.add(primary[0]["resource_id"])
 
@@ -415,7 +403,9 @@ class TestDuplicateEdges:
         qualifier_combos = set()
         for _pred, props in affects_edges:
             quals = props.get("qualifiers", [])
-            combo = tuple(sorted((q["qualifier_type_id"], q["qualifier_value"]) for q in quals))
+            combo = tuple(
+                sorted((q["qualifier_type_id"], q["qualifier_value"]) for q in quals)
+            )
             qualifier_combos.add(combo)
 
         assert len(qualifier_combos) == 2  # Two distinct qualifier combinations
@@ -427,7 +417,9 @@ class TestDuplicateEdges:
 
         treats_results = [
             (target, pred, props, eidx)
-            for target, pred, props, eidx in graph.neighbors_with_properties(metformin_idx)
+            for target, pred, props, eidx in graph.neighbors_with_properties(
+                metformin_idx
+            )
             if target == diabetes_idx and pred == "biolink:treats"
         ]
         assert len(treats_results) == 2
@@ -441,14 +433,20 @@ class TestDuplicateEdges:
 
         treats_results = [
             (src, pred, props, eidx)
-            for src, pred, props, eidx in graph.incoming_neighbors_with_properties(diabetes_idx)
+            for src, pred, props, eidx in graph.incoming_neighbors_with_properties(
+                diabetes_idx
+            )
             if src == metformin_idx and pred == "biolink:treats"
         ]
         assert len(treats_results) == 2
         # Each should have correct, distinct properties
         source_ids = set()
         for _, _, props, _ in treats_results:
-            primary = [s for s in props["sources"] if s["resource_role"] == "primary_knowledge_source"]
+            primary = [
+                s
+                for s in props["sources"]
+                if s["resource_role"] == "primary_knowledge_source"
+            ]
             source_ids.add(primary[0]["resource_id"])
         assert source_ids == {"infores:drugcentral", "infores:chembl"}
 
@@ -458,7 +456,10 @@ class TestDuplicateEdges:
 
         edge_indices = []
         for target, pred, props, eidx in graph.neighbors_with_properties(metformin_idx):
-            if pred == "biolink:treats" and graph.idx_to_node_id[target] == "MONDO:0005148":
+            if (
+                pred == "biolink:treats"
+                and graph.idx_to_node_id[target] == "MONDO:0005148"
+            ):
                 edge_indices.append(eidx)
 
         assert len(edge_indices) == 2
@@ -472,18 +473,24 @@ class TestDuplicateEdges:
             graph.save_mmap(temp_dir)
             loaded = CSRGraph.load_mmap(temp_dir)
 
-            metformin_idx = loaded.node_id_to_idx["CHEBI:6801"]
-            diabetes_idx = loaded.node_id_to_idx["MONDO:0005148"]
+            metformin_idx = loaded.get_node_idx("CHEBI:6801")
+            diabetes_idx = loaded.get_node_idx("MONDO:0005148")
 
             treats_results = [
                 (src, pred, props, eidx)
-                for src, pred, props, eidx in loaded.incoming_neighbors_with_properties(diabetes_idx)
+                for src, pred, props, eidx in loaded.incoming_neighbors_with_properties(
+                    diabetes_idx
+                )
                 if src == metformin_idx and pred == "biolink:treats"
             ]
             assert len(treats_results) == 2
             source_ids = set()
             for _, _, props, _ in treats_results:
-                primary = [s for s in props["sources"] if s["resource_role"] == "primary_knowledge_source"]
+                primary = [
+                    s
+                    for s in props["sources"]
+                    if s["resource_role"] == "primary_knowledge_source"
+                ]
                 source_ids.add(primary[0]["resource_id"])
             assert source_ids == {"infores:drugcentral", "infores:chembl"}
 
@@ -494,7 +501,9 @@ class TestEdgeCases:
     def test_nonexistent_predicate_filter_returns_empty(self, graph):
         """Should return empty array for nonexistent predicate."""
         metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
-        neighbors = graph.neighbors(metformin_idx, predicate_filter="biolink:nonexistent")
+        neighbors = graph.neighbors(
+            metformin_idx, predicate_filter="biolink:nonexistent"
+        )
         assert len(neighbors) == 0
 
     def test_node_with_no_outgoing_edges(self, graph):
@@ -511,5 +520,7 @@ class TestEdgeCases:
     def test_get_node_property_default_value(self, graph):
         """Should return default for missing property."""
         metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
-        value = graph.get_node_property(metformin_idx, "nonexistent_key", default="default")
+        value = graph.get_node_property(
+            metformin_idx, "nonexistent_key", default="default"
+        )
         assert value == "default"

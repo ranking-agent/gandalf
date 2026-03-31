@@ -13,23 +13,39 @@ Pass 3: Sort numpy arrays by (src, dst, pred) via np.lexsort. Rewrite the temp
         dedup indices to match. Build CSR offset arrays.
 """
 
-import json
 import shutil
 import tempfile
 from pathlib import Path
 
 import msgpack
 import numpy as np
+import orjson
 
+from gandalf.config import settings
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
-from gandalf.lmdb_store import LMDBPropertyStore, _INITIAL_WRITE_MAP_SIZE, _encode_key, _put_with_resize
+from gandalf.lmdb_store import (
+    LMDBPropertyStore,
+    _INITIAL_WRITE_MAP_SIZE,
+    _encode_key,
+    _put_with_resize,
+)
 
+import logging
 import lmdb
+
+logger = logging.getLogger(__name__)
 
 
 # Fields that are structural (not stored as properties)
 _CORE_FIELDS = {
-    "id", "category", "subject", "object", "predicate", "sources",
+    "id",
+    "category",
+    "subject",
+    "object",
+    "predicate",
+    "sources",
+    "primary_knowledge_source",
+    "aggregator_knowledge_source",
 }
 
 # Node fields that become top-level TRAPI Node properties (not attributes)
@@ -57,33 +73,55 @@ def _extract_sources(data):
     """
     raw = data.get("sources", [])
 
-    # Normalize: guarantee upstream_resource_ids on every source
-    sources = [
-        {
-            "resource_id": s["resource_id"],
-            "resource_role": s["resource_role"],
-            "upstream_resource_ids": s.get("upstream_resource_ids", []),
-        }
-        for s in raw
-    ]
+    if len(raw) == 0:
+        # this is most likely from an automat kgx
+        sources = [
+            {
+                "resource_id": data["primary_knowledge_source"],
+                "resource_role": "primary_knowledge_source",
+                "upstream_resource_ids": [],
+            }
+        ]
+
+        if (
+            "aggregator_knowledge_source" in data
+            and len(data["aggregator_knowledge_source"]) > 0
+        ):
+            data["aggregator_knowledge_source"].reverse()
+            previous_source = data["primary_knowledge_source"]
+            for aggregator_source in data["aggregator_knowledge_source"]:
+                sources.append(
+                    {
+                        "resource_id": aggregator_source,
+                        "resource_role": "aggregator_knowledge_source",
+                        "upstream_resource_ids": [previous_source],
+                    }
+                )
+                previous_source = aggregator_source
+    else:
+        # new translatorkg format
+
+        # Normalize: guarantee upstream_resource_ids on every source
+        sources = [
+            {
+                "resource_id": s["resource_id"],
+                "resource_role": s["resource_role"],
+                "upstream_resource_ids": s.get("upstream_resource_ids", []),
+            }
+            for s in raw
+        ]
 
     # Find the top of the source chain: sources whose resource_id is NOT
     # referenced in any other source's upstream_resource_ids.  These are the
     # "leaf" providers that no one else aggregates from yet.
-    all_upstream = {
-        uid
-        for s in sources
-        for uid in s["upstream_resource_ids"]
-    }
+    all_upstream = {uid for s in sources for uid in s["upstream_resource_ids"]}
     top_ids = [
-        s["resource_id"]
-        for s in sources
-        if s["resource_id"] not in all_upstream
+        s["resource_id"] for s in sources if s["resource_id"] not in all_upstream
     ]
 
     # Prepend gandalf as aggregator_knowledge_source
     gandalf_source = {
-        "resource_id": "infores:gandalf",
+        "resource_id": settings.infores,
         "resource_role": "aggregator_knowledge_source",
         "upstream_resource_ids": top_ids,
     }
@@ -99,10 +137,12 @@ def _extract_qualifiers(data):
     qualifiers = []
     for field in _QUALIFIER_FIELDS:
         if field in data:
-            qualifiers.append({
-                "qualifier_type_id": f"biolink:{field}",
-                "qualifier_value": data[field],
-            })
+            qualifiers.append(
+                {
+                    "qualifier_type_id": f"biolink:{field}",
+                    "qualifier_value": data[field],
+                }
+            )
 
     return qualifiers
 
@@ -117,11 +157,13 @@ def _extract_attributes(data):
     for field, value in data.items():
         if field in _CORE_FIELDS or field in _QUALIFIER_FIELDS or field == "qualifiers":
             continue
-        attributes.append({
-            "attribute_type_id": f"biolink:{field}",
-            "value": value,
-            "original_attribute_name": field,
-        })
+        attributes.append(
+            {
+                "attribute_type_id": f"biolink:{field}",
+                "value": value,
+                "original_attribute_name": field,
+            }
+        )
     return attributes
 
 
@@ -136,11 +178,13 @@ def _extract_node_attributes(node_data):
     for field, value in node_data.items():
         if field in _CORE_NODE_FIELDS:
             continue
-        attributes.append({
-            "attribute_type_id": "biolink:Attribute",
-            "value": value,
-            "original_attribute_name": field,
-        })
+        attributes.append(
+            {
+                "attribute_type_id": "biolink:Attribute",
+                "value": value,
+                "original_attribute_name": field,
+            }
+        )
     return attributes
 
 
@@ -159,7 +203,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # =================================================================
     # Pass 1: Vocabulary collection
     # =================================================================
-    print(f"Pass 1: Collecting vocabularies from {edge_jsonl_path}...")
+    logger.info("Pass 1: Collecting vocabularies from %s...", edge_jsonl_path)
 
     node_ids = set()
     predicates = set()
@@ -167,17 +211,21 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
 
     with open(edge_jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
-            data = json.loads(line)
+            data = orjson.loads(line)
             node_ids.add(data["subject"])
             node_ids.add(data["object"])
             predicates.add(data["predicate"])
             edge_count += 1
 
             if edge_count % 1_000_000 == 0:
-                print(f"  {edge_count:,} edges scanned...")
+                logger.debug("  %s edges scanned...", f"{edge_count:,}")
 
-    print(f"  Found {len(node_ids):,} unique nodes, {len(predicates):,} predicates, "
-          f"{edge_count:,} edges")
+    logger.info(
+        "  Found %s unique nodes, %s predicates, %s edges",
+        f"{len(node_ids):,}",
+        f"{len(predicates):,}",
+        f"{edge_count:,}",
+    )
 
     # Build vocabulary mappings
     node_id_to_idx = {nid: idx for idx, nid in enumerate(sorted(node_ids))}
@@ -188,10 +236,10 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # Load node properties
     node_properties = {}
     if node_jsonl_path:
-        print(f"Reading node properties from {node_jsonl_path}...")
+        logger.debug("Reading node properties from %s...", node_jsonl_path)
         with open(node_jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
-                node_data = json.loads(line)
+                node_data = orjson.loads(line)
                 node_id = node_data.get("id")
                 if node_id:
                     idx = node_id_to_idx.get(node_id)
@@ -201,12 +249,14 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
                             "categories": node_data.get("category", []),
                             "attributes": _extract_node_attributes(node_data),
                         }
-        print(f"  Loaded properties for {len(node_properties):,} nodes")
+        logger.debug("  Loaded properties for %s nodes", f"{len(node_properties):,}")
 
     # =================================================================
     # Pass 2: Build arrays + dedup store + temp LMDB
     # =================================================================
-    print(f"Pass 2: Building arrays and property stores ({edge_count:,} edges)...")
+    logger.info(
+        "Pass 2: Building arrays and property stores (%s edges)...", f"{edge_count:,}"
+    )
 
     # Pre-allocate numpy arrays
     src_indices = np.empty(edge_count, dtype=np.int32)
@@ -237,7 +287,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     try:
         with open(edge_jsonl_path, "r", encoding="utf-8") as f:
             for i, line in enumerate(f):
-                data = json.loads(line)
+                data = orjson.loads(line)
 
                 # Fill numpy arrays
                 src_indices[i] = node_id_to_idx[data["subject"]]
@@ -270,7 +320,9 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
                     txn = temp_env.begin(write=True)
 
                 if (i + 1) % 1_000_000 == 0:
-                    print(f"  {i + 1:,}/{edge_count:,} edges processed...")
+                    logger.debug(
+                        "  %s/%s edges processed...", f"{i + 1:,}", f"{edge_count:,}"
+                    )
 
         txn.commit()
     except BaseException:
@@ -279,12 +331,12 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     finally:
         temp_env.close()
 
-    print(f"  Arrays and temp LMDB built")
+    logger.debug("  Arrays and temp LMDB built")
 
     # =================================================================
     # Pass 3: Sort, rewrite LMDB, build CSR
     # =================================================================
-    print("Pass 3: Sorting and building CSR structure...")
+    logger.info("Pass 3: Sorting and building CSR structure...")
 
     # Sort by (src, dst, pred) using lexsort (last key is primary)
     sort_order = np.lexsort((pred_indices, dst_indices, src_indices))
@@ -307,9 +359,12 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     del prop_builder
 
     stats = edge_properties.dedup_stats()
-    print(f"  Edge property dedup: {stats['total_edges']:,} edges -> "
-          f"{stats['unique_sources']:,} unique source configs, "
-          f"{stats['unique_qualifiers']:,} unique qualifier combos")
+    logger.debug(
+        "  Edge property dedup: %s edges -> %s unique source configs, %s unique qualifier combos",
+        f"{stats['total_edges']:,}",
+        f"{stats['unique_sources']:,}",
+        f"{stats['unique_qualifiers']:,}",
+    )
 
     # Rewrite temp LMDB in CSR-sorted order → final LMDB
     # This is the expensive build-time step, but ensures query-time
@@ -327,7 +382,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # NOTE: sort_order is kept alive — needed for rev_to_fwd mapping below.
 
     # Build CSR offset arrays using searchsorted
-    print("  Building CSR offsets...")
+    logger.debug("  Building CSR offsets...")
     fwd_offsets = np.zeros(num_nodes + 1, dtype=np.int64)
     if edge_count > 0:
         boundaries = np.searchsorted(src_sorted, np.arange(num_nodes + 1))
@@ -335,7 +390,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     del src_sorted
 
     # Build reverse CSR: sort edges by (dst, src, pred)
-    print("  Building reverse CSR...")
+    logger.debug("  Building reverse CSR...")
     # Reconstruct per-edge source node IDs from forward CSR offsets
     edge_src = np.empty(edge_count, dtype=np.int32)
     for node_idx in range(num_nodes):
@@ -358,7 +413,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # corresponding forward-CSR position.  Forward positions are simply
     # 0..E-1 (the arrays are already in forward-sorted order).  The
     # inverse of sort_order maps original-edge-index → forward position.
-    print("  Building rev_to_fwd mapping...")
+    logger.debug("  Building rev_to_fwd mapping...")
     fwd_pos = np.empty(edge_count, dtype=np.int32)
     fwd_pos[sort_order] = np.arange(edge_count, dtype=np.int32)
     rev_to_fwd = rev_order.astype(np.int32)
@@ -367,7 +422,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     del edge_src, rev_dst_sorted, rev_order
 
     # Assemble the graph
-    print("  Assembling graph...")
+    logger.debug("  Assembling graph...")
     graph = CSRGraph.__new__(CSRGraph)
     graph.num_nodes = num_nodes
     graph.node_id_to_idx = node_id_to_idx
@@ -375,6 +430,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     graph.predicate_to_idx = predicate_to_idx
     graph.id_to_predicate = {idx: pred for pred, idx in predicate_to_idx.items()}
     graph.node_properties = node_properties
+    graph.node_store = None
 
     graph.fwd_targets = dst_sorted
     graph.fwd_predicates = pred_sorted
@@ -387,22 +443,29 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
 
     graph.edge_properties = edge_properties
     graph.edge_ids = edge_ids_sorted
+    graph._edge_ids_env = None
     graph.lmdb_store = lmdb_store
 
     # Print statistics
     degrees = [graph.degree(i) for i in range(min(1000, graph.num_nodes))]
     if degrees:
-        print("\nGraph statistics:")
-        print(f"  Nodes: {graph.num_nodes:,}")
-        print(f"  Edges: {len(graph.fwd_targets):,}")
-        print(f"  Unique predicates: {len(predicate_to_idx):,}")
-        print(f"  Avg degree (sampled): {np.mean(degrees):.1f}")
-        print(f"  Max degree (sampled): {np.max(degrees)}")
+        logger.info("Graph statistics:")
+        logger.info("  Nodes: %s", f"{graph.num_nodes:,}")
+        logger.info("  Edges: %s", f"{len(graph.fwd_targets):,}")
+        logger.info("  Unique predicates: %s", f"{len(predicate_to_idx):,}")
+        logger.info("  Avg degree (sampled): %.1f", np.mean(degrees))
+        logger.info("  Max degree (sampled): %s", np.max(degrees))
         memory_mb = (
-            graph.fwd_targets.nbytes
-            + graph.fwd_offsets.nbytes
-            + graph.fwd_predicates.nbytes
-        ) / 1024 / 1024
-        print(f"  CSR memory usage: ~{memory_mb:.1f} MB")
+            (
+                graph.fwd_targets.nbytes
+                + graph.fwd_offsets.nbytes
+                + graph.fwd_predicates.nbytes
+            )
+            / 1024
+            / 1024
+        )
+        logger.info("  CSR memory usage: ~%.1f MB", memory_mb)
+
+    graph.build_metadata()
 
     return graph

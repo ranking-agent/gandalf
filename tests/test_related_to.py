@@ -37,7 +37,7 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) >= 1
@@ -69,7 +69,7 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Before the fix this returned 0 results because inverse edges
@@ -105,7 +105,7 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         result_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
@@ -118,9 +118,9 @@ class TestRelatedToPredicateExpansion:
 
         # Inverse (incoming) edges to PPARG:
         #   CHEBI:6801 --affects--> PPARG (incoming to PPARG)
-        assert "CHEBI:6801" in result_ids, (
-            "Should find incoming edge sources via inverse direction"
-        )
+        assert (
+            "CHEBI:6801" in result_ids
+        ), "Should find incoming edge sources via inverse direction"
 
     def test_related_to_unpinned_start_pinned_end(self, graph, bmt):
         """related_to with pinned end should find ALL neighbors (both directions).
@@ -153,7 +153,7 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         result_ids = {r["node_bindings"]["n0"][0]["id"] for r in results}
@@ -167,9 +167,9 @@ class TestRelatedToPredicateExpansion:
 
         # Inverse (outgoing edges from MONDO:0005148, found via inverse lookup):
         #   MONDO:0005148 --has_phenotype--> HP:0001943
-        assert "HP:0001943" in result_ids, (
-            "Should find outgoing edge targets via inverse direction"
-        )
+        assert (
+            "HP:0001943" in result_ids
+        ), "Should find outgoing edge targets via inverse direction"
 
     def test_related_to_no_predicates_same_as_related_to(self, graph, bmt):
         """Query with no predicates should behave the same as related_to."""
@@ -210,8 +210,8 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response_related = lookup(graph, query_related, bmt=bmt, verbose=False)
-        response_none = lookup(graph, query_none, bmt=bmt, verbose=False)
+        response_related = lookup(graph, query_related, bmt=bmt)
+        response_none = lookup(graph, query_none, bmt=bmt)
 
         ids_related = {
             r["node_bindings"]["n1"][0]["id"]
@@ -256,14 +256,14 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Should find at least PPARG as the intermediate node
         intermediate_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
-        assert "NCBIGene:5468" in intermediate_ids, (
-            "Should find PPARG via inverse lookup on first hop"
-        )
+        assert (
+            "NCBIGene:5468" in intermediate_ids
+        ), "Should find PPARG via inverse lookup on first hop"
 
     def test_related_to_two_hop_symmetric_result_count(self, graph, bmt):
         """Two-hop related_to queries should return the same results regardless of direction.
@@ -320,19 +320,23 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response_a = lookup(graph, query_a, bmt=bmt, verbose=False)
-        response_b = lookup(graph, query_b, bmt=bmt, verbose=False)
+        response_a = lookup(graph, query_a, bmt=bmt)
+        response_b = lookup(graph, query_b, bmt=bmt)
 
-        intermediates_a = {r["node_bindings"]["n1"][0]["id"]
-                          for r in response_a["message"]["results"]}
-        intermediates_b = {r["node_bindings"]["n1"][0]["id"]
-                          for r in response_b["message"]["results"]}
+        intermediates_a = {
+            r["node_bindings"]["n1"][0]["id"] for r in response_a["message"]["results"]
+        }
+        intermediates_b = {
+            r["node_bindings"]["n1"][0]["id"] for r in response_b["message"]["results"]
+        }
 
         assert intermediates_a == intermediates_b, (
             f"Forward and reverse two-hop queries should find the same intermediate "
             f"nodes, but got {intermediates_a} vs {intermediates_b}"
         )
-        assert len(response_a["message"]["results"]) == len(response_b["message"]["results"]), (
+        assert len(response_a["message"]["results"]) == len(
+            response_b["message"]["results"]
+        ), (
             f"Forward and reverse two-hop queries should return the same number of "
             f"results, but got {len(response_a['message']['results'])} vs "
             f"{len(response_b['message']['results'])}"
@@ -394,13 +398,17 @@ class TestRelatedToPredicateExpansion:
             },
         }
 
-        response_fwd = lookup(graph, query_forward, bmt=bmt, verbose=False)
-        response_rev = lookup(graph, query_reversed, bmt=bmt, verbose=False)
+        response_fwd = lookup(graph, query_forward, bmt=bmt)
+        response_rev = lookup(graph, query_reversed, bmt=bmt)
 
-        intermediates_fwd = {r["node_bindings"]["n1"][0]["id"]
-                            for r in response_fwd["message"]["results"]}
-        intermediates_rev = {r["node_bindings"]["n1"][0]["id"]
-                            for r in response_rev["message"]["results"]}
+        intermediates_fwd = {
+            r["node_bindings"]["n1"][0]["id"]
+            for r in response_fwd["message"]["results"]
+        }
+        intermediates_rev = {
+            r["node_bindings"]["n1"][0]["id"]
+            for r in response_rev["message"]["results"]
+        }
 
         # Both directions should find genes that connect MONDO:0005148 and CHEBI:6801
         assert len(intermediates_fwd) > 0, "Should find at least one intermediate gene"

@@ -2,12 +2,17 @@
 
 import copy
 import gc
+import logging
 import time
 import uuid
 from collections import defaultdict
 
 from bmt.toolkit import Toolkit
 
+logger = logging.getLogger(__name__)
+
+from gandalf.config import settings
+from gandalf.logging_config import TRAPILogCollector
 from gandalf.query_planner import get_next_qedge, remove_orphaned
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
 from gandalf.search.gc_utils import GCMonitor
@@ -15,29 +20,55 @@ from gandalf.search.query_edge import query_edge, query_subclass_edge
 from gandalf.search.reconstruct import reconstruct_paths
 
 
-def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_depth=1,
-           max_node_degree=None, min_information_content=None):
+def lookup(
+    graph,
+    query: dict,
+    bmt=None,
+    subclass=True,
+    subclass_depth=1,
+    max_node_degree=None,
+    min_information_content=None,
+    log_level=None,
+    dehydrated=None,
+):
     """Take an arbitrary Translator query graph and return all matching paths.
 
     Args:
         graph: CSRGraph instance
         query: Full TRAPI request dict containing message.query_graph
         bmt: Biolink Model Toolkit instance (optional, will create if not provided)
-        verbose: Print progress information
         subclass: If True, expand pinned nodes to include subclass descendants
         subclass_depth: Maximum number of subclass_of hops to traverse (default 1)
         max_node_degree: If set, filter out nodes with total degree (in + out)
             exceeding this value during path traversal.
         min_information_content: If set, filter out nodes whose
             information_content attribute is below this value.
+        log_level: If set, temporarily adjust the gandalf logger to this level
+            (e.g. ``"DEBUG"``) for the duration of the query.
+        dehydrated: If True, force a dehydrated (lightweight) response that
+            skips edge attribute enrichment regardless of result size.
+            If False, force full enrichment.  If None (default), automatically
+            enable lightweight mode when path count exceeds the large result
+            threshold.
 
     Returns:
-        TRAPI response dict with message containing results, knowledge_graph, etc.
+        TRAPI response dict with message containing results, knowledge_graph,
+        and a ``logs`` list of TRAPI LogEntry dicts.
     """
     t_start = time.perf_counter()
 
+    # Collect TRAPI-spec log entries during query execution.
+    # Temporarily adjust the logger level if requested so that the collector
+    # captures entries at the desired verbosity.
+    log_collector = TRAPILogCollector()
+    gandalf_logger = logging.getLogger("gandalf")
+    prev_level = gandalf_logger.level
+    if log_level is not None:
+        gandalf_logger.setLevel(log_level)
+    gandalf_logger.addHandler(log_collector)
+
     # Start GC monitoring to track collection events
-    gc_monitor = GCMonitor(verbose=verbose)
+    gc_monitor = GCMonitor()
     gc_monitor.start()
 
     # Disable GC for the entire query to prevent expensive Gen 2 collections
@@ -48,27 +79,48 @@ def lookup(graph, query: dict, bmt=None, verbose=True, subclass=True, subclass_d
     gc.disable()
 
     try:
-        return _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
-                             t_start, gc_monitor,
-                             max_node_degree=max_node_degree,
-                             min_information_content=min_information_content)
+        response = _lookup_inner(
+            graph,
+            query,
+            bmt,
+            subclass,
+            subclass_depth,
+            t_start,
+            gc_monitor,
+            max_node_degree=max_node_degree,
+            min_information_content=min_information_content,
+            dehydrated=dehydrated,
+        )
+        response["logs"] = log_collector.get_logs()
+        return response
     finally:
+        gandalf_logger.removeHandler(log_collector)
+        gandalf_logger.setLevel(prev_level)
         gc_monitor.stop()
         if gc_was_enabled_at_start:
             gc.enable()
 
 
-def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
-                  t_start, gc_monitor,
-                  max_node_degree=None, min_information_content=None):
+def _lookup_inner(
+    graph,
+    query,
+    bmt,
+    subclass,
+    subclass_depth,
+    t_start,
+    gc_monitor,
+    max_node_degree=None,
+    min_information_content=None,
+    dehydrated=None,
+):
     """Inner implementation of lookup with all the core logic."""
+    logger.info("Starting lookup.")
     if bmt is None:
         bmt = Toolkit()
         t_bmt = time.perf_counter()
-        if verbose:
-            print(f"BMT initialization: {t_bmt - t_start:.2f}s")
-    elif verbose:
-        print("Using provided BMT instance")
+        logger.warning("BMT initialization: %.2fs", t_bmt - t_start)
+    else:
+        logger.debug("Using provided BMT instance")
 
     # Create predicate expander for handling symmetric/inverse predicates at query time
     predicate_expander = PredicateExpander(bmt)
@@ -82,8 +134,9 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
 
     # Rewrite query graph for subclass expansion if requested
     if subclass and subqgraph["edges"]:
-        if verbose:
-            print(f"Rewriting query graph for subclass expansion (depth={subclass_depth})")
+        logger.debug(
+            "Rewriting query graph for subclass expansion (depth=%s)", subclass_depth
+        )
         _rewrite_for_subclass(subqgraph, subclass_depth=subclass_depth)
         # Use the rewritten graph as the query graph for the rest of the pipeline
         query_graph = copy.deepcopy(subqgraph)
@@ -100,18 +153,21 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
     original_edges = list(query_graph["edges"].keys())
     original_nodes = set(query_graph["nodes"].keys())
 
-    if verbose:
-        print(f"Query graph: {len(original_nodes)} nodes, {len(original_edges)} edges")
+    logger.debug(
+        "Query graph: %s nodes, %s edges", len(original_nodes), len(original_edges)
+    )
 
     # Process edges one at a time
     while len(subqgraph["edges"].keys()) > 0:
         # Get next edge to query
         next_edge_id, next_edge = get_next_qedge(subqgraph)
 
-        if verbose:
-            print(
-                f"\nProcessing edge '{next_edge_id}': {next_edge['subject']} -> {next_edge['object']}"
-            )
+        logger.debug(
+            "Processing edge '%s': %s -> %s",
+            next_edge_id,
+            next_edge["subject"],
+            next_edge["object"],
+        )
 
         # Get node constraints
         start_node = subqgraph["nodes"][next_edge["subject"]]
@@ -138,7 +194,7 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
         if next_edge.get("_subclass"):
             subclass_edge_depth = next_edge.get("_subclass_depth", 1)
             edge_matches = query_subclass_edge(
-                graph, start_node_idxes, end_node_idxes, subclass_edge_depth, verbose
+                graph, start_node_idxes, end_node_idxes, subclass_edge_depth
             )
             edge_inverse_preds[next_edge_id] = set()
         else:
@@ -147,8 +203,8 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
             # 2. Expand to descendants filtered to canonical OR symmetric only
             # 3. Also expand inverse predicates for bidirectional matching
             query_predicates = next_edge.get("predicates", [])
-            forward_predicates, inverse_predicates = predicate_expander.expand_predicates(
-                query_predicates
+            forward_predicates, inverse_predicates = (
+                predicate_expander.expand_predicates(query_predicates)
             )
 
             # Forward predicates are used for direct edge matching
@@ -156,12 +212,18 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
             # Keep them separate to avoid confusion in reverse_pred_map construction
             allowed_predicates = forward_predicates
 
-            if verbose and query_predicates:
-                print(f"  Query predicates: {query_predicates}")
-                print(f"  Expanded to {len(forward_predicates)} forward, {len(inverse_predicates) if inverse_predicates is not None else 0} inverse predicates")
+            if query_predicates:
+                logger.debug("  Query predicates: %s", query_predicates)
+                logger.debug(
+                    "  Expanded to %s forward, %s inverse predicates",
+                    len(forward_predicates),
+                    len(inverse_predicates) if inverse_predicates is not None else 0,
+                )
 
             # Store inverse predicates for this edge (for path reconstruction)
-            edge_inverse_preds[next_edge_id] = set(inverse_predicates) if inverse_predicates is not None else set()
+            edge_inverse_preds[next_edge_id] = (
+                set(inverse_predicates) if inverse_predicates is not None else set()
+            )
 
             # Get qualifier constraints for this edge and expand to include descendant values
             qualifier_constraints = next_edge.get("qualifier_constraints", [])
@@ -184,7 +246,6 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
                 end_node.get("categories", []),
                 allowed_predicates,
                 qualifier_constraints,
-                verbose,
                 inverse_predicates=inverse_predicates,
                 max_node_degree=max_node_degree,
                 min_information_content=min_information_content,
@@ -196,11 +257,10 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
         # Store results for this edge
         edge_results[next_edge_id] = edge_matches
 
-        if verbose:
-            print(f"  Found {len(edge_matches):,} matching edges")
+        logger.debug("  Found %s matching edges", f"{len(edge_matches):,}")
 
         if len(edge_matches) <= 0:
-            print("Found no edge matches, returning 0 results.")
+            logger.info("Found no edge matches, returning 0 results.")
             original_edges = []
             break
 
@@ -232,22 +292,24 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
         # Remove orphaned nodes
         remove_orphaned(subqgraph)
 
-        if verbose:
-            print(f"  Remaining edges: {len(subqgraph['edges'])}")
+        logger.debug("  Remaining edges: %s", len(subqgraph["edges"]))
 
     # Reconstruct complete paths from edge results
-    if verbose:
-        print(f"\nReconstructing complete paths...")
+    logger.debug("Reconstructing complete paths...")
 
     path_data = reconstruct_paths(
-        graph, query_graph, edge_results, original_edges, verbose,
-        edge_inverse_preds=edge_inverse_preds
+        graph,
+        query_graph,
+        edge_results,
+        original_edges,
+        edge_inverse_preds=edge_inverse_preds,
+        dehydrated=dehydrated,
+        bmt=bmt,
     )
 
     num_paths = len(path_data) if path_data is not None else 0
 
-    if verbose:
-        print(f"Found {num_paths:,} complete paths")
+    logger.debug("Found %s complete paths", f"{num_paths:,}")
 
     t_post_start = time.perf_counter()
 
@@ -265,27 +327,39 @@ def _lookup_inner(graph, query, bmt, verbose, subclass, subclass_depth,
 
     if num_paths == 0:
         t_built = time.perf_counter()
-        if verbose:
-            print(f"  Post-processing total: {t_built - t_post_start:.2f}s")
+        logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
     else:
         _build_response(
-            graph, response, path_data, query_graph, num_paths,
-            t_post_start, gc_monitor, verbose,
+            graph,
+            response,
+            path_data,
+            query_graph,
+            num_paths,
+            t_post_start,
+            gc_monitor,
         )
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
     # The monitor is still accumulating events until stop() is called there.
     gc_summary = gc_monitor.summary()
-    if verbose and gc_summary and gc_summary["total_time"] > 0.1:
-        print(f"  [GC Summary] {gc_summary['total_collections']} collections, "
-              f"{gc_summary['total_time']:.2f}s total, "
-              f"{gc_summary['total_collected']} objects collected")
+    if gc_summary and gc_summary["total_time"] > 0.1:
+        logger.debug(
+            "  [GC Summary] %s collections, %.2fs total, %s objects collected",
+            gc_summary["total_collections"],
+            gc_summary["total_time"],
+            gc_summary["total_collected"],
+        )
 
+    t_stop = time.perf_counter()
+    logger.info(
+        f"Returning {len(response['message']['results'])} results in {t_stop - t_start} seconds."
+    )
     return response
 
 
-def _build_response(graph, response, path_data, query_graph, num_paths,
-                    t_post_start, gc_monitor, verbose):
+def _build_response(
+    graph, response, path_data, query_graph, num_paths, t_post_start, gc_monitor
+):
     """Build the TRAPI response from path data."""
     # Extract arrays and metadata from PathArrays for efficient access
     pa_nodes = path_data.paths_nodes
@@ -305,11 +379,13 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
 
     # Pre-compute subclass metadata for result building
     superclass_qnodes = {
-        qnode_id for qnode_id, qnode in query_graph["nodes"].items()
+        qnode_id
+        for qnode_id, qnode in query_graph["nodes"].items()
         if qnode.get("_superclass")
     }
     subclass_qedges = {
-        qedge_id for qedge_id, qedge in query_graph["edges"].items()
+        qedge_id
+        for qedge_id, qedge in query_graph["edges"].items()
         if qedge.get("_subclass")
     }
     qnode_to_superclass = {}
@@ -359,8 +435,11 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
         node_binding_groups[node_key].append(path_idx)
 
     t_grouped = time.perf_counter()
-    if verbose:
-        print(f"  Grouped into {len(node_binding_groups):,} unique node paths ({t_grouped - t_post_start:.2f}s)")
+    logger.debug(
+        "  Grouped into %s unique node paths (%.2fs)",
+        f"{len(node_binding_groups):,}",
+        t_grouped - t_post_start,
+    )
 
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
@@ -370,10 +449,12 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
 
         result = {
             "node_bindings": {},
-            "analyses": [{
-                "resource_id": "infores:gandalf",
-                "edge_bindings": {},
-            }],
+            "analyses": [
+                {
+                    "resource_id": settings.infores,
+                    "edge_bindings": {},
+                }
+            ],
         }
 
         # Add node bindings -- skip superclass nodes, substitute IDs
@@ -397,7 +478,9 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                     sc_node_id = node_id_cache[sc_node_idx]
                     if sc_node_id != node_id:
                         bound_id = sc_node_id
-                        response["message"]["knowledge_graph"]["nodes"][sc_node_id] = sc_node
+                        response["message"]["knowledge_graph"]["nodes"][
+                            sc_node_id
+                        ] = sc_node
 
             result["node_bindings"][qnode_id] = [
                 {"id": bound_id, "attributes": []},
@@ -439,7 +522,10 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                     quals = graph.edge_properties.get_qualifiers(fwd_eidx)
                     quals_key = tuple(
                         sorted(
-                            (q.get("qualifier_type_id", ""), q.get("qualifier_value", ""))
+                            (
+                                q.get("qualifier_type_id", ""),
+                                q.get("qualifier_value", ""),
+                            )
                             for q in (quals or [])
                         )
                     )
@@ -465,7 +551,9 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                         if fwd_eidx < 0:
                             edge_props = {}
                         else:
-                            edge_props = graph.get_edge_properties_by_index(fwd_eidx).copy()
+                            edge_props = graph.get_edge_properties_by_index(
+                                fwd_eidx
+                            ).copy()
                         edge_props["predicate"] = predicate
                         edge_props["subject"] = subj_id
                         edge_props["object"] = obj_id
@@ -499,7 +587,7 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
             # appear in the result.
             if attached:
                 sc_ids = {}
-                for (which_end, _, sc_qnid) in attached:
+                for which_end, _, sc_qnid in attached:
                     if sc_qnid in qnode_to_col:
                         sc_col_idx = qnode_to_col[sc_qnid]
                         sc_nidx = int(pa_nodes[first_idx, sc_col_idx])
@@ -508,7 +596,8 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                 direct_edges = []
                 for e in edges:
                     is_direct = all(
-                        e.get("_query_subject" if end == "subject" else "_query_object") == sc_id
+                        e.get("_query_subject" if end == "subject" else "_query_object")
+                        == sc_id
                         for end, sc_id in sc_ids.items()
                     )
                     if is_direct:
@@ -526,29 +615,40 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                     subclass_edge_kg_ids = []
                     superclass_node_overrides = {}
 
-                    for (which_end, sc_edge_id, sc_qnode_id) in attached:
+                    for which_end, sc_edge_id, sc_qnode_id in attached:
                         sc_edges = edge_bindings_by_qedge.get(sc_edge_id, [])
                         for sc_edge in sc_edges:
                             if sc_edge["subject"] == sc_edge["object"]:
                                 continue
                             sc_kg_id = sc_edge.get("_edge_id") or str(uuid.uuid4())[:8]
-                            response["message"]["knowledge_graph"]["edges"][sc_kg_id] = sc_edge
+                            response["message"]["knowledge_graph"]["edges"][
+                                sc_kg_id
+                            ] = sc_edge
                             subclass_edge_kg_ids.append(sc_kg_id)
 
                             # Ensure subclass edge endpoint nodes are in KG nodes.
                             # Child nodes from subclass expansion may not have been
                             # added above (only first_idx path nodes are added).
                             for ep_id in (sc_edge["subject"], sc_edge["object"]):
-                                if ep_id not in response["message"]["knowledge_graph"]["nodes"]:
+                                if (
+                                    ep_id
+                                    not in response["message"]["knowledge_graph"][
+                                        "nodes"
+                                    ]
+                                ):
                                     ep_idx = graph.get_node_idx(ep_id)
                                     if ep_idx is not None and ep_idx in node_cache:
-                                        response["message"]["knowledge_graph"]["nodes"][ep_id] = node_cache[ep_idx]
+                                        response["message"]["knowledge_graph"]["nodes"][
+                                            ep_id
+                                        ] = node_cache[ep_idx]
 
                         # Get superclass node ID for endpoint override
                         if sc_qnode_id in qnode_to_col:
                             sc_col = qnode_to_col[sc_qnode_id]
                             sc_node_idx = int(pa_nodes[first_idx, sc_col])
-                            superclass_node_overrides[which_end] = node_id_cache[sc_node_idx]
+                            superclass_node_overrides[which_end] = node_id_cache[
+                                sc_node_idx
+                            ]
 
                     if subclass_edge_kg_ids:
                         composite_edge_ids = [edge_kg_id] + subclass_edge_kg_ids
@@ -561,7 +661,10 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                                 "attributes": [],
                             }
 
-                        if composite_edge_id not in response["message"]["knowledge_graph"]["edges"]:
+                        if (
+                            composite_edge_id
+                            not in response["message"]["knowledge_graph"]["edges"]
+                        ):
                             # Use query-aligned IDs so the override maps to the
                             # correct endpoint regardless of stored edge direction.
                             qs = edge.get("_query_subject", edge["subject"])
@@ -586,12 +689,14 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
                                 ],
                                 "sources": [
                                     {
-                                        "resource_id": "infores:gandalf",
+                                        "resource_id": settings.infores,
                                         "resource_role": "primary_knowledge_source",
                                     }
                                 ],
                             }
-                            response["message"]["knowledge_graph"]["edges"][composite_edge_id] = inferred_edge
+                            response["message"]["knowledge_graph"]["edges"][
+                                composite_edge_id
+                            ] = inferred_edge
 
                         result["analyses"][0]["edge_bindings"][edge_id].append(
                             {"id": composite_edge_id, "attributes": []}
@@ -618,9 +723,12 @@ def _build_response(graph, response, path_data, query_graph, num_paths,
         edge.pop("_query_object", None)
 
     t_built = time.perf_counter()
-    if verbose:
-        print(f"  Built {len(response['message']['results']):,} results ({t_built - t_grouped:.2f}s)")
-        print(f"  Post-processing total: {t_built - t_post_start:.2f}s")
+    logger.debug(
+        "  Built %s results (%.2fs)",
+        f"{len(response['message']['results']):,}",
+        t_built - t_grouped,
+    )
+    logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
 
 
 def _rewrite_for_subclass(query_graph, subclass_depth=1):

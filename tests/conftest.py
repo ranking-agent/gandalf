@@ -78,13 +78,16 @@ class MockBMT:
         }
     )
 
-    # Predicate hierarchy: parent -> list of children.
-    # Only predicates whose descendants matter for tests are listed.
+    # Hierarchy: parent -> list of children.
+    # Covers both predicates and categories used in tests.
     _DESCENDANTS = {
         "biolink:treats": [
             "biolink:ameliorates_condition",
             "biolink:preventative_for_condition",
         ],
+        "biolink:Drug": ["biolink:SmallMolecule"],
+        "biolink:GeneOrGeneProduct": ["biolink:Gene"],
+        "biolink:ChemicalEntity": ["biolink:SmallMolecule", "biolink:Drug"],
     }
 
     # Qualifier enum values used for qualifier expansion.
@@ -136,14 +139,10 @@ class MockBMT:
             return _MockElement(canonical=False)
         return None
 
-    def get_descendants(
-        self, predicate: str, formatted: bool = False
-    ) -> list[str]:
+    def get_descendants(self, predicate: str, formatted: bool = False) -> list[str]:
         return list(self._DESCENDANTS.get(predicate, []))
 
-    def is_permissible_value_of_enum(
-        self, enum_name: str, value: str
-    ) -> bool:
+    def is_permissible_value_of_enum(self, enum_name: str, value: str) -> bool:
         return value in self._ENUM_VALUES.get(enum_name, set())
 
     def get_permissible_value_descendants(

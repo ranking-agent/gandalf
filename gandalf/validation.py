@@ -4,12 +4,15 @@ This module provides tools for development and testing to ensure that
 query results are consistent with the actual graph data.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 from bmt.toolkit import Toolkit
 
 from gandalf.graph import CSRGraph
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level BMT instance for predicate lookups
@@ -29,9 +32,10 @@ def _get_inverse_predicate(predicate: str) -> Optional[str]:
     bmt = _get_bmt()
     try:
         if bmt.has_inverse(predicate):
-            return bmt.get_inverse_predicate(predicate, formatted=True)
-    except Exception:
-        pass
+            result: Optional[str] = bmt.get_inverse_predicate(predicate, formatted=True)
+            return result
+    except (AttributeError, ValueError, KeyError):
+        logger.debug("Could not get inverse for predicate: %s", predicate)
     return None
 
 
@@ -39,14 +43,17 @@ def _is_symmetric(predicate: str) -> bool:
     """Check if a predicate is symmetric."""
     bmt = _get_bmt()
     try:
-        return bmt.is_symmetric(predicate)
-    except Exception:
+        result: bool = bmt.is_symmetric(predicate)
+        return result
+    except (AttributeError, ValueError, KeyError):
+        logger.debug("Could not check symmetry for predicate: %s", predicate)
         return False
 
 
 @dataclass
 class ValidationError:
     """Represents a validation error found in a result."""
+
     error_type: str
     message: str
     path_index: Optional[int] = None
@@ -57,6 +64,7 @@ class ValidationError:
 @dataclass
 class ValidationResult:
     """Result of validating query results against the graph."""
+
     valid: bool
     total_paths: int
     valid_paths: int
@@ -173,7 +181,6 @@ def validate_trapi_response(
     graph: CSRGraph,
     response: dict,
     check_inverse: bool = True,
-    verbose: bool = False,
 ) -> ValidationResult:
     """
     Validate a TRAPI response against the graph.
@@ -187,7 +194,6 @@ def validate_trapi_response(
         graph: The CSRGraph to validate against
         response: TRAPI response dict with message.knowledge_graph and message.results
         check_inverse: If True, also check for inverse predicates in reverse direction
-        verbose: Print progress information
 
     Returns:
         ValidationResult with validation status and any errors found
@@ -197,9 +203,12 @@ def validate_trapi_response(
     kg = message.get("knowledge_graph", {})
     results = message.get("results", [])
 
-    if verbose:
-        print(f"Validating response with {len(kg.get('nodes', {}))} KG nodes, "
-              f"{len(kg.get('edges', {}))} KG edges, {len(results)} results")
+    logger.debug(
+        "Validating response with %s KG nodes, %s KG edges, %s results",
+        len(kg.get("nodes", {})),
+        len(kg.get("edges", {})),
+        len(results),
+    )
 
     # Validate knowledge graph nodes
     kg_nodes = kg.get("nodes", {})
@@ -208,8 +217,11 @@ def validate_trapi_response(
         if err:
             errors.append(err)
 
-    if verbose:
-        print(f"  Validated {len(kg_nodes)} KG nodes, {len([e for e in errors if e.error_type.startswith('NODE')])} errors")
+    logger.debug(
+        "  Validated %s KG nodes, %s errors",
+        len(kg_nodes),
+        len([e for e in errors if e.error_type.startswith("NODE")]),
+    )
 
     # Validate knowledge graph edges
     kg_edges = kg.get("edges", {})
@@ -220,23 +232,27 @@ def validate_trapi_response(
         object_id = edge_data.get("object")
 
         if not all([subject_id, predicate, object_id]):
-            errors.append(ValidationError(
-                error_type="INVALID_EDGE_DATA",
-                message=f"Edge '{edge_id}' missing required fields",
-                edge_id=edge_id,
-            ))
+            errors.append(
+                ValidationError(
+                    error_type="INVALID_EDGE_DATA",
+                    message=f"Edge '{edge_id}' missing required fields",
+                    edge_id=edge_id,
+                )
+            )
             continue
 
         err = validate_edge_exists(
-            graph, subject_id, predicate, object_id,
-            check_inverse=check_inverse
+            graph, subject_id, predicate, object_id, check_inverse=check_inverse
         )
         if err:
             err.edge_id = edge_id
             errors.append(err)
 
-    if verbose:
-        print(f"  Validated {len(kg_edges)} KG edges, {len(errors) - edge_errors_before} errors")
+    logger.debug(
+        "  Validated %s KG edges, %s errors",
+        len(kg_edges),
+        len(errors) - edge_errors_before,
+    )
 
     # Count valid paths (results where all bindings are valid)
     valid_paths = 0
@@ -249,12 +265,14 @@ def validate_trapi_response(
             for binding in bindings:
                 node_id = binding.get("id")
                 if node_id and node_id not in kg_nodes:
-                    errors.append(ValidationError(
-                        error_type="BINDING_NODE_NOT_IN_KG",
-                        message=f"Result {i}: Node binding '{node_id}' not in knowledge graph",
-                        path_index=i,
-                        node_id=node_id,
-                    ))
+                    errors.append(
+                        ValidationError(
+                            error_type="BINDING_NODE_NOT_IN_KG",
+                            message=f"Result {i}: Node binding '{node_id}' not in knowledge graph",
+                            path_index=i,
+                            node_id=node_id,
+                        )
+                    )
                     path_valid = False
 
         # Check edge bindings
@@ -265,19 +283,20 @@ def validate_trapi_response(
                 for binding in bindings:
                     edge_id = binding.get("id")
                     if edge_id and edge_id not in kg_edges:
-                        errors.append(ValidationError(
-                            error_type="BINDING_EDGE_NOT_IN_KG",
-                            message=f"Result {i}: Edge binding '{edge_id}' not in knowledge graph",
-                            path_index=i,
-                            edge_id=edge_id,
-                        ))
+                        errors.append(
+                            ValidationError(
+                                error_type="BINDING_EDGE_NOT_IN_KG",
+                                message=f"Result {i}: Edge binding '{edge_id}' not in knowledge graph",
+                                path_index=i,
+                                edge_id=edge_id,
+                            )
+                        )
                         path_valid = False
 
         if path_valid:
             valid_paths += 1
 
-    if verbose:
-        print(f"  Validated {len(results)} results, {valid_paths} valid")
+    logger.debug("  Validated %s results, %s valid", len(results), valid_paths)
 
     return ValidationResult(
         valid=len(errors) == 0,
@@ -291,7 +310,6 @@ def validate_edge_list(
     graph: CSRGraph,
     edges: list[tuple[int, str, int]],
     check_inverse: bool = True,
-    verbose: bool = False,
 ) -> ValidationResult:
     """
     Validate a list of edges (as returned by _query_edge).
@@ -300,7 +318,6 @@ def validate_edge_list(
         graph: The CSRGraph to validate against
         edges: List of (subject_idx, predicate, object_idx) tuples
         check_inverse: If True, also check for inverse predicates in reverse direction
-        verbose: Print progress information
 
     Returns:
         ValidationResult with validation status and any errors found
@@ -314,25 +331,28 @@ def validate_edge_list(
         obj_id = graph.get_node_id(obj_idx)
 
         if subj_id is None:
-            errors.append(ValidationError(
-                error_type="INVALID_SUBJECT_IDX",
-                message=f"Edge {i}: Subject index {subj_idx} has no node ID",
-                path_index=i,
-            ))
+            errors.append(
+                ValidationError(
+                    error_type="INVALID_SUBJECT_IDX",
+                    message=f"Edge {i}: Subject index {subj_idx} has no node ID",
+                    path_index=i,
+                )
+            )
             continue
 
         if obj_id is None:
-            errors.append(ValidationError(
-                error_type="INVALID_OBJECT_IDX",
-                message=f"Edge {i}: Object index {obj_idx} has no node ID",
-                path_index=i,
-            ))
+            errors.append(
+                ValidationError(
+                    error_type="INVALID_OBJECT_IDX",
+                    message=f"Edge {i}: Object index {obj_idx} has no node ID",
+                    path_index=i,
+                )
+            )
             continue
 
         # Check if edge exists
         err = validate_edge_exists(
-            graph, subj_id, predicate, obj_id,
-            check_inverse=check_inverse
+            graph, subj_id, predicate, obj_id, check_inverse=check_inverse
         )
         if err:
             err.path_index = i
@@ -340,8 +360,9 @@ def validate_edge_list(
         else:
             valid_count += 1
 
-    if verbose:
-        print(f"Validated {len(edges)} edges: {valid_count} valid, {len(errors)} errors")
+    logger.debug(
+        "Validated %s edges: %s valid, %s errors", len(edges), valid_count, len(errors)
+    )
 
     return ValidationResult(
         valid=len(errors) == 0,
@@ -381,14 +402,21 @@ def diagnose_graph_edge_storage(
     lines.append("Outgoing edges (neighbors_with_properties):")
     try:
         out_count = 0
-        for neighbor_idx, predicate, props, _fwd_edge_idx in graph.neighbors_with_properties(node_idx):
+        for (
+            neighbor_idx,
+            predicate,
+            props,
+            _fwd_edge_idx,
+        ) in graph.neighbors_with_properties(node_idx):
             if out_count >= max_neighbors:
                 lines.append(f"  ... (limited to {max_neighbors})")
                 break
             neighbor_id = graph.get_node_id(neighbor_idx)
             lines.append(f"  -> {neighbor_id} (idx={neighbor_idx})")
             lines.append(f"     predicate: {predicate!r}")
-            lines.append(f"     props keys: {list(props.keys()) if props else '(none)'}")
+            lines.append(
+                f"     props keys: {list(props.keys()) if props else '(none)'}"
+            )
             out_count += 1
         if out_count == 0:
             lines.append("  (no outgoing edges)")
@@ -400,14 +428,21 @@ def diagnose_graph_edge_storage(
     lines.append("Incoming edges (incoming_neighbors_with_properties):")
     try:
         in_count = 0
-        for neighbor_idx, predicate, props, _fwd_edge_idx in graph.incoming_neighbors_with_properties(node_idx):
+        for (
+            neighbor_idx,
+            predicate,
+            props,
+            _fwd_edge_idx,
+        ) in graph.incoming_neighbors_with_properties(node_idx):
             if in_count >= max_neighbors:
                 lines.append(f"  ... (limited to {max_neighbors})")
                 break
             neighbor_id = graph.get_node_id(neighbor_idx)
             lines.append(f"  <- {neighbor_id} (idx={neighbor_idx})")
             lines.append(f"     predicate: {predicate!r}")
-            lines.append(f"     props keys: {list(props.keys()) if props else '(none)'}")
+            lines.append(
+                f"     props keys: {list(props.keys()) if props else '(none)'}"
+            )
             in_count += 1
         if in_count == 0:
             lines.append("  (no incoming edges)")
@@ -448,7 +483,7 @@ def find_edge_in_graph(
     Returns:
         List of edge dicts with direction, predicate, and properties
     """
-    results = []
+    results: list[dict] = []
 
     subj_idx = graph.get_node_idx(subject_id)
     obj_idx = graph.get_node_idx(object_id)
@@ -459,24 +494,28 @@ def find_edge_in_graph(
     # Forward direction: subject -> object
     forward_edges = graph.get_all_edges_between(subj_idx, obj_idx)
     for predicate, props in forward_edges:
-        results.append({
-            "direction": "forward",
-            "subject": subject_id,
-            "predicate": predicate,
-            "object": object_id,
-            "properties": props,
-        })
+        results.append(
+            {
+                "direction": "forward",
+                "subject": subject_id,
+                "predicate": predicate,
+                "object": object_id,
+                "properties": props,
+            }
+        )
 
     # Reverse direction: object -> subject
     reverse_edges = graph.get_all_edges_between(obj_idx, subj_idx)
     for predicate, props in reverse_edges:
-        results.append({
-            "direction": "reverse",
-            "subject": object_id,
-            "predicate": predicate,
-            "object": subject_id,
-            "properties": props,
-        })
+        results.append(
+            {
+                "direction": "reverse",
+                "subject": object_id,
+                "predicate": predicate,
+                "object": subject_id,
+                "properties": props,
+            }
+        )
 
     return results
 
@@ -705,8 +744,16 @@ def debug_missing_edge(
 
     lines.append("")
     lines.append("Node existence:")
-    lines.append(f"  Subject '{subject_id}': EXISTS (idx={subj_idx})" if subj_idx is not None else f"  Subject '{subject_id}': NOT FOUND")
-    lines.append(f"  Object '{object_id}': EXISTS (idx={obj_idx})" if obj_idx is not None else f"  Object '{object_id}': NOT FOUND")
+    lines.append(
+        f"  Subject '{subject_id}': EXISTS (idx={subj_idx})"
+        if subj_idx is not None
+        else f"  Subject '{subject_id}': NOT FOUND"
+    )
+    lines.append(
+        f"  Object '{object_id}': EXISTS (idx={obj_idx})"
+        if obj_idx is not None
+        else f"  Object '{object_id}': NOT FOUND"
+    )
 
     if subj_idx is None or obj_idx is None:
         return "\n".join(lines)
@@ -720,7 +767,7 @@ def debug_missing_edge(
         lines.append("  (none)")
     else:
         for edge in found_edges:
-            edge_inverse = _get_inverse_predicate(edge['predicate'])
+            edge_inverse = _get_inverse_predicate(edge["predicate"])
             inverse_note = f" (inverse: {edge_inverse})" if edge_inverse else ""
             lines.append(
                 f"  [{edge['direction']}] {edge['subject']} --[{edge['predicate']}]--> {edge['object']}{inverse_note}"
@@ -731,9 +778,13 @@ def debug_missing_edge(
     lines.append("Expected matches (any of these would validate):")
     lines.append(f"  1. Forward: {subject_id} --[{predicate}]--> {object_id}")
     if is_symmetric:
-        lines.append(f"  2. Symmetric reverse: {object_id} --[{predicate}]--> {subject_id}")
+        lines.append(
+            f"  2. Symmetric reverse: {object_id} --[{predicate}]--> {subject_id}"
+        )
     if inverse_pred:
-        lines.append(f"  3. Inverse reverse: {object_id} --[{inverse_pred}]--> {subject_id}")
+        lines.append(
+            f"  3. Inverse reverse: {object_id} --[{inverse_pred}]--> {subject_id}"
+        )
 
     # Check neighbors
     lines.append("")

@@ -33,7 +33,7 @@ class TestLookupOneHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Results are aggregated by unique node paths
@@ -69,14 +69,19 @@ class TestLookupOneHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # CHEBI:6801 (Metformin) affects 4 genes:
         # NCBIGene:5468 (PPARG), NCBIGene:3643 (INSR), NCBIGene:2645 (GCK), NCBIGene:7124 (TNF)
         assert len(results) == 4
         gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
-        assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643", "NCBIGene:2645", "NCBIGene:7124"}
+        assert gene_ids == {
+            "NCBIGene:5468",
+            "NCBIGene:3643",
+            "NCBIGene:2645",
+            "NCBIGene:7124",
+        }
 
     def test_one_hop_no_matching_predicate(self, graph, bmt):
         """Query with non-matching predicate should return 0 paths."""
@@ -98,7 +103,7 @@ class TestLookupOneHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -123,7 +128,7 @@ class TestLookupOneHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Three genes associated with MONDO:0005148:
@@ -164,7 +169,7 @@ class TestLookupTwoHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # Three paths from Metformin through genes to Type 2 Diabetes:
@@ -205,7 +210,7 @@ class TestLookupTwoHop:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # NCBIGene:2645 (GCK) participates_in GO:0006006 AND
@@ -238,7 +243,7 @@ class TestLookupEdgeCases:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -263,7 +268,7 @@ class TestLookupEdgeCases:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -288,7 +293,7 @@ class TestLookupEdgeCases:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False)
+        response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
         # CHEBI:6801 affects NCBIGene:5468 (Gene) and CHEBI:17234 (SmallMolecule)

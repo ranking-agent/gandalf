@@ -6,7 +6,6 @@ import pytest
 
 from gandalf.loader import build_graph_from_jsonl
 
-
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 NODES_FILE = os.path.join(FIXTURES_DIR, "nodes.jsonl")
 EDGES_FILE = os.path.join(FIXTURES_DIR, "edges.jsonl")

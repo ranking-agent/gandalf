@@ -4,11 +4,13 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 with open("requirements.txt", "r", encoding="utf-8") as fh:
-    requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+    requirements = [
+        line.strip() for line in fh if line.strip() and not line.startswith("#")
+    ]
 
 setup(
     name="gandalf",
-    version="0.1.11",
+    version="0.3.2",
     author="Max Wang",
     author_email="max@covar.com",
     description="Fast 3-hop path finding in large knowledge graphs",

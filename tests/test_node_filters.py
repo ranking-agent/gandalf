@@ -32,7 +32,7 @@ class TestMaxNodeDegree:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, max_node_degree=2)
+        response = lookup(graph, query, bmt=bmt, max_node_degree=2)
         results = response["message"]["results"]
 
         # Only TNF (degree=1) should pass the filter
@@ -60,7 +60,7 @@ class TestMaxNodeDegree:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, max_node_degree=3)
+        response = lookup(graph, query, bmt=bmt, max_node_degree=3)
         results = response["message"]["results"]
 
         # PPARG, GCK (degree=3) and TNF (degree=1) should all pass
@@ -86,7 +86,7 @@ class TestMaxNodeDegree:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, max_node_degree=None)
+        response = lookup(graph, query, bmt=bmt, max_node_degree=None)
         results = response["message"]["results"]
 
         assert len(results) == 4
@@ -111,7 +111,7 @@ class TestMaxNodeDegree:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, max_node_degree=0)
+        response = lookup(graph, query, bmt=bmt, max_node_degree=0)
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -144,7 +144,7 @@ class TestMinInformationContent:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, min_information_content=90)
+        response = lookup(graph, query, bmt=bmt, min_information_content=90)
         results = response["message"]["results"]
 
         assert len(results) == 2
@@ -171,7 +171,7 @@ class TestMinInformationContent:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, min_information_content=None)
+        response = lookup(graph, query, bmt=bmt, min_information_content=None)
         results = response["message"]["results"]
 
         assert len(results) == 4
@@ -196,7 +196,7 @@ class TestMinInformationContent:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, verbose=False, min_information_content=100)
+        response = lookup(graph, query, bmt=bmt, min_information_content=100)
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -234,14 +234,13 @@ class TestMinInformationContent:
         }
 
         # Without filtering: 3 results (PPARG, INSR, GCK as intermediates)
-        response_unfiltered = lookup(graph, query, bmt=bmt, verbose=False)
+        response_unfiltered = lookup(graph, query, bmt=bmt)
         assert len(response_unfiltered["message"]["results"]) == 3
 
         # With min_information_content=85: GCK (81.2) filtered in first hop,
         # AND T2D (78.2) filtered in second hop → 0 results
-        response_filtered = lookup(graph, query, bmt=bmt, verbose=False, min_information_content=85)
+        response_filtered = lookup(graph, query, bmt=bmt, min_information_content=85)
         assert len(response_filtered["message"]["results"]) == 0
-
 
     def test_min_ic_filters_backward_discovered_nodes(self, graph, bmt):
         """min_information_content should filter discovered nodes in backward search.
@@ -269,11 +268,11 @@ class TestMinInformationContent:
         }
 
         # Without filtering: 3 genes
-        response_unfiltered = lookup(graph, query, bmt=bmt, verbose=False)
+        response_unfiltered = lookup(graph, query, bmt=bmt)
         assert len(response_unfiltered["message"]["results"]) == 3
 
         # With min_information_content=90: only PPARG (92.3) passes
-        response_filtered = lookup(graph, query, bmt=bmt, verbose=False, min_information_content=90)
+        response_filtered = lookup(graph, query, bmt=bmt, min_information_content=90)
         results = response_filtered["message"]["results"]
 
         assert len(results) == 1
@@ -315,8 +314,11 @@ class TestCombinedFilters:
         }
 
         response = lookup(
-            graph, query, bmt=bmt, verbose=False,
-            max_node_degree=2, min_information_content=90,
+            graph,
+            query,
+            bmt=bmt,
+            max_node_degree=2,
+            min_information_content=90,
         )
         results = response["message"]["results"]
 

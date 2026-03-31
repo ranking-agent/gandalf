@@ -1,0 +1,24 @@
+contact:
+  email: max@covar.com
+  name: Max Wang
+  x-id: https://github.com/maximusunc
+  x-role: responsible developer
+description: '<img src="/static/gandalf.png" width="200px"><br /><br />GANDALF: Graph Analysis Navigator for Discovery And Link Finding'
+version: 0.3.2
+servers:
+- description: Default server
+  url: https://automat.renci.org
+title: Gandalf
+tags:
+- name: translator
+- name: KP
+- name: trapi
+x-translator:
+  biolink-version: 4.2.1
+  component: KP
+  team:
+  - DOGSLED
+x-trapi:
+  version: 1.5.0
+  operations:
+  - lookup

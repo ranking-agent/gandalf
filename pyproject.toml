@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gandalf-csr"
-version = "0.1.11"
+version = "0.3.2"
 description = "Fast path finding in large knowledge graphs"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -29,10 +29,15 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=3.0",
     "black>=22.0",
+    "mypy>=1.0",
+    "types-PyYAML>=6.0.12"
 ]
 server = [
     "fastapi>=0.100.0",
     "httpx>=0.24.0",
+    "orjson>=3.9.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.12.0",
     "uvicorn>=0.20.0",
 ]
 
@@ -40,3 +45,8 @@ server = [
 gandalf-build = "scripts.build_graph:main"
 gandalf-query = "scripts.query_paths:main"
 gandalf-diagnose = "scripts.diagnose:main"
+
+[tool.mypy]
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

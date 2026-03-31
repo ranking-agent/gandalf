@@ -1,15 +1,30 @@
 """Main Gandalf CSR Graph class."""
 
-import os
+import json
+import logging
 import pickle
 import shutil
+import struct
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
+import msgpack
 import numpy as np
 
+from gandalf.config import settings
 from gandalf.lmdb_store import LMDBPropertyStore
+from gandalf.node_store import NodeStore
+
+logger = logging.getLogger(__name__)
+
+
+def _load_npy(path: Path, mmap_mode: Literal["r+", "r", "w+", "c"] = "r") -> np.ndarray:
+    """Load a .npy file, optionally copying into RAM instead of memory-mapping."""
+    arr: np.ndarray = np.load(path, mmap_mode=mmap_mode)
+    if settings.load_mmaps_into_memory:
+        arr = np.array(arr)
+    return arr
 
 
 class EdgePropertyStore:
@@ -28,8 +43,10 @@ class EdgePropertyStore:
     """
 
     __slots__ = (
-        '_sources_pool', '_quals_pool',
-        '_sources_idx', '_quals_idx',
+        "_sources_pool",
+        "_quals_pool",
+        "_sources_idx",
+        "_quals_idx",
     )
 
     def __init__(self):
@@ -42,9 +59,9 @@ class EdgePropertyStore:
     def _make_hashable(obj):
         """Convert a JSON-compatible value to a hashable key for interning."""
         if isinstance(obj, dict):
-            return tuple(sorted(
-                (k, EdgePropertyStore._make_hashable(v)) for k, v in obj.items()
-            ))
+            return tuple(
+                sorted((k, EdgePropertyStore._make_hashable(v)) for k, v in obj.items())
+            )
         elif isinstance(obj, (list, tuple)):
             return tuple(EdgePropertyStore._make_hashable(item) for item in obj)
         return obj
@@ -149,14 +166,14 @@ class EdgePropertyStore:
             pickle.dump(pools, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     @classmethod
-    def load_mmap(cls, directory: Path, mmap_mode: str = "r"):
+    def load_mmap(cls, directory: Path, mmap_mode: Literal["r+", "r", "w+", "c"] = "r"):
         """Load from directory, memory-mapping the index arrays."""
         store = cls()
 
-        store._sources_idx = np.load(
+        store._sources_idx = _load_npy(
             directory / "edge_sources_idx.npy", mmap_mode=mmap_mode
         )
-        store._quals_idx = np.load(
+        store._quals_idx = _load_npy(
             directory / "edge_quals_idx.npy", mmap_mode=mmap_mode
         )
 
@@ -263,18 +280,29 @@ class CSRGraph:
         self.predicate_to_idx = predicate_to_idx
         self.id_to_predicate = {idx: pred for pred, idx in predicate_to_idx.items()}
 
+        # Node store (LMDB) — None when using in-memory dicts (build time)
+        self.node_store = None
+
         # LMDB store (cold path) — set later by loader or load_mmap
         self.lmdb_store = None
 
         # Edge IDs from the original data — set later by loader or load_mmap
         self.edge_ids = None
+        self._edge_ids_env = None
+
+        # Graph Metadata - set later by loader or load_mmap
+        self.meta_kg = None
+        self.sri_testing_data = None
+        self.graph_metadata = None
 
         # Build both forward and reverse CSR structures
-        print("Building forward CSR...")
+        logger.debug("Building forward CSR...")
         self._build_forward_csr(edges, edge_predicates, edge_properties)
 
-        print("Building reverse CSR...")
+        logger.debug("Building reverse CSR...")
         self._build_reverse_csr(edges, edge_predicates)
+
+        self.build_metadata()
 
     def _build_forward_csr(self, edges, edge_predicates, edge_properties):
         """Build forward adjacency list (source -> targets)."""
@@ -303,9 +331,14 @@ class CSRGraph:
         self.edge_properties = EdgePropertyStore.from_property_list(props_list)
 
         stats = self.edge_properties.dedup_stats()
-        print(f"  Edge property dedup: {stats['total_edges']:,} edges -> "
-              f"{stats['unique_sources']:,} unique source configs, "
-              f"{stats['unique_qualifiers']:,} unique qualifier combos")
+        logger.debug(
+            "  Edge property dedup: %s edges -> "
+            "%s unique source configs, "
+            "%s unique qualifier combos",
+            stats["total_edges"],
+            stats["unique_sources"],
+            stats["unique_qualifiers"],
+        )
 
         # Build forward offsets
         self.fwd_offsets = np.zeros(self.num_nodes + 1, dtype=np.int64)
@@ -334,7 +367,9 @@ class CSRGraph:
         # (dst, src, pred_id, original_index)
         reverse_edges = [
             (dst, src, pred_id, orig_idx)
-            for orig_idx, ((src, dst), pred_id) in enumerate(zip(edges, edge_predicates))
+            for orig_idx, ((src, dst), pred_id) in enumerate(
+                zip(edges, edge_predicates)
+            )
         ]
         reverse_edges.sort(key=lambda x: (x[0], x[1], x[2]))
 
@@ -350,7 +385,7 @@ class CSRGraph:
         # The forward CSR was built from edges sorted by (src, dst, pred).
         # We need to map each original edge index to its forward position.
         # _fwd_sort_order[orig_idx] = forward CSR position of that edge.
-        if hasattr(self, '_fwd_sort_order') and self._fwd_sort_order is not None:
+        if hasattr(self, "_fwd_sort_order") and self._fwd_sort_order is not None:
             fwd_pos = self._fwd_sort_order  # already inverse-mapped
         else:
             # Fallback: build fwd_pos from the forward CSR structure.
@@ -413,8 +448,10 @@ class CSRGraph:
                 fwd_end = int(self.fwd_offsets[src + 1])
                 count = 0
                 for fwd_pos in range(fwd_start, fwd_end):
-                    if (int(self.fwd_targets[fwd_pos]) == node_idx
-                            and int(self.fwd_predicates[fwd_pos]) == pred):
+                    if (
+                        int(self.fwd_targets[fwd_pos]) == node_idx
+                        and int(self.fwd_predicates[fwd_pos]) == pred
+                    ):
                         if count == ordinal:
                             self.rev_to_fwd[rev_pos] = fwd_pos
                             break
@@ -441,8 +478,8 @@ class CSRGraph:
 
         # Binary search for dst_idx within targets[start:end]
         targets_slice = self.fwd_targets[start:end]
-        left = int(np.searchsorted(targets_slice, dst_idx, side='left'))
-        right = int(np.searchsorted(targets_slice, dst_idx, side='right'))
+        left = int(np.searchsorted(targets_slice, dst_idx, side="left"))
+        right = int(np.searchsorted(targets_slice, dst_idx, side="right"))
 
         if left == right:
             return None  # dst_idx not found
@@ -705,11 +742,15 @@ class CSRGraph:
 
     def get_edge_id(self, fwd_edge_idx):
         """Return the original edge ID for a forward-CSR position, or None."""
+        if getattr(self, "_edge_ids_env", None) is not None:
+            return self._load_edge_id_from_lmdb(self._edge_ids_env, int(fwd_edge_idx))
         if self.edge_ids is not None:
             return self.edge_ids[int(fwd_edge_idx)]
         return None
 
-    def get_all_edges_between(self, src_idx, dst_idx, predicate_filter: Optional[list] = None):
+    def get_all_edges_between(
+        self, src_idx, dst_idx, predicate_filter: Optional[list] = None
+    ):
         """Get all edges (with different predicates or qualifiers) between two nodes."""
         start = int(self.fwd_offsets[src_idx])
         end = int(self.fwd_offsets[src_idx + 1])
@@ -731,10 +772,14 @@ class CSRGraph:
 
     def get_node_property(self, node_idx, key, default=None):
         """Get a specific property for a node"""
+        if self.node_store is not None:
+            return self.node_store.get_property(node_idx, key, default)
         return self.node_properties.get(node_idx, {}).get(key, default)
 
     def get_all_node_properties(self, node_idx):
         """Get all properties for a node as a dict"""
+        if self.node_store is not None:
+            return self.node_store.get_properties(node_idx)
         return self.node_properties.get(node_idx, {})
 
     def degree(self, node_idx, predicate_filter=None):
@@ -746,10 +791,14 @@ class CSRGraph:
 
     def get_node_idx(self, node_id):
         """Convert original node ID to internal index"""
+        if self.node_store is not None:
+            return self.node_store.get_node_idx(node_id)
         return self.node_id_to_idx.get(node_id)
 
     def get_node_id(self, node_idx):
         """Convert internal index to original node ID"""
+        if self.node_store is not None:
+            return self.node_store.get_node_id(node_idx)
         return self.idx_to_node_id.get(node_idx)
 
     def get_predicate_stats(self):
@@ -762,104 +811,333 @@ class CSRGraph:
         return sorted(pred_counts.items(), key=lambda x: x[1], reverse=True)
 
     # ------------------------------------------------------------------
+    # Metadata (Plater-compatible pre-computed summaries)
+    # ------------------------------------------------------------------
+
+    def _build_node_categories(self):
+        """Pre-extract the primary category for each node."""
+        node_categories = {}
+        for node_idx in range(self.num_nodes):
+            props = self.get_all_node_properties(node_idx)
+            cats = props.get("categories", ["biolink:NamedThing"])
+            node_categories[node_idx] = cats[0] if cats else "biolink:NamedThing"
+        return node_categories
+
+    def _build_category_prefixes(self, node_categories):
+        """Collect ID prefixes per category."""
+        category_prefixes = {}
+        id_iter = (
+            self.node_store.iter_id_to_idx()
+            if self.node_store is not None
+            else self.node_id_to_idx.items()
+        )
+        for node_id, node_idx in id_iter:
+            cat = node_categories[node_idx]
+            prefix = node_id.split(":")[0] if ":" in node_id else node_id
+            if cat not in category_prefixes:
+                category_prefixes[cat] = set()
+            category_prefixes[cat].add(prefix)
+        return category_prefixes
+
+    def _scan_edge_triples(self, node_categories):
+        """Single pass over forward edges to collect triple counts and examples."""
+        triple_counts = {}
+        triple_examples = {}
+
+        for src_idx in range(self.num_nodes):
+            start = int(self.fwd_offsets[src_idx])
+            end = int(self.fwd_offsets[src_idx + 1])
+            if start == end:
+                continue
+
+            subj_cat = node_categories[src_idx]
+
+            for pos in range(start, end):
+                tgt_idx = int(self.fwd_targets[pos])
+                pred_id = int(self.fwd_predicates[pos])
+                pred = self.id_to_predicate[pred_id]
+                obj_cat = node_categories[tgt_idx]
+
+                key = (subj_cat, pred, obj_cat)
+                triple_counts[key] = triple_counts.get(key, 0) + 1
+
+                if key not in triple_examples:
+                    triple_examples[key] = (
+                        self.get_node_id(src_idx),
+                        self.get_node_id(tgt_idx),
+                    )
+
+        return triple_counts, triple_examples
+
+    def build_meta_kg(self, node_categories, category_prefixes, triple_counts):
+        """Build the TRAPI MetaKnowledgeGraph with full attribute metadata.
+
+        Scans all nodes and edges to produce:
+        - nodes: keyed by category, with id_prefixes and attribute descriptors
+        - edges: list of (subject, predicate, object) with attribute and qualifier
+                 descriptors
+
+        This is the expensive step (full LMDB scan for edge attributes).
+        The result is stored as self.meta_kg and can be persisted as meta_kg.json.
+        """
+        logger.info("Building meta knowledge graph...")
+        t0 = time.perf_counter()
+
+        # -- Node attributes: collect unique (attribute_type_id, attribute_source,
+        #    original_attribute_name) tuples per category.
+        #    Each unique original_attribute_name gets its own descriptor entry.
+        # cat -> set of (type_id, source, orig_name)
+        cat_attr_set = {}
+        for node_idx in range(self.num_nodes):
+            props = self.get_all_node_properties(node_idx)
+            cat = node_categories[node_idx]
+            if cat not in cat_attr_set:
+                cat_attr_set[cat] = set()
+            for attr in props.get("attributes", []):
+                type_id = attr.get("attribute_type_id", "biolink:Attribute")
+                source = attr.get("attribute_source", None)
+                orig_name = attr.get("original_attribute_name")
+                if orig_name:
+                    cat_attr_set[cat].add((type_id, source, orig_name))
+
+        meta_nodes = {}
+        for cat, prefixes in category_prefixes.items():
+            attrs = []
+            for type_id, source, orig_name in sorted(cat_attr_set.get(cat, set())):
+                attrs.append(
+                    {
+                        "attribute_type_id": type_id,
+                        "attribute_source": source,
+                        "original_attribute_names": [orig_name],
+                        "constraint_use": False,
+                        "constraint_name": None,
+                    }
+                )
+            meta_nodes[cat] = {
+                "id_prefixes": sorted(prefixes),
+                "attributes": attrs,
+            }
+
+        # -- Edge attributes: full scan of LMDB + hot-path qualifiers --
+        # triple_key -> set of (type_id, source, orig_name)
+        triple_attr_set = {key: set() for key in triple_counts}
+        # triple_key -> set of qualifier_type_ids
+        triple_qual_map = {key: set() for key in triple_counts}
+
+        # Build a mapping from edge position -> triple key for the full scan
+        edge_to_triple = {}
+        for src_idx in range(self.num_nodes):
+            start = int(self.fwd_offsets[src_idx])
+            end = int(self.fwd_offsets[src_idx + 1])
+            if start == end:
+                continue
+            subj_cat = node_categories[src_idx]
+            for pos in range(start, end):
+                tgt_idx = int(self.fwd_targets[pos])
+                pred_id = int(self.fwd_predicates[pos])
+                pred = self.id_to_predicate[pred_id]
+                obj_cat = node_categories[tgt_idx]
+                edge_to_triple[pos] = (subj_cat, pred, obj_cat)
+
+                # Collect qualifiers from hot-path store
+                if isinstance(self.edge_properties, EdgePropertyStore):
+                    quals = self.edge_properties.get_qualifiers(pos)
+                    for q in quals:
+                        qtype = q.get("qualifier_type_id")
+                        if qtype:
+                            triple_qual_map[(subj_cat, pred, obj_cat)].add(qtype)
+
+        # Full scan of LMDB for edge attribute types
+        if self.lmdb_store is not None:
+            logger.debug("  Scanning LMDB for edge attribute types...")
+            with self.lmdb_store._env.begin(buffers=True) as txn:
+                cursor = txn.cursor()
+                for key_buf, val_buf in cursor:
+                    edge_idx = int.from_bytes(bytes(key_buf), "big")
+                    triple_key = edge_to_triple.get(edge_idx)
+                    if triple_key is None:
+                        continue
+                    detail = msgpack.unpackb(val_buf, raw=False)
+                    for attr in detail.get("attributes", []):
+                        type_id = attr.get("attribute_type_id", "biolink:Attribute")
+                        source = attr.get("attribute_source", None)
+                        orig_name = attr.get("original_attribute_name")
+                        if orig_name:
+                            triple_attr_set[triple_key].add(
+                                (type_id, source, orig_name)
+                            )
+
+        del edge_to_triple
+
+        meta_edges = []
+        for subj_cat, pred, obj_cat in sorted(triple_counts):
+            triple_key = (subj_cat, pred, obj_cat)
+            attrs = []
+            for type_id, source, orig_name in sorted(
+                triple_attr_set.get(triple_key, set())
+            ):
+                attrs.append(
+                    {
+                        "attribute_type_id": type_id,
+                        "attribute_source": source,
+                        "original_attribute_names": [orig_name],
+                        "constraint_use": False,
+                        "constraint_name": None,
+                    }
+                )
+            # Add qualifier type IDs as attributes in the qualifiers list
+            qualifiers = []
+            for qtype in sorted(triple_qual_map.get(triple_key, set())):
+                qualifiers.append({"qualifier_type_id": qtype})
+
+            meta_edges.append(
+                {
+                    "subject": subj_cat,
+                    "predicate": pred,
+                    "object": obj_cat,
+                    "attributes": attrs,
+                    "qualifiers": qualifiers,
+                }
+            )
+
+        self.meta_kg = {"nodes": meta_nodes, "edges": meta_edges}
+
+        t1 = time.perf_counter()
+        logger.debug(
+            "  Meta KG built in %.2fs: %s edge triples, %s categories",
+            t1 - t0,
+            len(triple_counts),
+            len(category_prefixes),
+        )
+
+    def build_metadata(self):
+        """Pre-compute Plater-compatible metadata from the CSR graph.
+
+        Builds (if not already present):
+        - meta_kg: TRAPI MetaKnowledgeGraph (via build_meta_kg if not already set)
+        - sri_testing_data: One representative edge per (subj_cat, pred, obj_cat) triple
+
+        Ideally both are created offline during graph building and loaded
+        from disk.  This method only regenerates them as a fallback.
+        """
+        # If both are already loaded (e.g. from disk), nothing to do.
+        if (
+            getattr(self, "meta_kg", None) is not None
+            and getattr(self, "sri_testing_data", None) is not None
+        ):
+            return
+
+        logger.warning(
+            "meta_kg and/or sri_testing_data not pre-loaded; "
+            "generating on the fly (consider building offline first)"
+        )
+
+        t0 = time.perf_counter()
+
+        node_categories = self._build_node_categories()
+        category_prefixes = self._build_category_prefixes(node_categories)
+        triple_counts, triple_examples = self._scan_edge_triples(node_categories)
+
+        # Build meta_kg if not already loaded from disk
+        if not hasattr(self, "meta_kg") or self.meta_kg is None:
+            self.build_meta_kg(node_categories, category_prefixes, triple_counts)
+
+        # Build SRI testing data if not already loaded from disk
+        if not hasattr(self, "sri_testing_data") or self.sri_testing_data is None:
+            logger.info("Building sri testing data...")
+            self.sri_testing_data = {
+                "edges": [
+                    {
+                        "subject_category": subj_cat,
+                        "object_category": obj_cat,
+                        "predicate": pred,
+                        "subject_id": example[0],
+                        "object_id": example[1],
+                    }
+                    for (subj_cat, pred, obj_cat), example in triple_examples.items()
+                ]
+            }
+
+        t1 = time.perf_counter()
+        logger.info(
+            "  Metadata built in %.2fs: " "%s unique triples, " "%s categories",
+            t1 - t0,
+            len(triple_counts),
+            len(category_prefixes),
+        )
+
+    # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
 
-    def save(self, filepath):
-        """Save graph to disk for fast reloading (pickle format)."""
-        print(f"Saving graph to {filepath}...")
-        data = {
-            "num_nodes": self.num_nodes,
-            "node_id_to_idx": self.node_id_to_idx,
-            "predicate_to_idx": self.predicate_to_idx,
-            # Forward CSR
-            "fwd_targets": self.fwd_targets,
-            "fwd_predicates": self.fwd_predicates,
-            "fwd_offsets": self.fwd_offsets,
-            # Reverse CSR
-            "rev_sources": self.rev_sources,
-            "rev_predicates": self.rev_predicates,
-            "rev_offsets": self.rev_offsets,
-            "rev_to_fwd": self.rev_to_fwd,
-            # Properties (hot path dedup store)
-            "edge_properties": self.edge_properties,
-            "node_properties": self.node_properties,
-        }
-        with open(filepath, "wb") as f:
-            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print("Graph saved!")
+    @staticmethod
+    def _save_edge_ids_lmdb(db_path, edge_ids, commit_every=50_000):
+        """Save edge IDs list to an LMDB file."""
+        import lmdb as _lmdb
+
+        db_path = Path(db_path)
+        if db_path.exists():
+            shutil.rmtree(db_path)
+        db_path.mkdir(parents=True, exist_ok=True)
+
+        _INITIAL = 4 * 1024 * 1024 * 1024  # 4 GB
+        env = _lmdb.open(
+            str(db_path),
+            map_size=_INITIAL,
+            readonly=False,
+            max_dbs=0,
+            readahead=False,
+        )
+        pending = []
+        txn = env.begin(write=True)
+        try:
+            for idx, eid in enumerate(edge_ids):
+                if eid is not None:
+                    key = struct.pack(">I", idx)
+                    val = (
+                        eid.encode("utf-8")
+                        if isinstance(eid, str)
+                        else str(eid).encode("utf-8")
+                    )
+                    try:
+                        txn.put(key, val)
+                        pending.append((key, val))
+                    except _lmdb.MapFullError:
+                        txn.abort()
+                        new_size = env.info()["map_size"] * 2
+                        env.set_mapsize(new_size)
+                        logger.warning(
+                            "    Edge IDs LMDB: map full, resized to %.0f GB",
+                            new_size / (1024**3),
+                        )
+                        txn = env.begin(write=True)
+                        for pk, pv in pending:
+                            txn.put(pk, pv)
+                        txn.put(key, val)
+                        pending.append((key, val))
+                if (idx + 1) % commit_every == 0:
+                    txn.commit()
+                    pending.clear()
+                    txn = env.begin(write=True)
+            txn.commit()
+        except BaseException:
+            txn.abort()
+            raise
+        finally:
+            env.close()
+        logger.debug(
+            "  Edge IDs LMDB: wrote %s entries to %s", f"{len(edge_ids):,}", db_path
+        )
 
     @staticmethod
-    def load(filepath):
-        """Load graph from disk."""
-        print(f"Loading graph from {filepath}...")
-        with open(filepath, "rb") as f:
-            data = pickle.load(f)
-
-        graph = CSRGraph.__new__(CSRGraph)
-        graph.num_nodes = data["num_nodes"]
-        graph.node_id_to_idx = data["node_id_to_idx"]
-        graph.idx_to_node_id = {idx: nid for nid, idx in graph.node_id_to_idx.items()}
-        graph.predicate_to_idx = data["predicate_to_idx"]
-        graph.id_to_predicate = {
-            idx: pred for pred, idx in graph.predicate_to_idx.items()
-        }
-
-        # Forward CSR
-        graph.fwd_targets = data["fwd_targets"]
-        graph.fwd_predicates = data["fwd_predicates"]
-        graph.fwd_offsets = data["fwd_offsets"]
-
-        # Reverse CSR (with backward compatibility)
-        if "rev_sources" in data:
-            graph.rev_sources = data["rev_sources"]
-            graph.rev_predicates = data["rev_predicates"]
-            graph.rev_offsets = data["rev_offsets"]
-            if "rev_to_fwd" in data:
-                graph.rev_to_fwd = data["rev_to_fwd"]
-            else:
-                # Rebuild rev_to_fwd from existing CSR data
-                print("  Rebuilding rev_to_fwd mapping...")
-                graph._rebuild_rev_to_fwd()
-        else:
-            print("Warning: Loaded graph without reverse CSR. Rebuilding...")
-            edges = []
-            edge_preds = []
-            for src in range(graph.num_nodes):
-                start = graph.fwd_offsets[src]
-                end = graph.fwd_offsets[src + 1]
-                for i in range(start, end):
-                    dst = graph.fwd_targets[i]
-                    pred = graph.fwd_predicates[i]
-                    edges.append((src, dst))
-                    edge_preds.append(pred)
-            graph._build_reverse_csr(edges, edge_preds)
-
-        # Properties
-        graph.edge_properties = data["edge_properties"]
-        graph.node_properties = data["node_properties"]
-
-        # Convert old list-of-dicts format to EdgePropertyStore
-        if isinstance(graph.edge_properties, list):
-            print("  Converting edge properties to deduplicated format...")
-            graph.edge_properties = EdgePropertyStore.from_property_list(
-                graph.edge_properties
-            )
-
-        # No LMDB store for pickle format (legacy)
-        graph.lmdb_store = None
-
-        if isinstance(graph.edge_properties, EdgePropertyStore):
-            stats = graph.edge_properties.dedup_stats()
-            print(f"  Edge property dedup: {stats['total_edges']:,} edges -> "
-                  f"{stats['unique_sources']:,} unique source configs, "
-                  f"{stats['unique_qualifiers']:,} unique qualifier combos")
-
-        print(
-            f"Graph loaded! {graph.num_nodes:,} nodes, {len(graph.fwd_targets):,} edges"
-        )
-        print(f"  Unique predicates: {len(graph.predicate_to_idx):,}")
-        return graph
+    def _load_edge_id_from_lmdb(env, edge_idx):
+        """Look up a single edge ID from an LMDB environment."""
+        key = struct.pack(">I", edge_idx)
+        with env.begin(buffers=True) as txn:
+            val = txn.get(key)
+            if val is None:
+                return None
+            return bytes(val).decode("utf-8")
 
     def save_mmap(self, directory: Union[str, Path]):
         """Save graph in memory-mappable format for fast loading.
@@ -873,7 +1151,7 @@ class CSRGraph:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
 
-        print(f"Saving graph to {directory} (mmap format)...")
+        logger.info("Saving graph to %s (mmap format)...", directory)
         t0 = time.perf_counter()
 
         # Save NumPy arrays as .npy files (memory-mappable)
@@ -885,15 +1163,30 @@ class CSRGraph:
         np.save(directory / "rev_offsets.npy", self.rev_offsets)
         np.save(directory / "rev_to_fwd.npy", self.rev_to_fwd)
 
-        # Save small metadata as pickle (no edge_prop_index — binary search instead)
+        # Save small metadata as pickle (predicates + num_nodes only)
         metadata = {
             "num_nodes": self.num_nodes,
-            "node_id_to_idx": self.node_id_to_idx,
             "predicate_to_idx": self.predicate_to_idx,
-            "node_properties": self.node_properties,
         }
         with open(directory / "metadata.pkl", "wb") as f:
             pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # Save node ID mappings and properties as LMDB
+        node_id_to_idx = (
+            dict(self.node_store.iter_id_to_idx())
+            if isinstance(getattr(self, "node_store", None), NodeStore)
+            else self.node_id_to_idx
+        )
+        node_properties = (
+            dict(self.node_store.iter_properties())
+            if isinstance(getattr(self, "node_store", None), NodeStore)
+            else self.node_properties
+        )
+        NodeStore.build(
+            directory / "node_store.lmdb",
+            node_id_to_idx,
+            node_properties,
+        )
 
         # Save hot-path edge properties (qualifier + source dedup store)
         if isinstance(self.edge_properties, EdgePropertyStore):
@@ -903,10 +1196,19 @@ class CSRGraph:
             with open(directory / "edge_properties.pkl", "wb") as f:
                 pickle.dump(self.edge_properties, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        # Save edge IDs if present
+        # Save edge IDs as LMDB if present
         if self.edge_ids is not None:
-            with open(directory / "edge_ids.pkl", "wb") as f:
-                pickle.dump(self.edge_ids, f, protocol=pickle.HIGHEST_PROTOCOL)
+            self._save_edge_ids_lmdb(directory / "edge_ids.lmdb", self.edge_ids)
+
+        # Save meta_kg as JSON for fast loading at query time
+        if hasattr(self, "meta_kg") and self.meta_kg is not None:
+            with open(directory / "meta_kg.json", "w", encoding="utf-8") as f:
+                json.dump(self.meta_kg, f, separators=(",", ":"))
+
+        # Save sri_testing_data as JSON for fast loading at query time
+        if hasattr(self, "sri_testing_data") and self.sri_testing_data is not None:
+            with open(directory / "sri_testing_data.json", "w", encoding="utf-8") as f:
+                json.dump(self.sri_testing_data, f, separators=(",", ":"))
 
         # Copy LMDB store if present
         if self.lmdb_store is not None:
@@ -918,56 +1220,65 @@ class CSRGraph:
                 shutil.copytree(lmdb_src, lmdb_dst)
 
         t1 = time.perf_counter()
-        print(f"Graph saved in {t1 - t0:.2f}s")
+        logger.info("Graph saved in %.2fs", t1 - t0)
 
         # Print file sizes
         total_size = 0
-        for f in sorted(directory.iterdir()):
-            if f.is_file():
-                size = f.stat().st_size
+        for entry in sorted(directory.iterdir()):
+            if entry.is_file():
+                size = entry.stat().st_size
                 total_size += size
-                print(f"  {f.name}: {size / 1024 / 1024:.1f} MB")
-            elif f.is_dir():
-                dir_size = sum(ff.stat().st_size for ff in f.iterdir() if ff.is_file())
+                logger.debug("  %s: %.1f MB", entry.name, size / 1024 / 1024)
+            elif entry.is_dir():
+                dir_size = sum(
+                    ff.stat().st_size for ff in entry.iterdir() if ff.is_file()
+                )
                 total_size += dir_size
-                print(f"  {f.name}/: {dir_size / 1024 / 1024:.1f} MB")
-        print(f"  Total: {total_size / 1024 / 1024:.1f} MB")
+                logger.debug("  %s/: %.1f MB", entry.name, dir_size / 1024 / 1024)
+        logger.debug("  Total: %.1f MB", total_size / 1024 / 1024)
 
     @staticmethod
-    def load_mmap(directory: Union[str, Path], mmap_mode: str = "r"):
+    def load_mmap(
+        directory: Union[str, Path], mmap_mode: Literal["r+", "r", "w+", "c"] = "r"
+    ):
         """Load graph from memory-mapped format.
 
         Supports both the new hybrid format (dedup store + LMDB) and
         the legacy format (full EdgePropertyStore with pubs/sources/quals).
         """
         directory = Path(directory)
-        print(f"Loading graph from {directory} (mmap_mode={mmap_mode})...")
+        logger.info(
+            "Loading graph from %s (mmap_mode=%s, in_memory=%s)...",
+            directory,
+            mmap_mode,
+            settings.load_mmaps_into_memory,
+        )
         t0 = time.perf_counter()
 
         graph = CSRGraph.__new__(CSRGraph)
 
-        # Load NumPy arrays with memory mapping
-        graph.fwd_targets = np.load(
+        # Load NumPy arrays (memory-mapped or copied into RAM)
+        graph.fwd_targets = _load_npy(
             directory / "fwd_targets.npy", mmap_mode=mmap_mode
         )
-        graph.fwd_predicates = np.load(
+        graph.fwd_predicates = _load_npy(
             directory / "fwd_predicates.npy", mmap_mode=mmap_mode
         )
-        graph.fwd_offsets = np.load(
+        graph.fwd_offsets = _load_npy(
             directory / "fwd_offsets.npy", mmap_mode=mmap_mode
         )
-        graph.rev_sources = np.load(
+        graph.rev_sources = _load_npy(
             directory / "rev_sources.npy", mmap_mode=mmap_mode
         )
-        graph.rev_predicates = np.load(
+        graph.rev_predicates = _load_npy(
             directory / "rev_predicates.npy", mmap_mode=mmap_mode
         )
-        graph.rev_offsets = np.load(
+        graph.rev_offsets = _load_npy(
             directory / "rev_offsets.npy", mmap_mode=mmap_mode
         )
         rev_to_fwd_path = directory / "rev_to_fwd.npy"
         if rev_to_fwd_path.exists():
-            graph.rev_to_fwd = np.load(rev_to_fwd_path, mmap_mode=mmap_mode)
+            graph.rev_to_fwd = _load_npy(rev_to_fwd_path, mmap_mode=mmap_mode)
         else:
             graph.rev_to_fwd = None  # rebuilt after full load
 
@@ -976,13 +1287,27 @@ class CSRGraph:
             metadata = pickle.load(f)
 
         graph.num_nodes = metadata["num_nodes"]
-        graph.node_id_to_idx = metadata["node_id_to_idx"]
-        graph.idx_to_node_id = {idx: nid for nid, idx in graph.node_id_to_idx.items()}
         graph.predicate_to_idx = metadata["predicate_to_idx"]
         graph.id_to_predicate = {
             idx: pred for pred, idx in graph.predicate_to_idx.items()
         }
-        graph.node_properties = metadata["node_properties"]
+
+        # Load node store (LMDB) or fall back to legacy pickle
+        node_store_path = directory / "node_store.lmdb"
+        if node_store_path.exists():
+            graph.node_store = NodeStore(node_store_path, readonly=True)
+            # No in-memory dicts needed
+            graph.node_id_to_idx = None
+            graph.idx_to_node_id = None
+            graph.node_properties = None
+        else:
+            # Legacy: node data was in metadata.pkl
+            graph.node_store = None
+            graph.node_id_to_idx = metadata["node_id_to_idx"]
+            graph.idx_to_node_id = {
+                idx: nid for nid, idx in graph.node_id_to_idx.items()
+            }
+            graph.node_properties = metadata["node_properties"]
 
         # Load edge properties - detect format
         t_props_start = time.perf_counter()
@@ -998,14 +1323,12 @@ class CSRGraph:
             with open(directory / "edge_properties.pkl", "rb") as f:
                 graph.edge_properties = pickle.load(f)
             if isinstance(graph.edge_properties, list):
-                print("  Converting edge properties to deduplicated format...")
+                logger.debug("  Converting edge properties to deduplicated format...")
                 graph.edge_properties = EdgePropertyStore.from_property_list(
                     graph.edge_properties
                 )
         else:
-            raise FileNotFoundError(
-                f"No edge property files found in {directory}"
-            )
+            raise FileNotFoundError(f"No edge property files found in {directory}")
 
         # Load LMDB store if present
         if lmdb_path.exists():
@@ -1013,38 +1336,90 @@ class CSRGraph:
         else:
             graph.lmdb_store = None
 
-        # Load edge IDs if present
-        edge_ids_path = directory / "edge_ids.pkl"
-        if edge_ids_path.exists():
-            with open(edge_ids_path, "rb") as f:
+        # Load edge IDs — prefer LMDB, fall back to pickle
+        edge_ids_lmdb_path = directory / "edge_ids.lmdb"
+        edge_ids_pkl_path = directory / "edge_ids.pkl"
+        if edge_ids_lmdb_path.exists():
+            import lmdb as _lmdb
+
+            graph._edge_ids_env = _lmdb.open(
+                str(edge_ids_lmdb_path),
+                readonly=True,
+                max_dbs=0,
+                map_size=256 * 1024 * 1024 * 1024,
+                readahead=False,
+                lock=False,
+            )
+            graph.edge_ids = None  # signal: use LMDB
+        elif edge_ids_pkl_path.exists():
+            with open(edge_ids_pkl_path, "rb") as f:
                 graph.edge_ids = pickle.load(f)
+            graph._edge_ids_env = None
         else:
             graph.edge_ids = None
+            graph._edge_ids_env = None
 
         t_props_end = time.perf_counter()
 
         if isinstance(graph.edge_properties, EdgePropertyStore):
             stats = graph.edge_properties.dedup_stats()
-            print(f"  Edge property dedup: {stats['total_edges']:,} edges -> "
-                  f"{stats['unique_sources']:,} unique source configs, "
-                  f"{stats['unique_qualifiers']:,} unique qualifier combos")
+            logger.debug(
+                "  Edge property dedup: %s edges -> "
+                "%s unique source configs, "
+                "%s unique qualifier combos",
+                stats["total_edges"],
+                stats["unique_sources"],
+                stats["unique_qualifiers"],
+            )
 
         if graph.lmdb_store is not None:
-            print(f"  LMDB detail store: {lmdb_path}")
+            logger.debug("  LMDB detail store: %s", lmdb_path)
 
         # Rebuild rev_to_fwd if not present (legacy format)
         if graph.rev_to_fwd is None:
-            print("  Rebuilding rev_to_fwd mapping...")
+            logger.debug("  Rebuilding rev_to_fwd mapping...")
             graph._rebuild_rev_to_fwd()
 
         t1 = time.perf_counter()
-        print(
-            f"Graph loaded in {t1 - t0:.2f}s "
-            f"(edge_properties: {t_props_end - t_props_start:.2f}s)"
+        logger.info(
+            "Graph loaded in %.2fs " "(edge_properties: %.2fs)",
+            t1 - t0,
+            t_props_end - t_props_start,
         )
-        print(
-            f"  {graph.num_nodes:,} nodes, {len(graph.fwd_targets):,} edges, "
-            f"{len(graph.predicate_to_idx):,} predicates"
+        logger.info(
+            "  %s nodes, %s edges, " "%s predicates",
+            graph.num_nodes,
+            len(graph.fwd_targets),
+            len(graph.predicate_to_idx),
         )
+
+        # Load pre-computed meta_kg from disk if available (avoids
+        # expensive full LMDB scan at query-time startup).
+        meta_kg_path = directory / "meta_kg.json"
+        if meta_kg_path.exists():
+            with open(meta_kg_path, "r", encoding="utf-8") as f:
+                graph.meta_kg = json.load(f)
+            logger.info("  Loaded meta_kg from %s", meta_kg_path)
+        else:
+            graph.meta_kg = None  # will be built by build_metadata()
+
+        # Load pre-computed sri_testing_data from disk if available.
+        sri_testing_path = directory / "sri_testing_data.json"
+        if sri_testing_path.exists():
+            with open(sri_testing_path, "r", encoding="utf-8") as f:
+                graph.sri_testing_data = json.load(f)
+            logger.info("  Loaded sri_testing_data from %s", sri_testing_path)
+        else:
+            graph.sri_testing_data = None  # will be built by build_metadata()
+
+        metadata_path = directory / "graph-metadata.json"
+        if metadata_path.exists():
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                graph.graph_metadata = json.load(f)
+            logger.info("  Loaded metadata from %s", metadata_path)
+        else:
+            graph.graph_metadata = None
+
+        graph.build_metadata()
 
         return graph

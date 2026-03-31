@@ -29,13 +29,13 @@ pip install -e ".[dev]"
 
 ```bash
 # Build graph from JSONL
-gandalf-build --edges data/edges.jsonl --nodes data/nodes.jsonl --output graph.pkl
+gandalf-build --edges data/edges.jsonl --nodes data/nodes.jsonl --output graph_mmap/
 
 # Query paths
-gandalf-query --graph graph.pkl --start "CHEBI:45783" --end "MONDO:0004979"
+gandalf-query --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979"
 
 # Diagnose path explosion
-gandalf-diagnose --graph graph.pkl --start ID1 --end ID2
+gandalf-diagnose --graph graph_mmap/ --start ID1 --end ID2
 
 # Run development server (port 6429)
 python gandalf/main.py
@@ -85,7 +85,7 @@ scripts/              # CLI entry points (gandalf-build, gandalf-query, gandalf-
 - Use dictionary indexing for O(1) lookups
 
 ### Patterns
-- Class methods for serialization (`CSRGraph.save()`, `CSRGraph.load()`)
+- Class methods for serialization (`CSRGraph.save_mmap()`, `CSRGraph.load_mmap()`)
 - Bidirectional search for graph traversal optimization
 - Generator/list comprehensions for data transformation
 - Batch property enrichment (enrich only final paths, not intermediates)
@@ -125,10 +125,10 @@ lookup tables in `MockBMT`.
 
 ## Known Considerations
 
-- Project is in alpha stage (development focus)
-- Some debug print statements remain in library code
-- No CI/CD pipeline currently configured
 - Symmetric predicates are handled via BMT toolkit
+- CI/CD pipeline configured via `.github/workflows/ci.yml` (lint, test, typecheck)
+- Dockerfile available for containerized deployment
+- Server configurable via environment variables (see README.md)
 
 ## Best practice:
 

@@ -60,8 +60,10 @@ def _evaluate_constraint(attributes, constraint):
     # Find matching attributes by attribute_type_id or original_attribute_name
     matching_values = []
     for attr in attributes:
-        if (attr.get("attribute_type_id") == constraint_id or
-                attr.get("original_attribute_name") == constraint_id):
+        if (
+            attr.get("attribute_type_id") == constraint_id
+            or attr.get("original_attribute_name") == constraint_id
+        ):
             matching_values.append(attr.get("value"))
 
     if not matching_values:
@@ -91,7 +93,10 @@ def _apply_operator(operator, attr_value, constraint_value):
 
     elif operator == "===":
         # Strict equality: type, value, and for lists also order
-        return type(attr_value) is type(constraint_value) and attr_value == constraint_value
+        return (
+            type(attr_value) is type(constraint_value)
+            and attr_value == constraint_value
+        )
 
     elif operator == ">":
         return _compare_numeric(attr_value, constraint_value, ">")
