@@ -993,10 +993,12 @@ class CSRGraph:
             # Add qualifier type IDs as attributes in the qualifiers list
             qualifiers = []
             for qtype in sorted(triple_qual_map.get(triple_key, {})):
-                qualifiers.append({
-                    "qualifier_type_id": qtype,
-                    "applicable_values": sorted(triple_qual_map[triple_key][qtype]),
-                })
+                qualifiers.append(
+                    {
+                        "qualifier_type_id": qtype,
+                        "applicable_values": sorted(triple_qual_map[triple_key][qtype]),
+                    }
+                )
 
             meta_edges.append(
                 {
