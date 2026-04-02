@@ -642,3 +642,30 @@ class TestDeterministicEdgeIds:
         graph1 = build_graph_from_jsonl(edges_file, nodes_file)
         graph2 = build_graph_from_jsonl(edges_file, nodes_file)
         assert graph1.edge_ids == graph2.edge_ids
+
+    def test_hash_collision_raises(self, tmp_path):
+        """A hash collision on auto-generated IDs should raise ValueError."""
+        # Two identical edges (no id field) produce the same hash → collision
+        edge = {
+            "subject": "A:1",
+            "predicate": "biolink:related_to",
+            "object": "B:1",
+            "sources": [
+                {
+                    "resource_role": "primary_knowledge_source",
+                    "resource_id": "infores:test",
+                }
+            ],
+        }
+        edges_file = tmp_path / "edges.jsonl"
+        edges_file.write_text(json.dumps(edge) + "\n" + json.dumps(edge) + "\n")
+        nodes_file = tmp_path / "nodes.jsonl"
+        nodes_file.write_text(
+            "\n".join(
+                json.dumps({"id": nid, "name": nid, "category": ["biolink:NamedThing"]})
+                for nid in ["A:1", "B:1"]
+            )
+            + "\n"
+        )
+        with pytest.raises(ValueError, match="Hash collision"):
+            build_graph_from_jsonl(str(edges_file), str(nodes_file))

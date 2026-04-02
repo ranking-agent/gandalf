@@ -266,6 +266,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
 
     # Edge IDs from the JSONL "id" field (indexed by original line order)
     edge_ids = [None] * edge_count
+    _generated_id_set = set()  # track auto-generated IDs for collision detection
 
     # Incremental dedup builder for qualifiers + sources (hot path)
     prop_builder = EdgePropertyStoreBuilder(edge_count)
@@ -311,9 +312,20 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
                     ):
                         if s.get("resource_role") == "primary_knowledge_source":
                             parts.append(s.get("resource_id", ""))
-                    edge_ids[i] = hashlib.md5(
+                    generated_id = hashlib.md5(
                         "-".join(parts).encode()
                     ).hexdigest()
+                    if generated_id in _generated_id_set:
+                        raise ValueError(
+                            f"Hash collision for auto-generated edge ID "
+                            f"'{generated_id}' at line {i + 1}: "
+                            f"{data['subject']} --{data['predicate']}--> "
+                            f"{data['object']}. This indicates two distinct "
+                            f"edges produced the same hash — please add "
+                            f"unique 'id' fields to the source JSONL."
+                        )
+                    _generated_id_set.add(generated_id)
+                    edge_ids[i] = generated_id
 
                 # Extract properties
                 sources = _extract_sources(data)
