@@ -1,5 +1,6 @@
 """Unit tests for gandalf.loader module."""
 
+import json
 import os
 import tempfile
 
@@ -524,3 +525,120 @@ class TestEdgeCases:
             metformin_idx, "nonexistent_key", default="default"
         )
         assert value == "default"
+
+
+class TestDeterministicEdgeIds:
+    """Tests for deterministic edge ID generation when JSONL edges lack IDs."""
+
+    @pytest.fixture
+    def edges_without_ids(self, tmp_path):
+        """Create a temporary edges.jsonl where no edge has an id field."""
+        edges = [
+            {
+                "subject": "CHEBI:6801",
+                "predicate": "biolink:treats",
+                "object": "MONDO:0005148",
+                "sources": [
+                    {
+                        "resource_role": "primary_knowledge_source",
+                        "resource_id": "infores:drugcentral",
+                    }
+                ],
+            },
+            {
+                "subject": "CHEBI:6801",
+                "predicate": "biolink:treats",
+                "object": "MONDO:0005148",
+                "sources": [
+                    {
+                        "resource_role": "primary_knowledge_source",
+                        "resource_id": "infores:chembl",
+                    }
+                ],
+            },
+            {
+                "subject": "CHEBI:6801",
+                "predicate": "biolink:affects",
+                "object": "NCBIGene:3643",
+                "sources": [
+                    {
+                        "resource_role": "primary_knowledge_source",
+                        "resource_id": "infores:ctd",
+                    }
+                ],
+                "object_aspect_qualifier": "activity",
+                "object_direction_qualifier": "increased",
+            },
+            {
+                "subject": "CHEBI:6801",
+                "predicate": "biolink:affects",
+                "object": "NCBIGene:3643",
+                "sources": [
+                    {
+                        "resource_role": "primary_knowledge_source",
+                        "resource_id": "infores:hetio",
+                    }
+                ],
+                "object_aspect_qualifier": "abundance",
+                "object_direction_qualifier": "decreased",
+            },
+        ]
+        edges_file = tmp_path / "edges.jsonl"
+        nodes_file = tmp_path / "nodes.jsonl"
+        edges_file.write_text(
+            "\n".join(json.dumps(e) for e in edges) + "\n"
+        )
+        nodes_file.write_text(
+            "\n".join(
+                json.dumps({"id": nid, "name": nid, "category": ["biolink:NamedThing"]})
+                for nid in ["CHEBI:6801", "MONDO:0005148", "NCBIGene:3643"]
+            )
+            + "\n"
+        )
+        return str(edges_file), str(nodes_file)
+
+    def test_all_edge_ids_populated(self, edges_without_ids):
+        """All edges should receive a non-None deterministic ID."""
+        edges_file, nodes_file = edges_without_ids
+        graph = build_graph_from_jsonl(edges_file, nodes_file)
+        for i, eid in enumerate(graph.edge_ids):
+            assert eid is not None, f"edge_ids[{i}] is None"
+
+    def test_different_sources_get_different_ids(self, edges_without_ids):
+        """Parallel edges with same (s,p,o) but different sources get distinct IDs."""
+        edges_file, nodes_file = edges_without_ids
+        graph = build_graph_from_jsonl(edges_file, nodes_file)
+        metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
+        diabetes_idx = graph.node_id_to_idx["MONDO:0005148"]
+
+        treats_ids = []
+        for target, pred, props, eidx in graph.neighbors_with_properties(metformin_idx):
+            if target == diabetes_idx and pred == "biolink:treats":
+                treats_ids.append(graph.get_edge_id(eidx))
+
+        assert len(treats_ids) == 2
+        assert treats_ids[0] != treats_ids[1], "Edges with different sources got same ID"
+
+    def test_different_qualifiers_get_different_ids(self, edges_without_ids):
+        """Parallel edges with same (s,p,o) but different qualifiers get distinct IDs."""
+        edges_file, nodes_file = edges_without_ids
+        graph = build_graph_from_jsonl(edges_file, nodes_file)
+        metformin_idx = graph.node_id_to_idx["CHEBI:6801"]
+        insr_idx = graph.node_id_to_idx["NCBIGene:3643"]
+
+        affects_ids = []
+        for target, pred, props, eidx in graph.neighbors_with_properties(metformin_idx):
+            if target == insr_idx and pred == "biolink:affects":
+                affects_ids.append(graph.get_edge_id(eidx))
+
+        assert len(affects_ids) == 2
+        assert affects_ids[0] != affects_ids[1], (
+            "Edges with different qualifiers got same ID"
+        )
+
+    def test_ids_are_deterministic(self, edges_without_ids):
+        """Building the graph twice should produce the same edge IDs."""
+        edges_file, nodes_file = edges_without_ids
+        graph1 = build_graph_from_jsonl(edges_file, nodes_file)
+        graph2 = build_graph_from_jsonl(edges_file, nodes_file)
+        assert graph1.edge_ids == graph2.edge_ids

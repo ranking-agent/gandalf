@@ -13,6 +13,7 @@ Pass 3: Sort numpy arrays by (src, dst, pred) via np.lexsort. Rewrite the temp
         dedup indices to match. Build CSR offset arrays.
 """
 
+import hashlib
 import shutil
 import tempfile
 from pathlib import Path
@@ -294,8 +295,25 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
                 dst_indices[i] = node_id_to_idx[data["object"]]
                 pred_indices[i] = predicate_to_idx[data["predicate"]]
 
-                # Capture edge ID from JSONL (if present)
+                # Capture edge ID from JSONL, or generate a deterministic one.
+                # A deterministic ID is needed so that the same logical edge
+                # always maps to the same knowledge-graph dict key, enabling
+                # cross-result-group dedup at query time.
                 edge_ids[i] = data.get("id")
+                if edge_ids[i] is None:
+                    parts = [data["subject"], data["predicate"], data["object"]]
+                    for field in sorted(_QUALIFIER_FIELDS):
+                        if field in data:
+                            parts.append(f"{field}:{data[field]}")
+                    raw_sources = data.get("sources", [])
+                    for s in sorted(
+                        raw_sources, key=lambda x: x.get("resource_id", "")
+                    ):
+                        if s.get("resource_role") == "primary_knowledge_source":
+                            parts.append(s.get("resource_id", ""))
+                    edge_ids[i] = hashlib.md5(
+                        "-".join(parts).encode()
+                    ).hexdigest()[:12]
 
                 # Extract properties
                 sources = _extract_sources(data)
