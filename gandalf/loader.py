@@ -266,7 +266,12 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
 
     # Edge IDs from the JSONL "id" field (indexed by original line order)
     edge_ids = [None] * edge_count
-    _generated_id_set = set()  # track auto-generated IDs for collision detection
+    # For collision detection on auto-generated IDs: store raw 16-byte
+    # MD5 digests in a flat numpy array (16 bytes/edge, no Python object
+    # overhead).  After pass 2 we sort and check for adjacent duplicates.
+    _gen_digests = np.empty((edge_count, 16), dtype=np.uint8)
+    _gen_lines = np.empty(edge_count, dtype=np.int64)  # line numbers
+    _gen_count = 0
 
     # Incremental dedup builder for qualifiers + sources (hot path)
     prop_builder = EdgePropertyStoreBuilder(edge_count)
@@ -312,20 +317,13 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
                     ):
                         if s.get("resource_role") == "primary_knowledge_source":
                             parts.append(s.get("resource_id", ""))
-                    generated_id = hashlib.md5(
+                    digest = hashlib.md5(
                         "-".join(parts).encode()
-                    ).hexdigest()
-                    if generated_id in _generated_id_set:
-                        raise ValueError(
-                            f"Hash collision for auto-generated edge ID "
-                            f"'{generated_id}' at line {i + 1}: "
-                            f"{data['subject']} --{data['predicate']}--> "
-                            f"{data['object']}. This indicates two distinct "
-                            f"edges produced the same hash — please add "
-                            f"unique 'id' fields to the source JSONL."
-                        )
-                    _generated_id_set.add(generated_id)
-                    edge_ids[i] = generated_id
+                    ).digest()
+                    edge_ids[i] = digest.hex()
+                    _gen_digests[_gen_count] = np.frombuffer(digest, dtype=np.uint8)
+                    _gen_lines[_gen_count] = i
+                    _gen_count += 1
 
                 # Extract properties
                 sources = _extract_sources(data)
@@ -362,6 +360,31 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
         temp_env.close()
 
     logger.debug("  Arrays and temp LMDB built")
+
+    # Check for hash collisions among auto-generated edge IDs.
+    # Sort the raw 16-byte digests and look for adjacent duplicates.
+    # Memory: 16 bytes/edge in a flat numpy array (no Python objects).
+    if _gen_count > 0:
+        digests = _gen_digests[:_gen_count]
+        lines = _gen_lines[:_gen_count]
+        # Sort by digest bytes (lexicographic via void view)
+        sort_idx = np.lexsort(digests.T[::-1])
+        sorted_digests = digests[sort_idx]
+        # Compare adjacent rows
+        dups = np.all(sorted_digests[:-1] == sorted_digests[1:], axis=1)
+        if dups.any():
+            first_dup = np.argmax(dups)
+            line_a = int(lines[sort_idx[first_dup]])
+            line_b = int(lines[sort_idx[first_dup + 1]])
+            dup_id = edge_ids[line_a]
+            raise ValueError(
+                f"Hash collision for auto-generated edge ID "
+                f"'{dup_id}' at lines {line_a + 1} and {line_b + 1}. "
+                f"This indicates two identical edges in the source data "
+                f"— please add unique 'id' fields to the source JSONL "
+                f"or remove the duplicate."
+            )
+    del _gen_digests, _gen_lines
 
     # =================================================================
     # Pass 3: Sort, rewrite LMDB, build CSR
