@@ -313,7 +313,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
                             parts.append(s.get("resource_id", ""))
                     edge_ids[i] = hashlib.md5(
                         "-".join(parts).encode()
-                    ).hexdigest()[:12]
+                    ).hexdigest()
 
                 # Extract properties
                 sources = _extract_sources(data)
