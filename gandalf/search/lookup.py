@@ -555,96 +555,85 @@ def _build_response(
 
                     edge_bindings_by_qedge[qedge_id].append(edge_props)
         else:
-            # Full (hydrated) path: per-path loop with qualifier/source
-            # dedup keys and full edge property enrichment.
-            edge_seen_keys = defaultdict(set)
+            # Full (hydrated) path: vectorized unique-edge computation
+            # using edge-property pool indices as numeric dedup keys.
+            # The pool already deduplicates qualifier/source content into
+            # int32 indices, so two edges with identical qualifiers share
+            # the same pool index — no per-path sorted-tuple creation
+            # needed.
+            ep = graph.edge_properties
+            idx_arr = np.asarray(path_indices)
+            for col in range(pa_num_edges):
+                qedge_id = col_to_qedge[col]
+                edge_def = query_graph["edges"][qedge_id]
+                subj_col_e = qnode_to_col[edge_def["subject"]]
+                obj_col_e = qnode_to_col[edge_def["object"]]
 
-            for path_idx in path_indices:
-                for col in range(pa_num_edges):
-                    qedge_id = col_to_qedge[col]
-                    pred_idx = int(pa_preds[path_idx, col])
+                # Slice all paths at once.
+                query_subj = pa_nodes[idx_arr, subj_col_e]
+                query_obj = pa_nodes[idx_arr, obj_col_e]
+                preds = pa_preds[idx_arr, col]
+                inv = pa_via_inv[idx_arr, col].astype(bool)
+                fwd_eidxs = pa_fwd_eidx[idx_arr, col]
+
+                actual_subj = np.where(inv, query_obj, query_subj)
+                actual_obj = np.where(inv, query_subj, query_obj)
+
+                # Look up qualifier/source pool indices in bulk.
+                # Clamp negative fwd_eidx (synthetic edges) to 0 for safe
+                # indexing, then overwrite with sentinel -1.
+                valid_mask = fwd_eidxs >= 0
+                safe_eidxs = np.where(valid_mask, fwd_eidxs, 0)
+                quals_pi = np.where(
+                    valid_mask, ep._quals_idx[safe_eidxs], -1
+                )
+                sources_pi = np.where(
+                    valid_mask, ep._sources_idx[safe_eidxs], -1
+                )
+
+                # Unique (subj, pred, obj, quals_pool, sources_pool).
+                combined = np.column_stack(
+                    [actual_subj, preds, actual_obj, quals_pi, sources_pi]
+                )
+                unique_rows, first_occ = np.unique(
+                    combined, axis=0, return_index=True
+                )
+
+                for i in range(len(unique_rows)):
+                    subj_idx = int(unique_rows[i, 0])
+                    pred_idx = int(unique_rows[i, 1])
+                    obj_idx = int(unique_rows[i, 2])
+
+                    subj_id = node_id_cache[subj_idx]
+                    obj_id = node_id_cache[obj_idx]
                     predicate = idx_to_predicate[pred_idx]
-                    is_inverse = bool(pa_via_inv[path_idx, col])
-                    fwd_eidx = int(pa_fwd_eidx[path_idx, col])
 
-                    # Determine actual (stored) edge direction
-                    edge_def = query_graph["edges"][qedge_id]
-                    subj_col_e = qnode_to_col[edge_def["subject"]]
-                    obj_col_e = qnode_to_col[edge_def["object"]]
-                    query_subj_idx = int(pa_nodes[path_idx, subj_col_e])
-                    query_obj_idx = int(pa_nodes[path_idx, obj_col_e])
+                    fi = int(first_occ[i])
+                    fwd_eidx = int(fwd_eidxs[fi])
 
-                    if is_inverse:
-                        actual_subj_idx, actual_obj_idx = (
-                            query_obj_idx,
-                            query_subj_idx,
-                        )
-                    else:
-                        actual_subj_idx, actual_obj_idx = (
-                            query_subj_idx,
-                            query_obj_idx,
-                        )
-
-                    subj_id = node_id_cache[actual_subj_idx]
-                    obj_id = node_id_cache[actual_obj_idx]
-
-                    # Compute dedup key
                     if fwd_eidx < 0:
-                        edge_key = (subj_id, predicate, obj_id, (), ())
+                        edge_props = {}
                     else:
-                        quals = graph.edge_properties.get_qualifiers(fwd_eidx)
-                        quals_key = tuple(
-                            sorted(
-                                (
-                                    q.get("qualifier_type_id", ""),
-                                    q.get("qualifier_value", ""),
-                                )
-                                for q in (quals or [])
-                            )
-                        )
-                        sources = graph.edge_properties.get_sources(fwd_eidx)
-                        sources_key = tuple(
-                            sorted(
-                                (
-                                    s.get("resource_id", ""),
-                                    s.get("resource_role", ""),
-                                )
-                                for s in (sources or [])
-                            )
-                        )
-                        edge_key = (
-                            subj_id,
-                            predicate,
-                            obj_id,
-                            quals_key,
-                            sources_key,
-                        )
+                        edge_props = graph.get_edge_properties_by_index(
+                            fwd_eidx
+                        ).copy()
+                    edge_props["predicate"] = predicate
+                    edge_props["subject"] = subj_id
+                    edge_props["object"] = obj_id
 
-                    if edge_key not in edge_seen_keys[qedge_id]:
-                        edge_seen_keys[qedge_id].add(edge_key)
-                        if fwd_eidx < 0:
-                            edge_props = {}
-                        else:
-                            edge_props = graph.get_edge_properties_by_index(
-                                fwd_eidx
-                            ).copy()
-                        edge_props["predicate"] = predicate
-                        edge_props["subject"] = subj_id
-                        edge_props["object"] = obj_id
+                    if fwd_eidx >= 0:
+                        orig_id = graph.get_edge_id(fwd_eidx)
+                        if orig_id is not None:
+                            edge_props["_edge_id"] = orig_id
 
-                        if fwd_eidx >= 0:
-                            orig_id = graph.get_edge_id(fwd_eidx)
-                            if orig_id is not None:
-                                edge_props["_edge_id"] = orig_id
+                    edge_props["_query_subject"] = node_id_cache[
+                        int(query_subj[fi])
+                    ]
+                    edge_props["_query_object"] = node_id_cache[
+                        int(query_obj[fi])
+                    ]
 
-                        edge_props["_query_subject"] = node_id_cache[
-                            query_subj_idx
-                        ]
-                        edge_props["_query_object"] = node_id_cache[
-                            query_obj_idx
-                        ]
-
-                        edge_bindings_by_qedge[qedge_id].append(edge_props)
+                    edge_bindings_by_qedge[qedge_id].append(edge_props)
 
         # Add edges to knowledge graph and result bindings
         for edge_id, edges in edge_bindings_by_qedge.items():
