@@ -23,6 +23,15 @@ class LogLevel(str, Enum):
     DEBUG = "DEBUG"
 
 
+class SetInterpretation(str, Enum):
+    """TRAPI set interpretation modes for QNode IDs."""
+
+    BATCH = "BATCH"
+    ALL = "ALL"
+    MANY = "MANY"
+    COLLATE = "COLLATE"
+
+
 class LogEntry(BaseModel):
     """A single TRAPI log entry conforming to the Translator Reasoner API spec."""
 
@@ -59,7 +68,23 @@ class QNode(BaseModel):
         None, description="Attribute constraints for filtering nodes"
     )
     is_set: Optional[bool] = Field(
-        None, description="Whether this node represents a set of entities"
+        None,
+        description="Deprecated: use set_interpretation instead. "
+        "Whether this node represents a set of entities",
+    )
+    set_interpretation: Optional[SetInterpretation] = Field(
+        None,
+        description="Indicates how multiple CURIEs in the ids property are "
+        "interpreted. BATCH (default): each CURIE is treated independently. "
+        "ALL: all CURIEs must appear in each Result. "
+        "MANY: member CURIEs form sets in Results (not supported). "
+        "COLLATE: multiple matching nodes are combined into a single Result "
+        "(only valid for unpinned nodes without ids).",
+    )
+    member_ids: Optional[List[str]] = Field(
+        None,
+        description="CURIE identifiers for set members "
+        "(used with MANY/ALL set_interpretation)",
     )
 
     model_config = ConfigDict(extra="allow")
