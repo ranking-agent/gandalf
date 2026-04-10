@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Module-level graph preloading (server.py)
     skip_preload: bool = False
 
+    # When True, enable Pydantic response_model validation on TRAPI routes
+    validate_responses: bool = False
+
     # Gunicorn worker count
     workers: int = 2
 
