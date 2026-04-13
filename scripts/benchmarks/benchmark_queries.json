@@ -1,0 +1,163 @@
+[
+  {
+    "message": {
+      "query_graph": {
+        "nodes": {
+          "ON": { "categories": ["biolink:Disease"], "ids": ["MONDO:0005301"] },
+          "SN": { "categories": ["biolink:ChemicalEntity"] }
+        },
+        "edges": {
+          "t_edge": {
+            "subject": "SN",
+            "object": "ON",
+            "predicates": ["biolink:treats"]
+          }
+        }
+      }
+    },
+    "parameters": {},
+    "submitter": "infores:imatester"
+  },
+  {
+    "message": {
+      "query_graph": {
+        "nodes": {
+          "SN": { "categories": ["biolink:ChemicalEntity"] },
+          "ON": {
+            "ids": ["MONDO:0007186"],
+            "categories": ["biolink:DiseaseOrPhenotypicFeature"]
+          },
+          "h": { "categories": ["biolink:Disease"] }
+        },
+        "edges": {
+          "edge_0": {
+            "subject": "SN",
+            "object": "ON",
+            "predicates": ["biolink:treats_or_applied_or_studied_to_treat"]
+          },
+          "edge_1": {
+            "subject": "SN",
+            "object": "h",
+            "predicates": ["biolink:treats_or_applied_or_studied_to_treat"]
+          },
+          "edge_2": {
+            "subject": "h",
+            "object": "ON",
+            "predicates": ["biolink:has_phenotype"]
+          }
+        }
+      }
+    },
+    "parameters": {},
+    "submitter": "infores:imatester"
+  },
+  {
+    "message": {
+      "query_graph": {
+        "nodes": {
+          "SN": { "categories": ["biolink:ChemicalEntity"] },
+          "ON": {
+            "ids": ["MONDO:0005148"],
+            "categories": ["biolink:DiseaseOrPhenotypicFeature"]
+          },
+          "f": { "categories": ["biolink:Disease"] }
+        },
+        "edges": {
+          "edge_0": {
+            "subject": "SN",
+            "object": "f",
+            "predicates": ["biolink:treats_or_applied_or_studied_to_treat"]
+          },
+          "edge_1": {
+            "subject": "f",
+            "object": "ON",
+            "predicates": ["biolink:has_phenotype"]
+          },
+          "edge_2": {
+            "subject": "ON",
+            "object": "f",
+            "predicates": ["biolink:has_phenotype"]
+          }
+        }
+      }
+    },
+    "parameters": {},
+    "submitter": "infores:imatester"
+  },
+  {
+    "message": {
+      "query_graph": {
+        "nodes": {
+          "SN": { "categories": ["biolink:ChemicalEntity"] },
+          "ON": { "ids": ["NCBIGene:1565"], "categories": ["biolink:Gene"] }
+        },
+        "edges": {
+          "edge_0": {
+            "subject": "SN",
+            "object": "ON",
+            "predicates": ["biolink:affects"],
+            "qualifier_constraints": [
+              {
+                "qualifier_set": [
+                  {
+                    "qualifier_type_id": "biolink:object_aspect_qualifier",
+                    "qualifier_value": "activity"
+                  },
+                  {
+                    "qualifier_type_id": "biolink:object_direction_qualifier",
+                    "qualifier_value": "decreased"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "parameters": {},
+    "submitter": "infores:imatester"
+  },
+  {
+    "message": {
+      "query_graph": {
+        "nodes": {
+          "ON": {
+            "ids": ["HGNC:3870"],
+            "categories": ["biolink:Gene"]
+            },
+          "SN": {
+            "ids": ["CHEBI:59173"],
+            "categories": ["biolink:ChemicalEntity"]
+          }
+        },
+        "edges": {
+          "e0": {
+            "subject": "SN",
+            "object": "ON",
+            "predicates": ["biolink:affects"],
+            "qualifier_constraints": [
+              {
+                "qualifier_set": [
+                  {
+                    "qualifier_type_id": "biolink:qualified_predicate",
+                    "qualifier_value": "biolink:causes"
+                  },
+                  {
+                    "qualifier_type_id": "biolink:object_aspect_qualifier",
+                    "qualifier_value": "activity_or_abundance"
+                  },
+                  {
+                    "qualifier_type_id": "biolink:object_direction_qualifier",
+                    "qualifier_value": "decreased"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "parameters": {},
+    "submitter": "imatester"
+  }
+]
