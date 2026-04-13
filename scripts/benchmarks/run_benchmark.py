@@ -32,7 +32,9 @@ async def do_lookup(target, url, message, indx):
                 url,
                 json=message,
             )
-            with open(f"{target}/{indx}_benchmark_response.json", "w", encoding="utf-8") as f:
+            with open(
+                f"{target}/{indx}_benchmark_response.json", "w", encoding="utf-8"
+            ) as f:
                 json.dump(response, f, indent=2)
             response.raise_for_status()
             response = response.json()
