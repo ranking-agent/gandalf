@@ -32,12 +32,12 @@ async def do_lookup(target, url, message, indx):
                 url,
                 json=message,
             )
+            response.raise_for_status()
+            response = response.json()
             with open(
                 f"{target}/{indx}_benchmark_response.json", "w", encoding="utf-8"
             ) as f:
                 json.dump(response, f, indent=2)
-            response.raise_for_status()
-            response = response.json()
             num_results = len((response.get("message") or {}).get("results") or [])
             print(f"Returned {num_results} results")
     except httpx.ReadTimeout:
