@@ -35,6 +35,8 @@ from gandalf.models import (
 )
 from gandalf.config import settings
 from gandalf.heartbeat import start_heartbeat
+
+_validate = settings.validate_responses
 from gandalf.openapi import construct_open_api_schema
 
 configure_logging(
@@ -378,7 +380,11 @@ def sri_testing_data():
 # ---------------------------------------------------------------------------
 
 
-@APP.get("/metadata", responses={200: {"model": MetadataResponse}})
+@APP.get(
+    "/metadata",
+    response_model=MetadataResponse if _validate else None,
+    responses={200: {"model": MetadataResponse}},
+)
 def metadata():
     """Return knowledge graph metadata and statistics."""
     if GRAPH is None:
@@ -391,7 +397,11 @@ def metadata():
 # ---------------------------------------------------------------------------
 
 
-@APP.post("/query", responses={200: {"model": TRAPIResponse}})
+@APP.post(
+    "/query",
+    response_model=TRAPIResponse if _validate else None,
+    responses={200: {"model": TRAPIResponse}},
+)
 def sync_lookup(
     request: TRAPIQuery,
     subclass: Optional[bool] = Query(

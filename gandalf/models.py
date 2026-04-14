@@ -411,3 +411,5 @@ class MetadataResponse(BaseModel):
         ..., description="Predicate → edge count mapping"
     )
     categories: Dict[str, int] = Field(..., description="Category → node count mapping")
+
+    model_config = ConfigDict(extra="allow")
