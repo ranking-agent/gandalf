@@ -120,6 +120,7 @@ def query_edge(
     attribute_constraints: Optional[list] = None,
     start_node_constraints: Optional[list] = None,
     end_node_constraints: Optional[list] = None,
+    dehydrated: bool = False,
 ):
     """Query for a single edge with given constraints.
 
@@ -148,6 +149,10 @@ def query_edge(
             filtering the start (subject) node by its attributes.
         end_node_constraints: List of TRAPI AttributeConstraint dicts for
             filtering the end (object) node by its attributes.
+        dehydrated: If True, deduplicate on (subj, pred, obj) only — edges
+            that differ only in qualifiers/sources collapse to a single match.
+            This dramatically reduces the number of downstream paths when
+            many physical edges connect the same node pair.
 
     Returns:
         List of (subject_idx, predicate, object_idx, via_inverse, fwd_edge_idx) tuples where
@@ -167,14 +172,21 @@ def query_edge(
     def add_match(subj_idx, predicate, obj_idx, fwd_edge_idx, via_inverse=False):
         """Add a match, avoiding duplicates. Includes via_inverse flag.
 
-        Dedup key includes ``fwd_edge_idx`` so that edges with the same
-        (subj, pred, obj) but different qualifiers / sources are kept as
-        separate matches.  It also includes ``via_inverse`` because the
-        same physical edge found in both forward and inverse directions
-        represents two distinct query bindings (e.g. SN=A,h=B vs SN=B,h=A
-        for symmetric predicates).
+        In normal mode the dedup key includes ``fwd_edge_idx`` so that
+        edges with the same (subj, pred, obj) but different qualifiers /
+        sources are kept as separate matches.  In dehydrated mode the key
+        drops ``fwd_edge_idx``, collapsing those duplicates into a single
+        match — which avoids generating the many redundant paths that
+        would all map to the same dehydrated edge anyway.
+
+        ``via_inverse`` is always part of the key because the same
+        physical edge found in both forward and inverse directions
+        represents two distinct query bindings.
         """
-        key = (subj_idx, predicate, obj_idx, fwd_edge_idx, via_inverse)
+        if dehydrated:
+            key = (subj_idx, predicate, obj_idx, via_inverse)
+        else:
+            key = (subj_idx, predicate, obj_idx, fwd_edge_idx, via_inverse)
         if key not in seen_edges:
             seen_edges.add(key)
             matches.append((subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx))
