@@ -290,6 +290,10 @@ class CSRGraph:
         self.edge_ids = None
         self._edge_ids_env = None
 
+        # Pre-computed scoring metadata — populated by load_mmap() when a
+        # scoring manifest is present alongside the graph files.
+        self.scoring = None
+
         # Graph Metadata - set later by loader or load_mmap
         self.meta_kg = None
         self.sri_testing_data = None
@@ -1429,6 +1433,15 @@ class CSRGraph:
             logger.info("  Loaded metadata from %s", metadata_path)
         else:
             graph.graph_metadata = None
+
+        # Pre-computed scoring metadata (publication counts, embeddings, etc.).
+        # Imported lazily so the metadata subpackage stays an optional layer.
+        from gandalf.metadata import ScoringMetadata
+
+        graph.scoring = ScoringMetadata.load(directory)
+        if graph.scoring is not None:
+            fields = sorted(graph.scoring.manifest.fields.keys())
+            logger.info("  Loaded scoring metadata: %s", ", ".join(fields))
 
         graph.build_metadata()
 

@@ -45,6 +45,7 @@ server = [
 gandalf-build = "scripts.build_graph:main"
 gandalf-query = "scripts.query_paths:main"
 gandalf-diagnose = "scripts.diagnose:main"
+gandalf-ingest-pub-counts = "scripts.ingest_pub_counts:main"
 
 [tool.mypy]
 warn_return_any = true
