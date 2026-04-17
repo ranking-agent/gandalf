@@ -4,8 +4,8 @@ import pytest
 
 from tests.search_fixtures import graph  # noqa: F401
 
+from gandalf.request_validation import validate_set_interpretation
 from gandalf.search import lookup
-from gandalf.server import _validate_set_interpretation
 
 # ---------------------------------------------------------------------------
 # Server-level validation
@@ -13,15 +13,15 @@ from gandalf.server import _validate_set_interpretation
 
 
 class TestSetInterpretationValidation:
-    """Tests for _validate_set_interpretation."""
+    """Tests for validate_set_interpretation."""
 
     def test_batch_accepted(self):
         qg = {"nodes": {"n0": {"ids": ["A"], "set_interpretation": "BATCH"}}}
-        _validate_set_interpretation(qg)  # should not raise
+        validate_set_interpretation(qg)  # should not raise
 
     def test_all_accepted(self):
         qg = {"nodes": {"n0": {"ids": ["A", "B"], "set_interpretation": "ALL"}}}
-        _validate_set_interpretation(qg)  # should not raise
+        validate_set_interpretation(qg)  # should not raise
 
     def test_collate_accepted(self):
         qg = {
@@ -32,14 +32,14 @@ class TestSetInterpretationValidation:
                 }
             }
         }
-        _validate_set_interpretation(qg)  # should not raise
+        validate_set_interpretation(qg)  # should not raise
 
     def test_many_rejected(self):
         from fastapi import HTTPException
 
         qg = {"nodes": {"n0": {"set_interpretation": "MANY"}}}
         with pytest.raises(HTTPException) as exc_info:
-            _validate_set_interpretation(qg)
+            validate_set_interpretation(qg)
         assert exc_info.value.status_code == 422
         assert "MANY" in str(exc_info.value.detail)
 
@@ -55,7 +55,7 @@ class TestSetInterpretationValidation:
             }
         }
         with pytest.raises(HTTPException) as exc_info:
-            _validate_set_interpretation(qg)
+            validate_set_interpretation(qg)
         assert exc_info.value.status_code == 422
 
     def test_collate_with_ids_rejected(self):
@@ -63,12 +63,12 @@ class TestSetInterpretationValidation:
 
         qg = {"nodes": {"n0": {"ids": ["A"], "set_interpretation": "COLLATE"}}}
         with pytest.raises(HTTPException) as exc_info:
-            _validate_set_interpretation(qg)
+            validate_set_interpretation(qg)
         assert exc_info.value.status_code == 422
 
     def test_no_interpretation_passes(self):
         qg = {"nodes": {"n0": {"ids": ["A"]}, "n1": {"categories": ["biolink:Gene"]}}}
-        _validate_set_interpretation(qg)  # should not raise
+        validate_set_interpretation(qg)  # should not raise
 
 
 # ---------------------------------------------------------------------------

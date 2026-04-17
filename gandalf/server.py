@@ -36,33 +36,7 @@ from gandalf.models import (
 from gandalf.config import settings
 from gandalf.heartbeat import start_heartbeat
 from gandalf.openapi import construct_open_api_schema
-
-
-def _validate_set_interpretation(query_graph: dict):
-    """Validate node-level set_interpretation values.
-
-    Raises HTTPException(422) for unsupported or invalid configurations.
-    """
-    for qnode_id, qnode in query_graph.get("nodes", {}).items():
-        interp = qnode.get("set_interpretation")
-        if interp is None:
-            continue
-        if interp == "MANY":
-            raise HTTPException(
-                422,
-                f"set_interpretation MANY is not supported (node '{qnode_id}')",
-            )
-        if interp == "ALL" and not qnode.get("ids"):
-            raise HTTPException(
-                422,
-                f"set_interpretation ALL requires ids (node '{qnode_id}')",
-            )
-        if interp == "COLLATE" and qnode.get("ids"):
-            raise HTTPException(
-                422,
-                f"set_interpretation COLLATE is only valid for unpinned nodes "
-                f"without ids (node '{qnode_id}')",
-            )
+from gandalf.request_validation import validate_set_interpretation
 
 configure_logging(
     getattr(logging, settings.log_level, logging.INFO), fmt=settings.log_format
@@ -437,7 +411,7 @@ def sync_lookup(
         raise HTTPException(503, "Graph not loaded")
 
     raw = request.model_dump(exclude_none=True)
-    _validate_set_interpretation(raw["message"]["query_graph"])
+    validate_set_interpretation(raw["message"]["query_graph"])
     log_level = raw.pop("log_level", None)
 
     # Query params take precedence, fall back to request body
@@ -522,7 +496,7 @@ def async_query(
     if (query.set_interpretation or "BATCH") == "MANY":
         raise HTTPException(422, "set_interpretation MANY not supported.")
 
-    _validate_set_interpretation(raw["message"]["query_graph"])
+    validate_set_interpretation(raw["message"]["query_graph"])
 
     logger.info("Doing async lookup for %s", callback)
     background_tasks.add_task(_async_lookup, callback, raw)
