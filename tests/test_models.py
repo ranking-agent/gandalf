@@ -15,6 +15,7 @@ from gandalf.models import (
     QEdge,
     QNode,
     QueryGraph,
+    SetInterpretation,
     TRAPIQuery,
     TRAPIResponse,
     WorkflowStep,
@@ -258,6 +259,77 @@ class TestAsyncTRAPIQuery:
         }
         q = AsyncTRAPIQuery(**data)
         assert q.set_interpretation == "BATCH"
+
+
+# ---------------------------------------------------------------------------
+# QNode set_interpretation validation
+# ---------------------------------------------------------------------------
+
+
+class TestQNodeSetInterpretation:
+    """Tests for QNode set_interpretation and member_ids fields."""
+
+    def test_valid_batch(self):
+        node = QNode(ids=["A"], set_interpretation="BATCH")
+        assert node.set_interpretation == SetInterpretation.BATCH
+
+    def test_valid_all(self):
+        node = QNode(ids=["A", "B"], set_interpretation="ALL")
+        assert node.set_interpretation == SetInterpretation.ALL
+
+    def test_valid_many(self):
+        node = QNode(set_interpretation="MANY", member_ids=["A", "B"])
+        assert node.set_interpretation == SetInterpretation.MANY
+
+    def test_valid_collate(self):
+        node = QNode(categories=["biolink:Gene"], set_interpretation="COLLATE")
+        assert node.set_interpretation == SetInterpretation.COLLATE
+
+    def test_invalid_value_raises(self):
+        with pytest.raises(ValidationError):
+            QNode(set_interpretation="INVALID")
+
+    def test_default_none(self):
+        node = QNode(ids=["A"])
+        assert node.set_interpretation is None
+
+    def test_member_ids_field(self):
+        node = QNode(member_ids=["A", "B"], set_interpretation="ALL")
+        assert node.member_ids == ["A", "B"]
+
+    def test_roundtrip_excludes_none(self):
+        q = TRAPIQuery(**ONEHOP_QUERY)
+        raw = q.model_dump(exclude_none=True)
+        n0 = raw["message"]["query_graph"]["nodes"]["n0"]
+        assert "set_interpretation" not in n0
+        assert "member_ids" not in n0
+
+    def test_roundtrip_includes_when_set(self):
+        data = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {
+                            "ids": ["CHEBI:6801", "CHEBI:1234"],
+                            "set_interpretation": "ALL",
+                        },
+                        "n1": {"categories": ["biolink:Gene"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                        }
+                    },
+                }
+            }
+        }
+        q = TRAPIQuery(**data)
+        raw = q.model_dump(exclude_none=True)
+        assert (
+            raw["message"]["query_graph"]["nodes"]["n0"]["set_interpretation"] == "ALL"
+        )
 
 
 # ---------------------------------------------------------------------------

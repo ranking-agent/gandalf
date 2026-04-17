@@ -329,6 +329,13 @@ def _lookup_inner(
         t_built = time.perf_counter()
         logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
     else:
+        # Extract per-node set_interpretation from the original query graph
+        # (not the rewritten one which may have synthetic superclass nodes).
+        node_set_interp = {
+            qn_id: qn.get("set_interpretation", "BATCH")
+            for qn_id, qn in original_query_graph["nodes"].items()
+        }
+
         _build_response(
             graph,
             response,
@@ -337,6 +344,8 @@ def _lookup_inner(
             num_paths,
             t_post_start,
             gc_monitor,
+            node_set_interp=node_set_interp,
+            original_query_graph=original_query_graph,
         )
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
@@ -358,7 +367,15 @@ def _lookup_inner(
 
 
 def _build_response(
-    graph, response, path_data, query_graph, num_paths, t_post_start, gc_monitor
+    graph,
+    response,
+    path_data,
+    query_graph,
+    num_paths,
+    t_post_start,
+    gc_monitor,
+    node_set_interp=None,
+    original_query_graph=None,
 ):
     """Build the TRAPI response from path data."""
     # Extract arrays and metadata from PathArrays for efficient access
@@ -409,9 +426,27 @@ def _build_response(
                 ("object", f"{obj}_subclass_edge", qnode_to_superclass[obj])
             )
 
+    # Determine which nodes use non-BATCH set_interpretation.
+    if node_set_interp is None:
+        node_set_interp = {}
+    all_mode_nodes = {
+        qn_id for qn_id, interp in node_set_interp.items() if interp == "ALL"
+    }
+    collate_mode_nodes = {
+        qn_id for qn_id, interp in node_set_interp.items() if interp == "COLLATE"
+    }
+    # For ALL-mode nodes, collect the required IDs from the original query.
+    all_mode_requirements = {}
+    if all_mode_nodes and original_query_graph:
+        for qn_id in all_mode_nodes:
+            required = original_query_graph["nodes"][qn_id].get("ids", [])
+            all_mode_requirements[qn_id] = set(required)
+
     # Group paths by unique node binding combinations using numpy arrays.
     # Stores path *indices* (ints) instead of enriched dicts (~15 GB savings
     # for 5M paths).
+    # For ALL/COLLATE nodes, exclude them from the key so paths with
+    # different bindings for those nodes merge into the same group.
     node_binding_groups = defaultdict(list)
 
     for path_idx in range(num_paths):
@@ -419,6 +454,8 @@ def _build_response(
         for col in range(pa_num_node_cols):
             qnode_id = col_to_qnode[col]
             if qnode_id in superclass_qnodes:
+                continue
+            if qnode_id in all_mode_nodes or qnode_id in collate_mode_nodes:
                 continue
             node_idx = int(pa_nodes[path_idx, col])
             bound_id = node_id_cache[node_idx]
@@ -433,6 +470,28 @@ def _build_response(
             key_pairs.append((qnode_id, bound_id))
         node_key = tuple(sorted(key_pairs))
         node_binding_groups[node_key].append(path_idx)
+
+    # For ALL-mode nodes, filter groups to only those where all required
+    # IDs appear across the group's paths.
+    if all_mode_requirements:
+        filtered_groups = {}
+        for node_key, path_indices in node_binding_groups.items():
+            all_satisfied = True
+            for qn_id, required_ids in all_mode_requirements.items():
+                if qn_id not in qnode_to_col:
+                    all_satisfied = False
+                    break
+                col = qnode_to_col[qn_id]
+                found_ids = set()
+                for pidx in path_indices:
+                    nidx = int(pa_nodes[pidx, col])
+                    found_ids.add(node_id_cache[nidx])
+                if not required_ids.issubset(found_ids):
+                    all_satisfied = False
+                    break
+            if all_satisfied:
+                filtered_groups[node_key] = path_indices
+        node_binding_groups = filtered_groups
 
     t_grouped = time.perf_counter()
     logger.debug(
@@ -457,34 +516,64 @@ def _build_response(
             ],
         }
 
-        # Add node bindings -- skip superclass nodes, substitute IDs
+        # Add node bindings -- skip superclass nodes, substitute IDs.
+        # For ALL-mode nodes, emit all required IDs.
+        # For COLLATE-mode nodes, emit all distinct bound entities.
         for col in range(pa_num_node_cols):
             qnode_id = col_to_qnode[col]
             if qnode_id in superclass_qnodes:
                 continue
 
-            node_idx = int(pa_nodes[first_idx, col])
-            node = node_cache[node_idx]
-            node_id = node_id_cache[node_idx]
-            response["message"]["knowledge_graph"]["nodes"][node_id] = node
+            if qnode_id in all_mode_nodes:
+                # ALL: include all required IDs in this binding
+                bindings = []
+                for rid in sorted(all_mode_requirements[qnode_id]):
+                    rid_idx = graph.get_node_idx(rid)
+                    if rid_idx is not None and rid_idx in node_cache:
+                        response["message"]["knowledge_graph"]["nodes"][rid] = (
+                            node_cache[rid_idx]
+                        )
+                    bindings.append({"id": rid, "attributes": []})
+                result["node_bindings"][qnode_id] = bindings
+            elif qnode_id in collate_mode_nodes:
+                # COLLATE: collect all distinct bound entities across paths
+                seen_ids = {}
+                for pidx in path_indices:
+                    nidx = int(pa_nodes[pidx, col])
+                    nid = node_id_cache[nidx]
+                    if nid not in seen_ids:
+                        seen_ids[nid] = nidx
+                bindings = []
+                for nid, nidx in seen_ids.items():
+                    response["message"]["knowledge_graph"]["nodes"][nid] = node_cache[
+                        nidx
+                    ]
+                    bindings.append({"id": nid, "attributes": []})
+                result["node_bindings"][qnode_id] = bindings
+            else:
+                # BATCH (default): single binding from first path
+                node_idx = int(pa_nodes[first_idx, col])
+                node = node_cache[node_idx]
+                node_id = node_id_cache[node_idx]
+                response["message"]["knowledge_graph"]["nodes"][node_id] = node
 
-            bound_id = node_id
-            if qnode_id in qnode_to_superclass:
-                sc_qnode = qnode_to_superclass[qnode_id]
-                if sc_qnode in qnode_to_col:
-                    sc_col = qnode_to_col[sc_qnode]
-                    sc_node_idx = int(pa_nodes[first_idx, sc_col])
-                    sc_node = node_cache[sc_node_idx]
-                    sc_node_id = node_id_cache[sc_node_idx]
-                    if sc_node_id != node_id:
-                        bound_id = sc_node_id
-                        response["message"]["knowledge_graph"]["nodes"][
-                            sc_node_id
-                        ] = sc_node
+                bound_id = node_id
+                if qnode_id in qnode_to_superclass:
+                    sc_qnode = qnode_to_superclass[qnode_id]
+                    if sc_qnode in qnode_to_col:
+                        sc_col = qnode_to_col[sc_qnode]
+                        sc_node_idx = int(pa_nodes[first_idx, sc_col])
+                        sc_node = node_cache[sc_node_idx]
+                        sc_node_id = node_id_cache[sc_node_idx]
+                        if sc_node_id != node_id:
+                            bound_id = sc_node_id
+                            response["message"]["knowledge_graph"]["nodes"][
+                                sc_node_id
+                            ] = sc_node
 
-            result["node_bindings"][qnode_id] = [
-                {"id": bound_id, "attributes": []},
-            ]
+                result["node_bindings"][qnode_id] = [
+                    {"id": bound_id, "attributes": []},
+                ]
 
         # Aggregate edge bindings from all paths in group.
         # Edge dicts are created only for unique (subj, pred, obj,

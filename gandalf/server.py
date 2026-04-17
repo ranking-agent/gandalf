@@ -38,6 +38,7 @@ from gandalf.heartbeat import start_heartbeat
 
 _validate = settings.validate_responses
 from gandalf.openapi import construct_open_api_schema
+from gandalf.request_validation import validate_set_interpretation
 
 configure_logging(
     getattr(logging, settings.log_level, logging.INFO), fmt=settings.log_format
@@ -420,6 +421,7 @@ def sync_lookup(
         raise HTTPException(503, "Graph not loaded")
 
     raw = request.model_dump(exclude_none=True)
+    validate_set_interpretation(raw["message"]["query_graph"])
     log_level = raw.pop("log_level", None)
 
     # Query params take precedence, fall back to request body
@@ -503,6 +505,8 @@ def async_query(
 
     if (query.set_interpretation or "BATCH") == "MANY":
         raise HTTPException(422, "set_interpretation MANY not supported.")
+
+    validate_set_interpretation(raw["message"]["query_graph"])
 
     logger.info("Doing async lookup for %s", callback)
     background_tasks.add_task(_async_lookup, callback, raw)
