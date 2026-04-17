@@ -283,9 +283,7 @@ class TestAllMode:
                         "e1": {
                             "subject": "n1",
                             "object": "n2",
-                            "predicates": [
-                                "biolink:gene_associated_with_condition"
-                            ],
+                            "predicates": ["biolink:gene_associated_with_condition"],
                         },
                     },
                 }
@@ -406,9 +404,7 @@ class TestCollateMode:
                         "e1": {
                             "subject": "n1",
                             "object": "n2",
-                            "predicates": [
-                                "biolink:gene_associated_with_condition"
-                            ],
+                            "predicates": ["biolink:gene_associated_with_condition"],
                         },
                     },
                 }

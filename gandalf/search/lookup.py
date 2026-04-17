@@ -545,9 +545,9 @@ def _build_response(
                         seen_ids[nid] = nidx
                 bindings = []
                 for nid, nidx in seen_ids.items():
-                    response["message"]["knowledge_graph"]["nodes"][nid] = (
-                        node_cache[nidx]
-                    )
+                    response["message"]["knowledge_graph"]["nodes"][nid] = node_cache[
+                        nidx
+                    ]
                     bindings.append({"id": nid, "attributes": []})
                 result["node_bindings"][qnode_id] = bindings
             else:

@@ -327,7 +327,9 @@ class TestQNodeSetInterpretation:
         }
         q = TRAPIQuery(**data)
         raw = q.model_dump(exclude_none=True)
-        assert raw["message"]["query_graph"]["nodes"]["n0"]["set_interpretation"] == "ALL"
+        assert (
+            raw["message"]["query_graph"]["nodes"]["n0"]["set_interpretation"] == "ALL"
+        )
 
 
 # ---------------------------------------------------------------------------
