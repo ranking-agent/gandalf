@@ -129,14 +129,21 @@ def _infer_num_nodes(graph_dir: Path) -> int:
     return int(metadata["num_nodes"])
 
 
-def ingest_node_pub_counts(graph_dir: Path, input_path: Path) -> Path:
-    """Ingest per-node publication counts into ``<graph_dir>/node_pub_counts.npy``.
+def ingest_node_pub_counts_from_iter(
+    graph_dir: Path,
+    items: Iterator[Tuple[str, int]],
+    source: str = "<iterator>",
+) -> Path:
+    """Ingest per-node counts from an iterator of ``(node_id, count)`` tuples.
 
-    Returns the path to the written array.
+    Shares all fail-loud validation with the JSONL entry point.  The
+    derive-from-publications-index path calls this directly so it never
+    has to serialize a JSONL intermediate.
+
+    ``source`` appears in error messages and the manifest for provenance.
     """
     graph_dir = Path(graph_dir)
-    input_path = Path(input_path)
-    logger.info("Ingesting node pub counts from %s", input_path)
+    logger.info("Ingesting node pub counts from %s", source)
 
     num_nodes = _infer_num_nodes(graph_dir)
     counts = np.zeros(num_nodes, dtype=np.uint32)
@@ -144,23 +151,30 @@ def ingest_node_pub_counts(graph_dir: Path, input_path: Path) -> Path:
 
     node_store = NodeStore(graph_dir / "node_store.lmdb", readonly=True)
     try:
-        for lineno, obj in _iter_jsonl(input_path):
-            node_id = _require_key(obj, "node_id", input_path, lineno)
-            count = _validate_count(
-                _require_key(obj, "count", input_path, lineno), input_path, lineno
-            )
+        for pos, (node_id, count) in enumerate(items, start=1):
             if not isinstance(node_id, str):
                 raise PubCountIngestError(
-                    f"{input_path}:{lineno}: 'node_id' must be a string"
+                    f"{source}[{pos}]: 'node_id' must be a string, got "
+                    f"{type(node_id).__name__}"
+                )
+            if isinstance(count, bool) or not isinstance(count, int):
+                raise PubCountIngestError(
+                    f"{source}[{pos}]: 'count' must be an integer, got "
+                    f"{type(count).__name__}"
+                )
+            if count < 0 or count > _UINT32_MAX:
+                raise PubCountIngestError(
+                    f"{source}[{pos}]: 'count' {count} out of uint32 range "
+                    f"[0, {_UINT32_MAX}]"
                 )
             idx = node_store.get_node_idx(node_id)
             if idx is None:
                 raise PubCountIngestError(
-                    f"{input_path}:{lineno}: unknown node_id {node_id!r}"
+                    f"{source}[{pos}]: unknown node_id {node_id!r}"
                 )
             if filled[idx]:
                 raise PubCountIngestError(
-                    f"{input_path}:{lineno}: duplicate node_id {node_id!r}"
+                    f"{source}[{pos}]: duplicate node_id {node_id!r}"
                 )
             counts[idx] = count
             filled[idx] = True
@@ -170,7 +184,7 @@ def ingest_node_pub_counts(graph_dir: Path, input_path: Path) -> Path:
     missing = int(num_nodes - filled.sum())
     if missing:
         raise PubCountIngestError(
-            f"Input {input_path} does not cover every node: "
+            f"Input {source} does not cover every node: "
             f"{missing} of {num_nodes} nodes missing a pub count entry"
         )
 
@@ -184,7 +198,7 @@ def ingest_node_pub_counts(graph_dir: Path, input_path: Path) -> Path:
             "file": out_path.name,
             "dtype": "uint32",
             "shape": [num_nodes],
-            "source": str(input_path),
+            "source": source,
             "total": int(counts.sum()),
             "max": int(counts.max(initial=0)),
             "nonzero": int((counts > 0).sum()),
@@ -199,6 +213,31 @@ def ingest_node_pub_counts(graph_dir: Path, input_path: Path) -> Path:
         int(counts.max(initial=0)),
     )
     return out_path
+
+
+def ingest_node_pub_counts(graph_dir: Path, input_path: Path) -> Path:
+    """Ingest per-node publication counts from a JSONL file.
+
+    Returns the path to the written array.  See module docstring for the
+    input contract.
+    """
+    input_path = Path(input_path)
+
+    def _jsonl_items() -> Iterator[Tuple[str, int]]:
+        for lineno, obj in _iter_jsonl(input_path):
+            node_id = _require_key(obj, "node_id", input_path, lineno)
+            count = _validate_count(
+                _require_key(obj, "count", input_path, lineno), input_path, lineno
+            )
+            if not isinstance(node_id, str):
+                raise PubCountIngestError(
+                    f"{input_path}:{lineno}: 'node_id' must be a string"
+                )
+            yield node_id, count
+
+    return ingest_node_pub_counts_from_iter(
+        graph_dir, _jsonl_items(), source=str(input_path)
+    )
 
 
 def ingest_edge_pub_counts(graph_dir: Path, input_path: Path) -> Path:
