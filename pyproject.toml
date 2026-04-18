@@ -48,6 +48,7 @@ gandalf-diagnose = "scripts.diagnose:main"
 gandalf-ingest-pub-counts = "scripts.ingest_pub_counts:main"
 gandalf-build-publications-index = "scripts.build_publications_index:main"
 gandalf-build-pub-counts = "scripts.build_pub_counts:main"
+gandalf-build-pair-intersections = "scripts.build_pair_intersections:main"
 
 [tool.mypy]
 warn_return_any = true

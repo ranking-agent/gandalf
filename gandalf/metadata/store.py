@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # loader agree on the key.
 FIELD_NODE_PUB_COUNTS = "node_pub_counts"
 FIELD_EDGE_PUB_COUNTS = "edge_pub_counts"
+FIELD_PAIR_INTERSECTIONS = "pair_intersections"
 
 
 def _mmap_npy(path: Path) -> np.ndarray:
@@ -97,3 +98,25 @@ class ScoringMetadata:
     def edge_pub_counts(self) -> Optional[np.ndarray]:
         """Per-edge publication counts as uint32[E], or None if not ingested."""
         return self._load_array_field(FIELD_EDGE_PUB_COUNTS)
+
+    @property
+    def pair_intersections(self):
+        """Sparse CSR store of shared-publication counts between node pairs.
+
+        Returns a ``PairIntersections`` instance, or ``None`` if not ingested.
+        Use ``.count(a, b)`` for a single lookup or ``.neighbors(a)`` for
+        all pairs stored under ``a``.
+        """
+        cached = self._cache.get(FIELD_PAIR_INTERSECTIONS)
+        if cached is not None:
+            return cached
+        if not self._manifest.has_field(FIELD_PAIR_INTERSECTIONS):
+            return None
+        # Imported here to avoid a top-level dependency cycle: the pair
+        # intersections module depends on ``manifest``, which this module
+        # already imports.
+        from gandalf.metadata.pair_intersections import PairIntersections
+
+        store = PairIntersections(self._graph_dir)
+        self._cache[FIELD_PAIR_INTERSECTIONS] = store
+        return store

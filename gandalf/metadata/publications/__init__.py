@@ -11,8 +11,11 @@ from the index and don't care which source produced it.
 """
 
 from gandalf.metadata.publications.derive import (
+    accumulate_pair_counts,
+    build_curie_to_node_idx,
     collect_tracked_curies,
     derive_and_ingest_node_pub_counts,
+    derive_and_ingest_pair_intersections,
     iter_node_equivalents,
     iter_node_pub_counts,
 )
@@ -21,8 +24,11 @@ from gandalf.metadata.publications.pubtator import iter_pubtator_annotations
 
 __all__ = [
     "PublicationsIndex",
+    "accumulate_pair_counts",
+    "build_curie_to_node_idx",
     "collect_tracked_curies",
     "derive_and_ingest_node_pub_counts",
+    "derive_and_ingest_pair_intersections",
     "iter_node_equivalents",
     "iter_node_pub_counts",
     "iter_pubtator_annotations",

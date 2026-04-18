@@ -14,11 +14,19 @@ from gandalf.metadata.manifest import (
     load_manifest,
     save_manifest,
 )
+from gandalf.metadata.pair_intersections import (
+    InMemoryPairCountAccumulator,
+    PairCountAccumulator,
+    PairIntersections,
+)
 from gandalf.metadata.store import ScoringMetadata
 
 __all__ = [
     "MANIFEST_FILENAME",
+    "InMemoryPairCountAccumulator",
     "Manifest",
+    "PairCountAccumulator",
+    "PairIntersections",
     "ScoringMetadata",
     "load_manifest",
     "save_manifest",
