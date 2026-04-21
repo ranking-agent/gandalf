@@ -20,6 +20,48 @@ from gandalf.search.query_edge import query_edge, query_subclass_edge
 from gandalf.search.reconstruct import reconstruct_paths
 
 
+def execute_with_trapi_logging(run_lookup, *, log_level=None):
+    """Run a lookup implementation with Gandalf's standard logging/GC wrapper."""
+    t_start = time.perf_counter()
+    log_collector = TRAPILogCollector()
+    gandalf_logger = logging.getLogger("gandalf")
+    prev_level = gandalf_logger.level
+    if log_level is not None:
+        gandalf_logger.setLevel(log_level)
+    gandalf_logger.addHandler(log_collector)
+
+    gc_monitor = GCMonitor()
+    gc_monitor.start()
+
+    gc_was_enabled_at_start = gc.isenabled()
+    gc.disable()
+
+    try:
+        response = run_lookup(t_start=t_start, gc_monitor=gc_monitor)
+        response["logs"] = log_collector.get_logs()
+        return response
+    finally:
+        gandalf_logger.removeHandler(log_collector)
+        gandalf_logger.setLevel(prev_level)
+        gc_monitor.stop()
+        if gc_was_enabled_at_start:
+            gc.enable()
+
+
+def prepare_query_graph(query: dict, *, subclass=True, subclass_depth=1):
+    """Return the original and execution query graphs using Gandalf rewrite rules."""
+    original_query_graph = query["message"]["query_graph"]
+    query_graph = copy.deepcopy(original_query_graph)
+
+    if subclass and query_graph["edges"]:
+        logger.debug(
+            "Rewriting query graph for subclass expansion (depth=%s)", subclass_depth
+        )
+        rewrite_query_graph_for_subclass(query_graph, subclass_depth=subclass_depth)
+
+    return original_query_graph, query_graph
+
+
 def lookup(
     graph,
     query: dict,
@@ -55,31 +97,8 @@ def lookup(
         TRAPI response dict with message containing results, knowledge_graph,
         and a ``logs`` list of TRAPI LogEntry dicts.
     """
-    t_start = time.perf_counter()
-
-    # Collect TRAPI-spec log entries during query execution.
-    # Temporarily adjust the logger level if requested so that the collector
-    # captures entries at the desired verbosity.
-    log_collector = TRAPILogCollector()
-    gandalf_logger = logging.getLogger("gandalf")
-    prev_level = gandalf_logger.level
-    if log_level is not None:
-        gandalf_logger.setLevel(log_level)
-    gandalf_logger.addHandler(log_collector)
-
-    # Start GC monitoring to track collection events
-    gc_monitor = GCMonitor()
-    gc_monitor.start()
-
-    # Disable GC for the entire query to prevent expensive Gen 2 collections
-    # during traversal.  The graph's long-lived numpy/CSR arrays cause Gen 2
-    # scans to take 1-3s each while collecting 0 objects.  We re-enable and
-    # run a single collection at the end of the query.
-    gc_was_enabled_at_start = gc.isenabled()
-    gc.disable()
-
-    try:
-        response = _lookup_inner(
+    return execute_with_trapi_logging(
+        lambda *, t_start, gc_monitor: _lookup_inner(
             graph,
             query,
             bmt,
@@ -90,15 +109,9 @@ def lookup(
             max_node_degree=max_node_degree,
             min_information_content=min_information_content,
             dehydrated=dehydrated,
-        )
-        response["logs"] = log_collector.get_logs()
-        return response
-    finally:
-        gandalf_logger.removeHandler(log_collector)
-        gandalf_logger.setLevel(prev_level)
-        gc_monitor.stop()
-        if gc_was_enabled_at_start:
-            gc.enable()
+        ),
+        log_level=log_level,
+    )
 
 
 def _lookup_inner(
@@ -128,18 +141,12 @@ def _lookup_inner(
     # Create qualifier expander for handling qualifier value hierarchy at query time
     qualifier_expander = QualifierExpander(bmt)
 
-    original_query_graph = query["message"]["query_graph"]
-    query_graph = copy.deepcopy(original_query_graph)
+    original_query_graph, query_graph = prepare_query_graph(
+        query,
+        subclass=subclass,
+        subclass_depth=subclass_depth,
+    )
     subqgraph = copy.deepcopy(query_graph)
-
-    # Rewrite query graph for subclass expansion if requested
-    if subclass and subqgraph["edges"]:
-        logger.debug(
-            "Rewriting query graph for subclass expansion (depth=%s)", subclass_depth
-        )
-        _rewrite_for_subclass(subqgraph, subclass_depth=subclass_depth)
-        # Use the rewritten graph as the query graph for the rest of the pipeline
-        query_graph = copy.deepcopy(subqgraph)
 
     # Store results for each edge query
     # edge_id -> list of (subject_idx, predicate, object_idx) tuples
@@ -294,14 +301,41 @@ def _lookup_inner(
 
         logger.debug("  Remaining edges: %s", len(subqgraph["edges"]))
 
-    # Reconstruct complete paths from edge results
+    return build_response_from_edge_results(
+        graph,
+        original_query_graph,
+        query_graph,
+        edge_results,
+        edge_order=original_edges,
+        edge_inverse_preds=edge_inverse_preds,
+        t_start=t_start,
+        gc_monitor=gc_monitor,
+        dehydrated=dehydrated,
+        bmt=bmt,
+    )
+
+
+def build_response_from_edge_results(
+    graph,
+    original_query_graph,
+    query_graph,
+    edge_results,
+    *,
+    edge_order,
+    edge_inverse_preds=None,
+    t_start,
+    gc_monitor,
+    dehydrated=None,
+    bmt=None,
+):
+    """Run Gandalf's shared path reconstruction and TRAPI response assembly."""
     logger.debug("Reconstructing complete paths...")
 
     path_data = reconstruct_paths(
         graph,
         query_graph,
         edge_results,
-        original_edges,
+        edge_order,
         edge_inverse_preds=edge_inverse_preds,
         dehydrated=dehydrated,
         bmt=bmt,
@@ -731,7 +765,7 @@ def _build_response(
     logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
 
 
-def _rewrite_for_subclass(query_graph, subclass_depth=1):
+def rewrite_query_graph_for_subclass(query_graph, subclass_depth=1):
     """Rewrite query graph to add subclass expansion for pinned nodes.
 
     For each pinned node (one with ``ids``), creates a synthetic superclass
@@ -783,3 +817,6 @@ def _rewrite_for_subclass(query_graph, subclass_depth=1):
             "_subclass": True,
             "_subclass_depth": subclass_depth,
         }
+
+
+_rewrite_for_subclass = rewrite_query_graph_for_subclass

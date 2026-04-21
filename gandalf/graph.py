@@ -1433,3 +1433,17 @@ class CSRGraph:
         graph.build_metadata()
 
         return graph
+
+    def close(self):
+        """Close open LMDB-backed resources."""
+        if getattr(self, "lmdb_store", None) is not None:
+            self.lmdb_store.close()
+            self.lmdb_store = None
+
+        if getattr(self, "node_store", None) is not None:
+            self.node_store.close()
+            self.node_store = None
+
+        if getattr(self, "_edge_ids_env", None) is not None:
+            self._edge_ids_env.close()
+            self._edge_ids_env = None

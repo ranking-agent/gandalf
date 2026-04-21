@@ -21,7 +21,8 @@ from fastapi.openapi.docs import (
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from gandalf import CSRGraph, lookup
+from gandalf.backends.base import Backend
+from gandalf.backends.load_backend import load_backend
 from gandalf.logging_config import configure_logging, request_id_var
 from gandalf.models import (
     AsyncTRAPIQuery,
@@ -99,41 +100,32 @@ _rate_limiter = _TokenBucket(settings.rate_limit) if settings.rate_limit > 0 els
 # ---------------------------------------------------------------------------
 
 
-def load_graph(path: str, format: str = "auto") -> CSRGraph:
-    """Load graph from disk.
+def load_graph(path: str, format: str) -> Backend:
+    """Load the configured backend runtime from disk.
 
     Args:
-        path: Path to graph directory (mmap format)
-        format: "auto" (detect from path) or "mmap"
+        path: Path to backend artifact directory
+        format: "csr" or "qlever"
 
     Returns:
-        Loaded CSRGraph
+        Loaded backend runtime
     """
-    resolved_path = Path(path)
-
-    if format == "auto":
-        if resolved_path.is_dir():
-            format = "mmap"
-        else:
-            raise ValueError(
-                f"Cannot auto-detect format for: {resolved_path}. Expected a directory."
-            )
-
-    if format == "mmap":
-        graph: CSRGraph = CSRGraph.load_mmap(resolved_path)
-        return graph
-    else:
-        raise ValueError(f"Unknown format: {format}")
+    return load_backend(
+        path,
+        format,
+        qlever_host=settings.qlever_host,
+        qlever_port=settings.qlever_port,
+        qlever_access_token=settings.qlever_access_token or None,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Module-level graph loading (runs once in master with gunicorn --preload,
-# so every forked worker shares graph RAM via Copy-on-Write).
+# Module-level backend loading (runs once in master with gunicorn --preload).
 # ---------------------------------------------------------------------------
 
 _SKIP_PRELOAD = settings.skip_preload
 
-GRAPH: Optional[CSRGraph] = None
+GRAPH: Optional[Backend] = None
 BMT: Optional[Toolkit] = None
 
 if not _SKIP_PRELOAD:
@@ -146,15 +138,13 @@ if not _SKIP_PRELOAD:
     logger.info("Initializing Biolink Model Toolkit...")
     BMT = Toolkit()
 
-    # Freeze all objects allocated so far (graph + BMT) into a permanent
+    # Freeze all objects allocated so far (backend + BMT) into a permanent
     # generation that the cyclic GC will never scan.  This makes Gen 2
-    # collections cheap because they skip the large CSR arrays.
+    # collections cheap because they skip the long-lived backend objects.
     gc.collect()
     gc.freeze()
-    # Raise thresholds so Gen 2 collections are less frequent even for
-    # the (now-small) unfrozen query-time object set.
     gc.set_threshold(50_000, 50, 50)
-    logger.info("Graph and BMT loaded at module level (PID=%d).", os.getpid())
+    logger.info("Backend and BMT loaded at module level (PID=%d).", os.getpid())
 
 
 # ---------------------------------------------------------------------------
@@ -173,12 +163,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down — releasing resources...")
     if heartbeat_stop is not None:
         heartbeat_stop.set()
-    if (
-        GRAPH is not None
-        and hasattr(GRAPH, "lmdb_store")
-        and GRAPH.lmdb_store is not None
-    ):
-        GRAPH.lmdb_store.close()
+    if GRAPH is not None and hasattr(GRAPH, "close"):
+        GRAPH.close()
     logger.info("Shutdown complete.")
 
 
@@ -240,7 +226,8 @@ if settings.otel_enabled:
         excluded_urls="docs,openapi.json",
     )
     logger.info(
-        "OpenTelemetry tracing enabled (service=%s).", settings.otel_service_name
+        "OpenTelemetry tracing enabled (service=%s).",
+        settings.otel_service_name,
     )
 
 
@@ -417,8 +404,7 @@ def sync_lookup(
     subclass_depth = raw.get("subclass_depth", 1)
     dehydrated_param = dehydrated if dehydrated is not None else raw.get("dehydrated")
 
-    return lookup(
-        GRAPH,
+    return GRAPH.lookup(
         raw,
         bmt=BMT,
         subclass=sc,
@@ -439,8 +425,7 @@ def _async_lookup(callback_url: str, query: dict):
     subclass_depth = query.get("subclass_depth", 1)
     log_level = query.pop("log_level", None)
     dehydrated = query.get("dehydrated")
-    response = lookup(
-        GRAPH,
+    response = GRAPH.lookup(
         query,
         bmt=BMT,
         subclass=subclass,

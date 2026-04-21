@@ -164,8 +164,8 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GANDALF_GRAPH_PATH` | `/data/graph` | Path to the mmap graph directory |
-| `GANDALF_GRAPH_FORMAT` | `auto` | Graph format (`auto` or `mmap`) |
+| `GANDALF_GRAPH_PATH` | `/data/graph` | Path to the backend artifact directory |
+| `GANDALF_GRAPH_FORMAT` | `csr` | Backend to load (`csr` or `qlever`) |
 | `GANDALF_LOAD_MMAPS_INTO_MEMORY` | `false` | Load memory-mapped arrays fully into RAM |
 | `GANDALF_LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `GANDALF_LOG_FORMAT` | `text` | Log format (`text` for human-readable, `json` for structured) |
