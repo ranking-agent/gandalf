@@ -95,6 +95,7 @@ class MockBMT:
         "GeneOrGeneProductOrChemicalEntityAspectEnum": {
             "activity",
             "abundance",
+            "activity_or_abundance",
             "expression",
             "synthesis",
             "degradation",
@@ -116,6 +117,12 @@ class MockBMT:
             "upregulated",
             "downregulated",
         },
+    }
+    _ENUM_DESCENDANTS = {
+        ("GeneOrGeneProductOrChemicalEntityAspectEnum", "activity_or_abundance"): [
+            "activity",
+            "abundance",
+        ],
     }
 
     def __init__(self):
@@ -148,8 +155,7 @@ class MockBMT:
     def get_permissible_value_descendants(
         self, permissible_value: str, enum_name: str
     ) -> list[str]:
-        # None of the qualifier values used in tests have children.
-        return []
+        return list(self._ENUM_DESCENDANTS.get((enum_name, permissible_value), []))
 
 
 @pytest.fixture(scope="session")

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,8 +9,11 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------------------------
 
     graph_path: str = "/data/graph"
-    graph_format: str = "auto"  # "auto" or "mmap"
+    graph_format: Literal["csr", "qlever"] = "csr"
     load_mmaps_into_memory: bool = False
+    qlever_host: str = "localhost"
+    qlever_port: int = 8888
+    qlever_access_token: str = ""
     log_level: str = "INFO"
     log_format: str = "text"  # "text" or "json"
     cors_origins: str = "*"
