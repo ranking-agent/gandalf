@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 from collections import defaultdict
+from typing import Optional
 
 from bmt.toolkit import Toolkit
 
@@ -16,6 +17,7 @@ from gandalf.logging_config import TRAPILogCollector
 from gandalf.query_planner import get_next_qedge, remove_orphaned
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
 from gandalf.search.gc_utils import GCMonitor
+from gandalf.search.node_filters import build_node_filters
 from gandalf.search.query_edge import query_edge, query_subclass_edge
 from gandalf.search.reconstruct import reconstruct_paths
 
@@ -26,8 +28,7 @@ def lookup(
     bmt=None,
     subclass=True,
     subclass_depth=1,
-    max_node_degree=None,
-    min_information_content=None,
+    filter_config: Optional[dict] = None,
     log_level=None,
     dehydrated=None,
 ):
@@ -39,10 +40,10 @@ def lookup(
         bmt: Biolink Model Toolkit instance (optional, will create if not provided)
         subclass: If True, expand pinned nodes to include subclass descendants
         subclass_depth: Maximum number of subclass_of hops to traverse (default 1)
-        max_node_degree: If set, filter out nodes with total degree (in + out)
-            exceeding this value during path traversal.
-        min_information_content: If set, filter out nodes whose
-            information_content attribute is below this value.
+        filter_config: Optional dict of plugin-defined node filter settings
+            (e.g. ``{"max_node_degree": 50, "min_information_content": 0.8}``).
+            Each registered NodeFilter plugin reads its own key. Unknown keys
+            are ignored.
         log_level: If set, temporarily adjust the gandalf logger to this level
             (e.g. ``"DEBUG"``) for the duration of the query.
         dehydrated: If True, force a dehydrated (lightweight) response that
@@ -78,6 +79,8 @@ def lookup(
     gc_was_enabled_at_start = gc.isenabled()
     gc.disable()
 
+    node_filters = build_node_filters(filter_config or {})
+
     try:
         response = _lookup_inner(
             graph,
@@ -87,8 +90,7 @@ def lookup(
             subclass_depth,
             t_start,
             gc_monitor,
-            max_node_degree=max_node_degree,
-            min_information_content=min_information_content,
+            node_filters=node_filters,
             dehydrated=dehydrated,
         )
         response["logs"] = log_collector.get_logs()
@@ -109,8 +111,7 @@ def _lookup_inner(
     subclass_depth,
     t_start,
     gc_monitor,
-    max_node_degree=None,
-    min_information_content=None,
+    node_filters=None,
     dehydrated=None,
 ):
     """Inner implementation of lookup with all the core logic."""
@@ -247,8 +248,7 @@ def _lookup_inner(
                 allowed_predicates,
                 qualifier_constraints,
                 inverse_predicates=inverse_predicates,
-                max_node_degree=max_node_degree,
-                min_information_content=min_information_content,
+                node_filters=node_filters,
                 attribute_constraints=edge_attribute_constraints,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,

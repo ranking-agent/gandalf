@@ -4,6 +4,7 @@ Gandalf - Fast 3-hop path finding in large knowledge graphs
 
 __version__ = "0.1.0"
 
+from gandalf import plugins  # noqa: F401  registers built-in node filters & enrichers
 from gandalf.enrichment import enrich_knowledge_graph
 from gandalf.diagnostics import (
     analyze_node_types,

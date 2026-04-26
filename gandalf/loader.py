@@ -468,4 +468,9 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
 
     graph.build_metadata()
 
+    # Run plugin enrichers so traversal_metadata is populated before any
+    # query is executed against this graph.
+    from gandalf.plugins.enrichers import run_enrichers
+    run_enrichers(graph)
+
     return graph

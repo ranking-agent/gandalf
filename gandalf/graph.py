@@ -276,6 +276,13 @@ class CSRGraph:
         self.idx_to_node_id = {idx: nid for nid, idx in node_id_to_idx.items()}
         self.node_properties = node_properties or {}
 
+        # Plugin-owned per-node metadata used only for path-traversal
+        # filtering. Each enricher writes a single key here. Read by
+        # NodeFilter closures during query traversal. **Never** read by
+        # enrichment / response-building code: this dict is invisible to
+        # TRAPI clients.
+        self.traversal_metadata: dict = {}
+
         # Predicate vocabulary
         self.predicate_to_idx = predicate_to_idx
         self.id_to_predicate = {idx: pred for pred, idx in predicate_to_idx.items()}
@@ -1266,6 +1273,7 @@ class CSRGraph:
         t0 = time.perf_counter()
 
         graph = CSRGraph.__new__(CSRGraph)
+        graph.traversal_metadata = {}
 
         # Load NumPy arrays (memory-mapped or copied into RAM)
         graph.fwd_targets = _load_npy(
@@ -1431,5 +1439,10 @@ class CSRGraph:
             graph.graph_metadata = None
 
         graph.build_metadata()
+
+        # Run plugin enrichers so traversal_metadata is populated before any
+        # query is executed against this graph.
+        from gandalf.plugins.enrichers import run_enrichers
+        run_enrichers(graph)
 
         return graph
