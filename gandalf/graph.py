@@ -1236,6 +1236,14 @@ class CSRGraph:
                     shutil.rmtree(lmdb_dst)
                 shutil.copytree(lmdb_src, lmdb_dst)
 
+        # Persist plugin-owned traversal metadata so it does not have to be
+        # recomputed on every load. Plugin values can be numpy arrays, dicts,
+        # or arbitrary picklable objects.
+        traversal_metadata = getattr(self, "traversal_metadata", {}) or {}
+        if traversal_metadata:
+            with open(directory / "traversal_metadata.pkl", "wb") as f:
+                pickle.dump(traversal_metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
+
         t1 = time.perf_counter()
         logger.info("Graph saved in %.2fs", t1 - t0)
 
@@ -1273,7 +1281,21 @@ class CSRGraph:
         t0 = time.perf_counter()
 
         graph = CSRGraph.__new__(CSRGraph)
-        graph.traversal_metadata = {}
+
+        # Restore plugin-owned traversal metadata if persisted at save time.
+        # Missing keys (legacy graphs or newly-registered plugins) are filled
+        # in by ``run_enrichers`` below.
+        traversal_metadata_path = directory / "traversal_metadata.pkl"
+        if traversal_metadata_path.exists():
+            with open(traversal_metadata_path, "rb") as f:
+                graph.traversal_metadata = pickle.load(f)
+            logger.info(
+                "  Loaded traversal metadata (%s keys) from %s",
+                len(graph.traversal_metadata),
+                traversal_metadata_path.name,
+            )
+        else:
+            graph.traversal_metadata = {}
 
         # Load NumPy arrays (memory-mapped or copied into RAM)
         graph.fwd_targets = _load_npy(

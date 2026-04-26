@@ -44,6 +44,31 @@ def test_run_enrichers_invokes_in_registration_order(isolated_enricher_registry)
     assert calls == ["first", "second"]
 
 
+def test_run_enrichers_skips_keys_already_in_metadata(isolated_enricher_registry):
+    """Already-populated keys (e.g. loaded from disk) must not be recomputed."""
+    calls = []
+
+    def _record(name):
+        def _enrich(g):
+            calls.append(name)
+            g.traversal_metadata[name] = "computed"
+
+        return _enrich
+
+    enr.register_node_enricher("alpha", _record("alpha"))
+    enr.register_node_enricher("beta", _record("beta"))
+
+    # Simulate "alpha" already loaded from disk.
+    fake_graph = SimpleNamespace(traversal_metadata={"alpha": "from_disk"})
+    enr.run_enrichers(fake_graph)
+
+    assert calls == ["beta"]
+    assert fake_graph.traversal_metadata == {
+        "alpha": "from_disk",
+        "beta": "computed",
+    }
+
+
 def test_enricher_writes_to_traversal_metadata_without_touching_attributes(
     isolated_enricher_registry,
 ):
