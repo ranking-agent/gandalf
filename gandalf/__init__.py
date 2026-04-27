@@ -5,6 +5,7 @@ Gandalf - Fast 3-hop path finding in large knowledge graphs
 __version__ = "0.1.0"
 
 from gandalf import plugins  # noqa: F401  registers built-in node filters & enrichers
+from gandalf.annotate import annotate_response
 from gandalf.enrichment import enrich_knowledge_graph
 from gandalf.diagnostics import (
     analyze_node_types,
@@ -42,6 +43,8 @@ __all__ = [
     "LMDBPropertyStore",
     # Enrichment
     "enrich_knowledge_graph",
+    # Annotation
+    "annotate_response",
     # Loading
     "build_graph_from_jsonl",
     # Search

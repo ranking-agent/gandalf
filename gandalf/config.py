@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     large_result_threshold: int = 50000
     max_path_limit: int = 0
 
+    # Default service URL for the literature_cooccurrence annotator plugin.
+    # Empty disables the plugin unless a request supplies its own service_url.
+    cooccurrence_service_url: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="gandalf_",

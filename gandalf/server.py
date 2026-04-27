@@ -21,7 +21,7 @@ from fastapi.openapi.docs import (
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from gandalf import CSRGraph, lookup
+from gandalf import CSRGraph, annotate_response, lookup
 from gandalf.logging_config import configure_logging, request_id_var
 from gandalf.models import (
     AsyncTRAPIQuery,
@@ -428,8 +428,9 @@ def sync_lookup(
     sc = subclass if subclass is not None else raw.get("subclass", True)
     subclass_depth = raw.get("subclass_depth", 1)
     dehydrated_param = dehydrated if dehydrated is not None else raw.get("dehydrated")
+    annotator_config = raw.get("gandalf_annotators") or {}
 
-    return lookup(
+    response = lookup(
         GRAPH,
         raw,
         bmt=BMT,
@@ -438,6 +439,9 @@ def sync_lookup(
         log_level=log_level,
         dehydrated=dehydrated_param,
     )
+    if annotator_config:
+        annotate_response(response, GRAPH, annotator_config)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +455,7 @@ def _async_lookup(callback_url: str, query: dict):
     subclass_depth = query.get("subclass_depth", 1)
     log_level = query.pop("log_level", None)
     dehydrated = query.get("dehydrated")
+    annotator_config = query.get("gandalf_annotators") or {}
     response = lookup(
         GRAPH,
         query,
@@ -460,6 +465,8 @@ def _async_lookup(callback_url: str, query: dict):
         log_level=log_level,
         dehydrated=dehydrated,
     )
+    if annotator_config:
+        annotate_response(response, GRAPH, annotator_config)
 
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout=600.0)) as client:
