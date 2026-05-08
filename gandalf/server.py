@@ -252,6 +252,18 @@ if settings.otel_enabled:
 # ---------------------------------------------------------------------------
 
 
+def _current_rss_kb() -> int:
+    """Current resident set size in KB, read from /proc/self/status (Linux)."""
+    try:
+        with open("/proc/self/status", "rb") as f:
+            for line in f:
+                if line.startswith(b"VmRSS:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return -1
+
+
 @APP.middleware("http")
 async def request_middleware(request: Request, call_next):
     """Add request ID, enforce size limits, rate limiting, and access logging."""
@@ -283,13 +295,30 @@ async def request_middleware(request: Request, call_next):
                 headers={"Retry-After": "60"},
             )
 
+    pid = os.getpid()
+    rss_start_kb = _current_rss_kb()
+    logger.info(
+        "request start pid=%s rss_kb=%s %s %s",
+        pid,
+        rss_start_kb,
+        request.method,
+        request.url.path,
+    )
+
     t_start = time.monotonic()
     response: Response = await call_next(request)
     duration_ms = (time.monotonic() - t_start) * 1000
+    rss_end_kb = _current_rss_kb()
+    rss_delta_kb = (
+        rss_end_kb - rss_start_kb if rss_start_kb >= 0 and rss_end_kb >= 0 else -1
+    )
 
     response.headers["X-Request-ID"] = req_id
     logger.info(
-        "%s %s %s %.1fms",
+        "request end pid=%s rss_kb=%s rss_delta_kb=%s %s %s %s %.1fms",
+        pid,
+        rss_end_kb,
+        rss_delta_kb,
         request.method,
         request.url.path,
         response.status_code,
