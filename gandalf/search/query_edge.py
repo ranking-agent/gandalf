@@ -5,37 +5,10 @@ import time
 from typing import Optional
 
 from gandalf.search.attribute_constraints import matches_attribute_constraints
+from gandalf.search.node_filters import NodeFilter, apply_node_filters
 from gandalf.search.qualifiers import edge_matches_qualifier_constraints
 
 logger = logging.getLogger(__name__)
-
-
-def _get_information_content(graph, node_idx):
-    """Extract the information_content value from a node's attributes."""
-    attrs = graph.get_node_property(node_idx, "attributes", [])
-    for attr in attrs:
-        if attr.get("original_attribute_name") == "information_content":
-            return attr.get("value")
-    return None
-
-
-def _node_total_degree(graph, node_idx):
-    """Compute total degree (outgoing + incoming) for a node."""
-    out_deg = int(graph.fwd_offsets[node_idx + 1] - graph.fwd_offsets[node_idx])
-    in_deg = int(graph.rev_offsets[node_idx + 1] - graph.rev_offsets[node_idx])
-    return out_deg + in_deg
-
-
-def _passes_node_filters(graph, node_idx, max_node_degree, min_information_content):
-    """Check if a node passes degree and information content filters."""
-    if max_node_degree is not None:
-        if _node_total_degree(graph, node_idx) > max_node_degree:
-            return False
-    if min_information_content is not None:
-        ic = _get_information_content(graph, node_idx)
-        if ic is None or ic < min_information_content:
-            return False
-    return True
 
 
 def query_subclass_edge(graph, start_idxes, end_idxes, depth):
@@ -115,8 +88,7 @@ def query_edge(
     allowed_predicates,
     qualifier_constraints,
     inverse_predicates: Optional[list[str]] = None,
-    max_node_degree: Optional[int] = None,
-    min_information_content: Optional[float] = None,
+    node_filters: Optional[list[NodeFilter]] = None,
     attribute_constraints: Optional[list] = None,
     start_node_constraints: Optional[list] = None,
     end_node_constraints: Optional[list] = None,
@@ -138,10 +110,8 @@ def query_edge(
         inverse_predicates: List of inverse predicate strings for reverse direction
             matching. None means don't check inverse direction. Empty list means
             match all predicates in inverse direction (wildcard).
-        max_node_degree: If set, filter out nodes with total degree (in + out)
-            exceeding this value during traversal.
-        min_information_content: If set, filter out nodes whose
-            information_content attribute is below this value.
+        node_filters: Pre-built list of NodeFilter closures (from
+            ``build_node_filters``). Empty list / None means no filtering.
         attribute_constraints: List of TRAPI AttributeConstraint dicts for
             filtering edges by their attributes. All must be satisfied (AND).
         start_node_constraints: List of TRAPI AttributeConstraint dicts for
@@ -154,6 +124,8 @@ def query_edge(
         via_inverse indicates if the edge was found through inverse/symmetric lookup and
         fwd_edge_idx is the forward-CSR array position (unique per physical edge).
     """
+    if node_filters is None:
+        node_filters = []
     matches = []
     seen_edges = set()  # Track (subj, pred, obj, fwd_edge_idx) to avoid duplicates
 
@@ -190,8 +162,7 @@ def query_edge(
             check_inverse,
             inverse_pred_set,
             add_match,
-            max_node_degree=max_node_degree,
-            min_information_content=min_information_content,
+            node_filters=node_filters,
             attribute_constraints=attribute_constraints,
             start_node_constraints=start_node_constraints,
             end_node_constraints=end_node_constraints,
@@ -208,8 +179,7 @@ def query_edge(
             check_inverse,
             inverse_pred_set,
             add_match,
-            max_node_degree=max_node_degree,
-            min_information_content=min_information_content,
+            node_filters=node_filters,
             attribute_constraints=attribute_constraints,
             start_node_constraints=start_node_constraints,
             end_node_constraints=end_node_constraints,
@@ -226,8 +196,7 @@ def query_edge(
             check_inverse,
             inverse_pred_set,
             add_match,
-            max_node_degree=max_node_degree,
-            min_information_content=min_information_content,
+            node_filters=node_filters,
             attribute_constraints=attribute_constraints,
             start_node_constraints=start_node_constraints,
             end_node_constraints=end_node_constraints,
@@ -248,8 +217,7 @@ def _query_forward(
     check_inverse,
     inverse_pred_set,
     add_match,
-    max_node_degree=None,
-    min_information_content=None,
+    node_filters=None,
     attribute_constraints=None,
     start_node_constraints=None,
     end_node_constraints=None,
@@ -287,10 +255,8 @@ def _query_forward(
                 if not any(cat in obj_cats for cat in end_categories):
                     continue
 
-            # Check node filters (degree and information content)
-            if not _passes_node_filters(
-                graph, obj_idx, max_node_degree, min_information_content
-            ):
+            # Check node filters (plugin-defined: degree, IC, etc.)
+            if not apply_node_filters(node_filters, graph, obj_idx):
                 continue
 
             # Check end node attribute constraints
@@ -337,10 +303,8 @@ def _query_forward(
                     if not any(cat in obj_cats for cat in end_categories):
                         continue
 
-                # Check node filters (degree and information content)
-                if not _passes_node_filters(
-                    graph, other_idx, max_node_degree, min_information_content
-                ):
+                # Check node filters (plugin-defined: degree, IC, etc.)
+                if not apply_node_filters(node_filters, graph, other_idx):
                     continue
 
                 # Check end node attribute constraints (other_idx is the "object" via inverse)
@@ -400,8 +364,7 @@ def _query_backward(
     check_inverse,
     inverse_pred_set,
     add_match,
-    max_node_degree=None,
-    min_information_content=None,
+    node_filters=None,
     attribute_constraints=None,
     start_node_constraints=None,
     end_node_constraints=None,
@@ -442,10 +405,8 @@ def _query_backward(
                 if not any(cat in subj_cats for cat in start_categories):
                     continue
 
-            # Check node filters (degree and information content)
-            if not _passes_node_filters(
-                graph, subj_idx, max_node_degree, min_information_content
-            ):
+            # Check node filters (plugin-defined: degree, IC, etc.)
+            if not apply_node_filters(node_filters, graph, subj_idx):
                 continue
 
             # Check start node attribute constraints
@@ -494,10 +455,8 @@ def _query_backward(
                     if not any(cat in subj_cats for cat in start_categories):
                         continue
 
-                # Check node filters (degree and information content)
-                if not _passes_node_filters(
-                    graph, other_idx, max_node_degree, min_information_content
-                ):
+                # Check node filters (plugin-defined: degree, IC, etc.)
+                if not apply_node_filters(node_filters, graph, other_idx):
                     continue
 
                 # Check start node attribute constraints (other_idx is the "subject" via inverse)
@@ -556,8 +515,7 @@ def _query_both_pinned(
     check_inverse,
     inverse_pred_set,
     add_match,
-    max_node_degree=None,
-    min_information_content=None,
+    node_filters=None,
     attribute_constraints=None,
     start_node_constraints=None,
     end_node_constraints=None,
@@ -582,9 +540,7 @@ def _query_both_pinned(
 
     for start_idx in start_idxes:
         # Check node filters on the start node
-        if not _passes_node_filters(
-            graph, start_idx, max_node_degree, min_information_content
-        ):
+        if not apply_node_filters(node_filters, graph, start_idx):
             continue
 
         # Check start node attribute constraints
@@ -611,9 +567,7 @@ def _query_both_pinned(
             start_idx, end_set, predicate_filter=pred_filter_set
         ):
             # Check node filters on the end node
-            if not _passes_node_filters(
-                graph, obj_idx, max_node_degree, min_information_content
-            ):
+            if not apply_node_filters(node_filters, graph, obj_idx):
                 continue
 
             # Check end node attribute constraints
@@ -650,9 +604,7 @@ def _query_both_pinned(
         start_set = set(start_idxes)
         for end_idx in end_idxes:
             # Check node filters on the end node
-            if not _passes_node_filters(
-                graph, end_idx, max_node_degree, min_information_content
-            ):
+            if not apply_node_filters(node_filters, graph, end_idx):
                 continue
 
             # Check end node attribute constraints
@@ -672,9 +624,7 @@ def _query_both_pinned(
                 total_neighbors += 1
 
                 # Check node filters on the target (start) node
-                if not _passes_node_filters(
-                    graph, obj_idx, max_node_degree, min_information_content
-                ):
+                if not apply_node_filters(node_filters, graph, obj_idx):
                     continue
 
                 # Check start node attribute constraints (obj_idx is a start node)

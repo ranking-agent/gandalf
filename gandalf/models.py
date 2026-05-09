@@ -267,6 +267,13 @@ class TRAPIQuery(BaseModel):
         "Automatically enabled when path count exceeds the large result threshold "
         "(overridden by query parameter if provided)",
     )
+    gandalf_annotators: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Per-request opt-in dict of response-annotator settings. "
+        "Each key activates one registered annotator plugin and the value "
+        "(a dict) is the plugin's per-request settings. Plugins validate "
+        "their own values; unknown keys are ignored.",
+    )
 
     model_config = ConfigDict(
         extra="allow",
@@ -320,6 +327,12 @@ class AsyncTRAPIQuery(BaseModel):
             description="Set logging level for this request "
             "(e.g. 'DEBUG' to see detailed query processing)",
         )
+    )
+    gandalf_annotators: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Per-request opt-in dict of response-annotator settings. "
+        "Each key activates one registered annotator plugin and the value "
+        "(a dict) is the plugin's per-request settings.",
     )
 
     model_config = ConfigDict(

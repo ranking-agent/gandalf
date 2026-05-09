@@ -1,4 +1,9 @@
-"""Tests for max_node_degree and min_information_content filtering in lookup."""
+"""Tests for the built-in node filter plugins (max_node_degree, min_information_content).
+
+These exercise the plugins through the public ``lookup(..., filter_config=...)``
+API, proving the plugin registry behaves identically to the previous hardcoded
+filter chain.
+"""
 
 from tests.search_fixtures import graph  # noqa: F401
 
@@ -32,7 +37,7 @@ class TestMaxNodeDegree:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, max_node_degree=2)
+        response = lookup(graph, query, bmt=bmt, filter_config={"max_node_degree": 2})
         results = response["message"]["results"]
 
         # Only TNF (degree=1) should pass the filter
@@ -60,14 +65,14 @@ class TestMaxNodeDegree:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, max_node_degree=3)
+        response = lookup(graph, query, bmt=bmt, filter_config={"max_node_degree": 3})
         results = response["message"]["results"]
 
         # PPARG, GCK (degree=3) and TNF (degree=1) should all pass
         assert len(results) == 3
 
-    def test_max_node_degree_none_means_no_filtering(self, graph, bmt):
-        """When max_node_degree is None (default), no filtering should occur."""
+    def test_max_node_degree_absent_means_no_filtering(self, graph, bmt):
+        """When max_node_degree key is absent, no filtering should occur."""
         query = {
             "message": {
                 "query_graph": {
@@ -86,7 +91,7 @@ class TestMaxNodeDegree:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, max_node_degree=None)
+        response = lookup(graph, query, bmt=bmt, filter_config={})
         results = response["message"]["results"]
 
         assert len(results) == 4
@@ -111,7 +116,7 @@ class TestMaxNodeDegree:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, max_node_degree=0)
+        response = lookup(graph, query, bmt=bmt, filter_config={"max_node_degree": 0})
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -144,15 +149,15 @@ class TestMinInformationContent:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, min_information_content=90)
+        response = lookup(graph, query, bmt=bmt, filter_config={"min_information_content": 90})
         results = response["message"]["results"]
 
         assert len(results) == 2
         gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
-    def test_min_ic_none_means_no_filtering(self, graph, bmt):
-        """When min_information_content is None (default), no filtering should occur."""
+    def test_min_ic_absent_means_no_filtering(self, graph, bmt):
+        """When min_information_content key is absent, no filtering should occur."""
         query = {
             "message": {
                 "query_graph": {
@@ -171,7 +176,7 @@ class TestMinInformationContent:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, min_information_content=None)
+        response = lookup(graph, query, bmt=bmt, filter_config={})
         results = response["message"]["results"]
 
         assert len(results) == 4
@@ -196,7 +201,7 @@ class TestMinInformationContent:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, min_information_content=100)
+        response = lookup(graph, query, bmt=bmt, filter_config={"min_information_content": 100})
         results = response["message"]["results"]
 
         assert len(results) == 0
@@ -239,7 +244,9 @@ class TestMinInformationContent:
 
         # With min_information_content=85: GCK (81.2) filtered in first hop,
         # AND T2D (78.2) filtered in second hop → 0 results
-        response_filtered = lookup(graph, query, bmt=bmt, min_information_content=85)
+        response_filtered = lookup(
+            graph, query, bmt=bmt, filter_config={"min_information_content": 85}
+        )
         assert len(response_filtered["message"]["results"]) == 0
 
     def test_min_ic_filters_backward_discovered_nodes(self, graph, bmt):
@@ -272,7 +279,9 @@ class TestMinInformationContent:
         assert len(response_unfiltered["message"]["results"]) == 3
 
         # With min_information_content=90: only PPARG (92.3) passes
-        response_filtered = lookup(graph, query, bmt=bmt, min_information_content=90)
+        response_filtered = lookup(
+            graph, query, bmt=bmt, filter_config={"min_information_content": 90}
+        )
         results = response_filtered["message"]["results"]
 
         assert len(results) == 1
@@ -317,8 +326,7 @@ class TestCombinedFilters:
             graph,
             query,
             bmt=bmt,
-            max_node_degree=2,
-            min_information_content=90,
+            filter_config={"max_node_degree": 2, "min_information_content": 90},
         )
         results = response["message"]["results"]
 

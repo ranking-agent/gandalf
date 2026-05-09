@@ -276,6 +276,15 @@ class CSRGraph:
         self.idx_to_node_id = {idx: nid for nid, idx in node_id_to_idx.items()}
         self.node_properties = node_properties or {}
 
+        # Plugin-owned per-node metadata used only for path-traversal
+        # filtering. Backed by an LMDB env (lazy temp dir at build time;
+        # readonly mmap of the saved env after load_mmap). Read by
+        # NodeFilter closures during traversal. **Never** read by
+        # enrichment / response-building code: this store is invisible to
+        # TRAPI clients.
+        from gandalf.plugins.traversal_metadata_store import TraversalMetadataStore
+        self.traversal_metadata = TraversalMetadataStore.open_writable()
+
         # Predicate vocabulary
         self.predicate_to_idx = predicate_to_idx
         self.id_to_predicate = {idx: pred for pred, idx in predicate_to_idx.items()}
@@ -1229,6 +1238,14 @@ class CSRGraph:
                     shutil.rmtree(lmdb_dst)
                 shutil.copytree(lmdb_src, lmdb_dst)
 
+        # Persist plugin-owned traversal metadata so it does not have to be
+        # recomputed on every load. Stored as an LMDB env at
+        # ``<directory>/traversal_metadata.lmdb``; no-op when no plugin
+        # wrote anything.
+        store = getattr(self, "traversal_metadata", None)
+        if store is not None:
+            store.save_to(directory)
+
         t1 = time.perf_counter()
         logger.info("Graph saved in %.2fs", t1 - t0)
 
@@ -1266,6 +1283,22 @@ class CSRGraph:
         t0 = time.perf_counter()
 
         graph = CSRGraph.__new__(CSRGraph)
+
+        # Open plugin-owned traversal metadata if persisted at save time.
+        # Missing namespaces (legacy graphs or newly-registered plugins)
+        # are filled in by ``run_enrichers`` below; for that we need a
+        # writable store, so legacy graphs fall back to a temp env.
+        from gandalf.plugins.traversal_metadata_store import TraversalMetadataStore
+        traversal_metadata_path = directory / "traversal_metadata.lmdb"
+        if traversal_metadata_path.exists():
+            graph.traversal_metadata = TraversalMetadataStore.open_readonly(
+                traversal_metadata_path
+            )
+            logger.info(
+                "  Opened traversal metadata at %s", traversal_metadata_path.name
+            )
+        else:
+            graph.traversal_metadata = TraversalMetadataStore.open_writable()
 
         # Load NumPy arrays (memory-mapped or copied into RAM)
         graph.fwd_targets = _load_npy(
@@ -1431,5 +1464,10 @@ class CSRGraph:
             graph.graph_metadata = None
 
         graph.build_metadata()
+
+        # Run plugin enrichers so traversal_metadata is populated before any
+        # query is executed against this graph.
+        from gandalf.plugins.enrichers import run_enrichers
+        run_enrichers(graph)
 
         return graph
