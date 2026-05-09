@@ -323,10 +323,10 @@ class TraversalMetadataStore:
         target.parent.mkdir(parents=True, exist_ok=True)
 
         if self._path.resolve() == target.resolve():
-            self._env.sync(force=True)
+            self._env.sync(True)
             return
 
-        self._env.sync(force=True)
+        self._env.sync(True)
         if target.exists():
             shutil.rmtree(target)
         shutil.copytree(self._path, target)
