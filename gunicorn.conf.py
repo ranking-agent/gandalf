@@ -40,4 +40,6 @@ def worker_exit(server, worker):
 def worker_abort(worker):
     # Fires inside the worker on SIGABRT (gunicorn's pre-SIGKILL on timeout).
     # Does NOT fire on kernel OOM SIGKILL — nothing runs in the worker then.
-    worker.log.warning("worker_abort pid=%s — about to be killed by gunicorn", worker.pid)
+    worker.log.warning(
+        "worker_abort pid=%s — about to be killed by gunicorn", worker.pid
+    )
