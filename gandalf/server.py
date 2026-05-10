@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import httpx
 import orjson
+import psutil
 from bmt.toolkit import Toolkit
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -253,29 +254,13 @@ if settings.otel_enabled:
 
 
 def _current_rss_kb() -> int:
-    """Resident set size in KB.
+    """Current resident set size in KB. Cross-platform via psutil.
 
-    On Linux, reads current RSS from /proc/self/status (cheap, accurate).
-    On other platforms (macOS local dev), falls back to resource.getrusage,
-    which reports *peak* RSS — fine for spotting growth, but rss_delta will
-    never go negative.
+    Constructs psutil.Process() per call rather than caching, so that with
+    gunicorn preload_app=True each worker reads its own RSS instead of the
+    master's PID it inherited at fork time.
     """
-    try:
-        with open("/proc/self/status", "rb") as f:
-            for line in f:
-                if line.startswith(b"VmRSS:"):
-                    return int(line.split()[1])
-    except OSError:
-        pass
-    try:
-        import resource
-        import sys
-
-        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        # Linux: KB. macOS: bytes. (Yes, really.)
-        return ru // 1024 if sys.platform == "darwin" else ru
-    except Exception:
-        return -1
+    return psutil.Process().memory_info().rss // 1024
 
 
 @APP.middleware("http")

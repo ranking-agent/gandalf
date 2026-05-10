@@ -36,6 +36,7 @@ server = [
     "fastapi>=0.100.0",
     "httpx>=0.24.0",
     "orjson>=3.9.0",
+    "psutil>=5.9.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.12.0",
     "uvicorn>=0.20.0",
