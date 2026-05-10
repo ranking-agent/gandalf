@@ -263,6 +263,28 @@ def _current_rss_kb() -> int:
     return psutil.Process().memory_info().rss // 1024
 
 
+def _current_rss_anon_kb() -> int:
+    """Anonymous (private, non-file-backed) RSS in KB.
+
+    Reads RssAnon from /proc/self/status on Linux — this is the precise
+    metric for OOM risk, since file-backed pages (LMDB, .so files) are
+    reclaimable but anon pages are not. Falls back to psutil's USS on
+    non-Linux; USS additionally includes private file mappings, but it's
+    the closest cross-platform approximation.
+    """
+    try:
+        with open("/proc/self/status", "rb") as f:
+            for line in f:
+                if line.startswith(b"RssAnon:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    try:
+        return psutil.Process().memory_full_info().uss // 1024
+    except Exception:
+        return -1
+
+
 @APP.middleware("http")
 async def request_middleware(request: Request, call_next):
     """Add request ID, enforce size limits, rate limiting, and access logging."""
@@ -296,10 +318,12 @@ async def request_middleware(request: Request, call_next):
 
     pid = os.getpid()
     rss_start_kb = _current_rss_kb()
+    anon_start_kb = _current_rss_anon_kb()
     logger.info(
-        "request start pid=%s rss_kb=%s %s %s",
+        "request start pid=%s rss_kb=%s anon_kb=%s %s %s",
         pid,
         rss_start_kb,
+        anon_start_kb,
         request.method,
         request.url.path,
     )
@@ -308,16 +332,23 @@ async def request_middleware(request: Request, call_next):
     response: Response = await call_next(request)
     duration_ms = (time.monotonic() - t_start) * 1000
     rss_end_kb = _current_rss_kb()
-    rss_delta_kb = (
-        rss_end_kb - rss_start_kb if rss_start_kb >= 0 and rss_end_kb >= 0 else -1
-    )
+    anon_end_kb = _current_rss_anon_kb()
+
+    def _delta(start: int, end: int) -> int:
+        return end - start if start >= 0 and end >= 0 else -1
+
+    rss_delta_kb = _delta(rss_start_kb, rss_end_kb)
+    anon_delta_kb = _delta(anon_start_kb, anon_end_kb)
 
     response.headers["X-Request-ID"] = req_id
     logger.info(
-        "request end pid=%s rss_kb=%s rss_delta_kb=%s %s %s %s %.1fms",
+        "request end pid=%s rss_kb=%s rss_delta_kb=%s anon_kb=%s anon_delta_kb=%s "
+        "%s %s %s %.1fms",
         pid,
         rss_end_kb,
         rss_delta_kb,
+        anon_end_kb,
+        anon_delta_kb,
         request.method,
         request.url.path,
         response.status_code,
