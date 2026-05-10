@@ -1,5 +1,14 @@
 """Pytest fixtures shared across all test modules."""
 
+import os
+
+# Skip the module-level graph preload (server.py) so importing the FastAPI
+# app in tests does not try to mmap a real graph from /data/graph.
+os.environ.setdefault("GANDALF_SKIP_PRELOAD", "true")
+# Disable optional OpenTelemetry init in tests — its instrumentation
+# packages are not part of the test environment.
+os.environ.setdefault("GANDALF_OTEL_ENABLED", "false")
+
 import pytest
 
 import gandalf.validation as _validation_module

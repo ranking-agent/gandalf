@@ -267,6 +267,11 @@ class TRAPIQuery(BaseModel):
         "Automatically enabled when path count exceeds the large result threshold "
         "(overridden by query parameter if provided)",
     )
+    profile: Optional[bool] = Field(
+        None,
+        description="Emit per-stage timings into message.logs as ProfileStage / "
+        "ProfileSummary entries (overridden by query parameter if provided)",
+    )
     gandalf_annotators: Optional[Dict[str, Any]] = Field(
         None,
         description="Per-request opt-in dict of response-annotator settings. "
@@ -327,6 +332,11 @@ class AsyncTRAPIQuery(BaseModel):
             description="Set logging level for this request "
             "(e.g. 'DEBUG' to see detailed query processing)",
         )
+    )
+    profile: Optional[bool] = Field(
+        None,
+        description="Emit per-stage timings into message.logs as ProfileStage / "
+        "ProfileSummary entries",
     )
     gandalf_annotators: Optional[Dict[str, Any]] = Field(
         None,

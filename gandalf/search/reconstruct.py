@@ -9,6 +9,7 @@ from datetime import datetime
 import numpy as np
 
 from gandalf.config import settings
+from gandalf.profiler import current_profiler
 from gandalf.search.path_arrays import PathArrays
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,8 @@ def reconstruct_paths(
         "  Starting with %s paths from edge '%s'", f"{num_paths:,}", first_edge_id
     )
 
+    prof = current_profiler()
+
     # Iteratively join with remaining edges using two-pass approach:
     # Pass 1: count output rows, Pass 2: fill pre-allocated arrays.
     # This avoids creating millions of tiny numpy row copies in Python lists.
@@ -164,6 +167,10 @@ def reconstruct_paths(
             f"{len(paths_nodes):,}",
         )
 
+        join_cm = prof.stage(
+            "join", level=join_idx, edge_id=edge_id, paths_in=len(paths_nodes)
+        )
+        join_cm.__enter__()
         t_join_start = time.perf_counter()
 
         subj_in_paths = subj_qnode in qnode_to_col
@@ -268,6 +275,8 @@ def reconstruct_paths(
             )
 
         t_join_end = time.perf_counter()
+        prof.add_metric("paths_out", len(paths_nodes))
+        join_cm.__exit__(None, None, None)
         logger.debug(
             " -> %s paths (%.2fs)", f"{len(paths_nodes):,}", t_join_end - t_join_start
         )
@@ -308,27 +317,29 @@ def reconstruct_paths(
 
     # Build node property cache
     t_cache_start = time.perf_counter()
-    unique_node_indices = np.unique(paths_nodes[:, :num_node_cols])
+    with prof.stage("node_cache_build"):
+        unique_node_indices = np.unique(paths_nodes[:, :num_node_cols])
 
-    node_cache = {}
-    node_id_cache = {}
-    for node_idx in unique_node_indices:
-        if lightweight and bmt is not None:
-            all_props = graph.get_all_node_properties(node_idx)
-            node_cache[node_idx] = {
-                "name": all_props.get("name"),
-                "categories": _get_most_specific_category(
-                    all_props.get("categories", []), bmt
-                ),
-            }
-        else:
-            node_props = graph.get_all_node_properties(node_idx).copy()
-            if "categories" not in node_props:
-                node_props["categories"] = []
-            if "attributes" not in node_props:
-                node_props["attributes"] = []
-            node_cache[node_idx] = node_props
-        node_id_cache[node_idx] = graph.get_node_id(node_idx)
+        node_cache = {}
+        node_id_cache = {}
+        for node_idx in unique_node_indices:
+            if lightweight and bmt is not None:
+                all_props = graph.get_all_node_properties(node_idx)
+                node_cache[node_idx] = {
+                    "name": all_props.get("name"),
+                    "categories": _get_most_specific_category(
+                        all_props.get("categories", []), bmt
+                    ),
+                }
+            else:
+                node_props = graph.get_all_node_properties(node_idx).copy()
+                if "categories" not in node_props:
+                    node_props["categories"] = []
+                if "attributes" not in node_props:
+                    node_props["attributes"] = []
+                node_cache[node_idx] = node_props
+            node_id_cache[node_idx] = graph.get_node_id(node_idx)
+        prof.add_metric("unique_nodes", int(len(unique_node_indices)))
 
     t_cache_end = time.perf_counter()
     logger.debug(

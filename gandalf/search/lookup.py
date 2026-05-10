@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 
 from gandalf.config import settings
 from gandalf.logging_config import TRAPILogCollector
+from gandalf.profiler import (
+    NullProfiler,
+    Profiler,
+    current_profiler,
+    install_lmdb_hook,
+    restore_lmdb_hook,
+    set_profiler,
+)
 from gandalf.query_planner import get_next_qedge, remove_orphaned
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
 from gandalf.search.gc_utils import GCMonitor
@@ -31,6 +39,7 @@ def lookup(
     filter_config: Optional[dict] = None,
     log_level=None,
     dehydrated=None,
+    profile=False,
 ):
     """Take an arbitrary Translator query graph and return all matching paths.
 
@@ -51,6 +60,10 @@ def lookup(
             If False, force full enrichment.  If None (default), automatically
             enable lightweight mode when path count exceeds the large result
             threshold.
+        profile: If True, capture per-stage timings (BMT init, per-qedge
+            query, path reconstruction, response building, LMDB enrichment,
+            annotators) and append them to ``response["logs"]`` as TRAPI
+            ``LogEntry`` dicts with ``code`` ``ProfileStage``/``ProfileSummary``.
 
     Returns:
         TRAPI response dict with message containing results, knowledge_graph,
@@ -81,21 +94,37 @@ def lookup(
 
     node_filters = build_node_filters(filter_config or {})
 
+    prof: object = Profiler(root_name="lookup") if profile else NullProfiler()
+    lmdb_originals = None
+
     try:
-        response = _lookup_inner(
-            graph,
-            query,
-            bmt,
-            subclass,
-            subclass_depth,
-            t_start,
-            gc_monitor,
-            node_filters=node_filters,
-            dehydrated=dehydrated,
-        )
-        response["logs"] = log_collector.get_logs()
+        with set_profiler(prof):
+            if profile:
+                lmdb_originals = install_lmdb_hook(getattr(graph, "lmdb_store", None))
+                if lmdb_originals is None and getattr(graph, "lmdb_store", None) is not None:
+                    prof.add_metric(
+                        "lmdb_hook_skipped",
+                        "another_profile_already_active",
+                    )
+            response = _lookup_inner(
+                graph,
+                query,
+                bmt,
+                subclass,
+                subclass_depth,
+                t_start,
+                gc_monitor,
+                node_filters=node_filters,
+                dehydrated=dehydrated,
+            )
+            logs = log_collector.get_logs()
+            if profile:
+                logs.extend(prof.to_log_entries())
+            response["logs"] = logs
         return response
     finally:
+        if lmdb_originals is not None:
+            restore_lmdb_hook(getattr(graph, "lmdb_store", None), lmdb_originals)
         gandalf_logger.removeHandler(log_collector)
         gandalf_logger.setLevel(prev_level)
         gc_monitor.stop()
@@ -116,12 +145,15 @@ def _lookup_inner(
 ):
     """Inner implementation of lookup with all the core logic."""
     logger.info("Starting lookup.")
-    if bmt is None:
-        bmt = Toolkit()
-        t_bmt = time.perf_counter()
-        logger.warning("BMT initialization: %.2fs", t_bmt - t_start)
-    else:
-        logger.debug("Using provided BMT instance")
+    prof = current_profiler()
+
+    with prof.stage("bmt_init"):
+        if bmt is None:
+            bmt = Toolkit()
+            t_bmt = time.perf_counter()
+            logger.warning("BMT initialization: %.2fs", t_bmt - t_start)
+        else:
+            logger.debug("Using provided BMT instance")
 
     # Create predicate expander for handling symmetric/inverse predicates at query time
     predicate_expander = PredicateExpander(bmt)
@@ -135,12 +167,14 @@ def _lookup_inner(
 
     # Rewrite query graph for subclass expansion if requested
     if subclass and subqgraph["edges"]:
-        logger.debug(
-            "Rewriting query graph for subclass expansion (depth=%s)", subclass_depth
-        )
-        _rewrite_for_subclass(subqgraph, subclass_depth=subclass_depth)
-        # Use the rewritten graph as the query graph for the rest of the pipeline
-        query_graph = copy.deepcopy(subqgraph)
+        with prof.stage("subclass_rewrite", depth=subclass_depth):
+            logger.debug(
+                "Rewriting query graph for subclass expansion (depth=%s)",
+                subclass_depth,
+            )
+            _rewrite_for_subclass(subqgraph, subclass_depth=subclass_depth)
+            # Use the rewritten graph as the query graph for the rest of the pipeline
+            query_graph = copy.deepcopy(subqgraph)
 
     # Store results for each edge query
     # edge_id -> list of (subject_idx, predicate, object_idx) tuples
@@ -162,6 +196,9 @@ def _lookup_inner(
     while len(subqgraph["edges"].keys()) > 0:
         # Get next edge to query
         next_edge_id, next_edge = get_next_qedge(subqgraph)
+
+        qedge_cm = prof.stage("qedge", qedge_id=next_edge_id)
+        qedge_cm.__enter__()
 
         logger.debug(
             "Processing edge '%s': %s -> %s",
@@ -256,12 +293,14 @@ def _lookup_inner(
 
         # Store results for this edge
         edge_results[next_edge_id] = edge_matches
+        prof.add_metric("matches", len(edge_matches))
 
         logger.debug("  Found %s matching edges", f"{len(edge_matches):,}")
 
         if len(edge_matches) <= 0:
             logger.info("Found no edge matches, returning 0 results.")
             original_edges = []
+            qedge_cm.__exit__(None, None, None)
             break
 
         # Update subgraph with discovered nodes for next iteration
@@ -294,20 +333,24 @@ def _lookup_inner(
 
         logger.debug("  Remaining edges: %s", len(subqgraph["edges"]))
 
+        qedge_cm.__exit__(None, None, None)
+
     # Reconstruct complete paths from edge results
     logger.debug("Reconstructing complete paths...")
 
-    path_data = reconstruct_paths(
-        graph,
-        query_graph,
-        edge_results,
-        original_edges,
-        edge_inverse_preds=edge_inverse_preds,
-        dehydrated=dehydrated,
-        bmt=bmt,
-    )
+    with prof.stage("reconstruct"):
+        path_data = reconstruct_paths(
+            graph,
+            query_graph,
+            edge_results,
+            original_edges,
+            edge_inverse_preds=edge_inverse_preds,
+            dehydrated=dehydrated,
+            bmt=bmt,
+        )
 
     num_paths = len(path_data) if path_data is not None else 0
+    prof.add_metric("num_paths", num_paths)
 
     logger.debug("Found %s complete paths", f"{num_paths:,}")
 
@@ -336,17 +379,18 @@ def _lookup_inner(
             for qn_id, qn in original_query_graph["nodes"].items()
         }
 
-        _build_response(
-            graph,
-            response,
-            path_data,
-            query_graph,
-            num_paths,
-            t_post_start,
-            gc_monitor,
-            node_set_interp=node_set_interp,
-            original_query_graph=original_query_graph,
-        )
+        with prof.stage("build_response"):
+            _build_response(
+                graph,
+                response,
+                path_data,
+                query_graph,
+                num_paths,
+                t_post_start,
+                gc_monitor,
+                node_set_interp=node_set_interp,
+                original_query_graph=original_query_graph,
+            )
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
     # The monitor is still accumulating events until stop() is called there.
@@ -360,6 +404,9 @@ def _lookup_inner(
         )
 
     t_stop = time.perf_counter()
+    prof.add_metric("total_ms", (t_stop - t_start) * 1000.0)
+    if gc_summary:
+        prof.add_metric("gc", gc_summary)
     logger.info(
         f"Returning {len(response['message']['results'])} results in {t_stop - t_start} seconds."
     )

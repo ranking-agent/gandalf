@@ -4,6 +4,7 @@ import logging
 import time
 from typing import Optional
 
+from gandalf.profiler import current_profiler
 from gandalf.search.attribute_constraints import matches_attribute_constraints
 from gandalf.search.node_filters import NodeFilter, apply_node_filters
 from gandalf.search.qualifiers import edge_matches_qualifier_constraints
@@ -151,60 +152,70 @@ def query_edge(
             seen_edges.add(key)
             matches.append((subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx))
 
+    prof = current_profiler()
+
     # Case 1: Start pinned, end unpinned
     if start_idxes is not None and end_idxes is None:
-        _query_forward(
-            graph,
-            start_idxes,
-            allowed_predicates,
-            end_categories,
-            qualifier_constraints,
-            check_inverse,
-            inverse_pred_set,
-            add_match,
-            node_filters=node_filters,
-            attribute_constraints=attribute_constraints,
-            start_node_constraints=start_node_constraints,
-            end_node_constraints=end_node_constraints,
-        )
+        with prof.stage("query_forward", n_pinned=len(start_idxes)):
+            _query_forward(
+                graph,
+                start_idxes,
+                allowed_predicates,
+                end_categories,
+                qualifier_constraints,
+                check_inverse,
+                inverse_pred_set,
+                add_match,
+                node_filters=node_filters,
+                attribute_constraints=attribute_constraints,
+                start_node_constraints=start_node_constraints,
+                end_node_constraints=end_node_constraints,
+            )
 
     # Case 2: Start unpinned, end pinned
     elif start_idxes is None and end_idxes is not None:
-        _query_backward(
-            graph,
-            end_idxes,
-            allowed_predicates,
-            start_categories,
-            qualifier_constraints,
-            check_inverse,
-            inverse_pred_set,
-            add_match,
-            node_filters=node_filters,
-            attribute_constraints=attribute_constraints,
-            start_node_constraints=start_node_constraints,
-            end_node_constraints=end_node_constraints,
-        )
+        with prof.stage("query_backward", n_pinned=len(end_idxes)):
+            _query_backward(
+                graph,
+                end_idxes,
+                allowed_predicates,
+                start_categories,
+                qualifier_constraints,
+                check_inverse,
+                inverse_pred_set,
+                add_match,
+                node_filters=node_filters,
+                attribute_constraints=attribute_constraints,
+                start_node_constraints=start_node_constraints,
+                end_node_constraints=end_node_constraints,
+            )
 
     # Case 3: Both pinned
     elif start_idxes is not None and end_idxes is not None:
-        _query_both_pinned(
-            graph,
-            start_idxes,
-            end_idxes,
-            allowed_predicates,
-            qualifier_constraints,
-            check_inverse,
-            inverse_pred_set,
-            add_match,
-            node_filters=node_filters,
-            attribute_constraints=attribute_constraints,
-            start_node_constraints=start_node_constraints,
-            end_node_constraints=end_node_constraints,
-        )
+        with prof.stage(
+            "query_both_pinned",
+            n_start=len(start_idxes),
+            n_end=len(end_idxes),
+        ):
+            _query_both_pinned(
+                graph,
+                start_idxes,
+                end_idxes,
+                allowed_predicates,
+                qualifier_constraints,
+                check_inverse,
+                inverse_pred_set,
+                add_match,
+                node_filters=node_filters,
+                attribute_constraints=attribute_constraints,
+                start_node_constraints=start_node_constraints,
+                end_node_constraints=end_node_constraints,
+            )
 
     else:
         raise Exception("Both nodes unpinned - bad query planning")
 
+    prof.add_metric("matches", len(matches))
     return matches
 
 

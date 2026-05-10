@@ -412,6 +412,10 @@ def sync_lookup(
         None,
         description="Return a dehydrated response (skip edge attribute enrichment)",
     ),
+    profile: Optional[bool] = Query(
+        None,
+        description="Emit per-stage timings into message.logs as ProfileStage / ProfileSummary entries",
+    ),
 ):
     """Execute a TRAPI query against the knowledge graph.
 
@@ -428,6 +432,7 @@ def sync_lookup(
     sc = subclass if subclass is not None else raw.get("subclass", True)
     subclass_depth = raw.get("subclass_depth", 1)
     dehydrated_param = dehydrated if dehydrated is not None else raw.get("dehydrated")
+    profile_param = profile if profile is not None else bool(raw.get("profile", False))
     annotator_config = raw.get("gandalf_annotators") or {}
 
     response = lookup(
@@ -438,6 +443,7 @@ def sync_lookup(
         subclass_depth=subclass_depth,
         log_level=log_level,
         dehydrated=dehydrated_param,
+        profile=profile_param,
     )
     if annotator_config:
         annotate_response(response, GRAPH, annotator_config)
@@ -455,6 +461,7 @@ def _async_lookup(callback_url: str, query: dict):
     subclass_depth = query.get("subclass_depth", 1)
     log_level = query.pop("log_level", None)
     dehydrated = query.get("dehydrated")
+    profile = bool(query.get("profile", False))
     annotator_config = query.get("gandalf_annotators") or {}
     response = lookup(
         GRAPH,
@@ -464,6 +471,7 @@ def _async_lookup(callback_url: str, query: dict):
         subclass_depth=subclass_depth,
         log_level=log_level,
         dehydrated=dehydrated,
+        profile=profile,
     )
     if annotator_config:
         annotate_response(response, GRAPH, annotator_config)
