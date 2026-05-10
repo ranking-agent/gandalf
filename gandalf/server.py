@@ -253,7 +253,13 @@ if settings.otel_enabled:
 
 
 def _current_rss_kb() -> int:
-    """Current resident set size in KB, read from /proc/self/status (Linux)."""
+    """Resident set size in KB.
+
+    On Linux, reads current RSS from /proc/self/status (cheap, accurate).
+    On other platforms (macOS local dev), falls back to resource.getrusage,
+    which reports *peak* RSS — fine for spotting growth, but rss_delta will
+    never go negative.
+    """
     try:
         with open("/proc/self/status", "rb") as f:
             for line in f:
@@ -261,7 +267,15 @@ def _current_rss_kb() -> int:
                     return int(line.split()[1])
     except OSError:
         pass
-    return -1
+    try:
+        import resource
+        import sys
+
+        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux: KB. macOS: bytes. (Yes, really.)
+        return ru // 1024 if sys.platform == "darwin" else ru
+    except Exception:
+        return -1
 
 
 @APP.middleware("http")
