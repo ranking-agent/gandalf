@@ -37,6 +37,7 @@ def query_subclass_edge(graph, start_idxes, end_idxes, depth):
 
     # Resolve the subclass_of predicate index once
     subclass_pred = "biolink:subclass_of"
+    subclass_pred_filter = {subclass_pred}
 
     if end_idxes is None:
         return matches
@@ -56,12 +57,12 @@ def query_subclass_edge(graph, start_idxes, end_idxes, depth):
                 # Walk incoming subclass_of edges: child --subclass_of--> node_idx
                 for (
                     child_idx,
-                    predicate,
+                    _predicate,
                     _props,
                     fwd_eidx,
-                ) in graph.incoming_neighbors_with_properties(node_idx):
-                    if predicate != subclass_pred:
-                        continue
+                ) in graph.incoming_neighbors_with_properties(
+                    node_idx, predicate_filter=subclass_pred_filter
+                ):
                     if child_idx in visited:
                         continue
                     visited.add(child_idx)
@@ -260,7 +261,13 @@ def _query_forward(
 
     t0 = time.perf_counter()
 
-    total_neighbors = 0
+    fwd_pred_filter = set(allowed_predicates) if allowed_predicates else None
+    inv_pred_filter = inverse_pred_set if (check_inverse and inverse_pred_set) else None
+
+    neighbors_scanned = 0
+    neighbors_after_pred = 0
+    fwd_offsets = graph.fwd_offsets
+    rev_offsets = graph.rev_offsets
     slow_nodes = []  # Track nodes that take > 0.1s
 
     for start_idx in start_idxes:
@@ -273,14 +280,18 @@ def _query_forward(
         t_node_start = time.perf_counter()
         node_neighbors = 0
 
-        # Check outgoing edges (direct matches)
+        # Count edges scanned at the CSR level (before predicate filter)
+        neighbors_scanned += int(fwd_offsets[start_idx + 1] - fwd_offsets[start_idx])
+        if check_inverse:
+            neighbors_scanned += int(
+                rev_offsets[start_idx + 1] - rev_offsets[start_idx]
+            )
+
+        # Check outgoing edges (direct matches) - predicate filtered at CSR level
         for obj_idx, predicate, props, fwd_edge_idx in graph.neighbors_with_properties(
-            start_idx
+            start_idx, predicate_filter=fwd_pred_filter
         ):
             node_neighbors += 1
-            # Check predicate
-            if allowed_predicates and predicate not in allowed_predicates:
-                continue
 
             # Check object categories
             if end_categories:
@@ -323,12 +334,10 @@ def _query_forward(
                 stored_pred,
                 props,
                 fwd_edge_idx,
-            ) in graph.incoming_neighbors_with_properties(start_idx):
+            ) in graph.incoming_neighbors_with_properties(
+                start_idx, predicate_filter=inv_pred_filter
+            ):
                 node_neighbors += 1
-
-                # Check if stored predicate is one of our inverse predicates
-                if inverse_pred_set and stored_pred not in inverse_pred_set:
-                    continue
 
                 # Check object categories (the "other" node becomes our object)
                 if end_categories:
@@ -372,14 +381,20 @@ def _query_forward(
 
         t_node_end = time.perf_counter()
         node_time = t_node_end - t_node_start
-        total_neighbors += node_neighbors
+        neighbors_after_pred += node_neighbors
 
         if node_time > 0.1:  # Track slow nodes
             slow_nodes.append((start_idx, node_neighbors, node_time))
 
     t1 = time.perf_counter()
-    _record_traversal_metrics(graph, total_neighbors, slow_nodes)
-    logger.debug("  Traversed %s total neighbors", total_neighbors)
+    _record_traversal_metrics(
+        graph, neighbors_scanned, neighbors_after_pred, slow_nodes
+    )
+    logger.debug(
+        "  Scanned %s edges, %s passed predicate filter",
+        neighbors_scanned,
+        neighbors_after_pred,
+    )
     if slow_nodes:
         logger.debug("  Slow nodes (>0.1s): %s", len(slow_nodes))
         for node_idx, neighbors, node_time in slow_nodes[:5]:  # Show top 5
@@ -408,7 +423,13 @@ def _query_backward(
 
     t0 = time.perf_counter()
 
-    total_neighbors = 0
+    fwd_pred_filter = set(allowed_predicates) if allowed_predicates else None
+    inv_pred_filter = inverse_pred_set if (check_inverse and inverse_pred_set) else None
+
+    neighbors_scanned = 0
+    neighbors_after_pred = 0
+    fwd_offsets = graph.fwd_offsets
+    rev_offsets = graph.rev_offsets
     slow_nodes = []  # Track nodes that take > 0.1s
 
     for i, end_idx in enumerate(end_idxes):
@@ -421,17 +442,21 @@ def _query_backward(
         t_node_start = time.perf_counter()
         node_neighbors = 0
 
-        # Check incoming edges (direct matches)
+        # Count edges scanned at the CSR level (before predicate filter)
+        neighbors_scanned += int(rev_offsets[end_idx + 1] - rev_offsets[end_idx])
+        if check_inverse:
+            neighbors_scanned += int(fwd_offsets[end_idx + 1] - fwd_offsets[end_idx])
+
+        # Check incoming edges (direct matches) - predicate filtered at CSR level
         for (
             subj_idx,
             predicate,
             props,
             fwd_edge_idx,
-        ) in graph.incoming_neighbors_with_properties(end_idx):
+        ) in graph.incoming_neighbors_with_properties(
+            end_idx, predicate_filter=fwd_pred_filter
+        ):
             node_neighbors += 1
-            # Check predicate
-            if allowed_predicates and predicate not in allowed_predicates:
-                continue
 
             # Check subject categories
             if start_categories:
@@ -476,12 +501,10 @@ def _query_backward(
                 stored_pred,
                 props,
                 fwd_edge_idx,
-            ) in graph.neighbors_with_properties(end_idx):
+            ) in graph.neighbors_with_properties(
+                end_idx, predicate_filter=inv_pred_filter
+            ):
                 node_neighbors += 1
-
-                # Check if stored predicate is one of our inverse predicates
-                if inverse_pred_set and stored_pred not in inverse_pred_set:
-                    continue
 
                 # Check subject categories (the "other" node becomes our subject)
                 if start_categories:
@@ -525,14 +548,20 @@ def _query_backward(
 
         t_node_end = time.perf_counter()
         node_time = t_node_end - t_node_start
-        total_neighbors += node_neighbors
+        neighbors_after_pred += node_neighbors
 
         if node_time > 0.1:  # Track slow nodes
             slow_nodes.append((end_idx, node_neighbors, node_time))
 
     t1 = time.perf_counter()
-    _record_traversal_metrics(graph, total_neighbors, slow_nodes)
-    logger.debug("  Traversed %s total incoming neighbors", total_neighbors)
+    _record_traversal_metrics(
+        graph, neighbors_scanned, neighbors_after_pred, slow_nodes
+    )
+    logger.debug(
+        "  Scanned %s edges, %s passed predicate filter",
+        neighbors_scanned,
+        neighbors_after_pred,
+    )
     if slow_nodes:
         logger.debug("  Slow nodes (>0.1s): %s", len(slow_nodes))
         for node_idx, neighbors, node_time in slow_nodes[:5]:  # Show top 5
@@ -570,7 +599,8 @@ def _query_both_pinned(
     pred_filter_set = set(allowed_predicates) if allowed_predicates else None
 
     t_neighbors_start = time.perf_counter()
-    total_neighbors = 0
+    neighbors_scanned = 0
+    neighbors_after_pred = 0
     slow_nodes = []
 
     for start_idx in start_idxes:
@@ -590,7 +620,7 @@ def _query_both_pinned(
         node_start = int(graph.fwd_offsets[start_idx])
         node_end = int(graph.fwd_offsets[start_idx + 1])
         node_neighbors = node_end - node_start
-        total_neighbors += node_neighbors
+        neighbors_scanned += node_neighbors
 
         # Only fetch properties for edges whose target is in end_set
         for (
@@ -601,6 +631,8 @@ def _query_both_pinned(
         ) in graph.neighbors_filtered_by_targets(
             start_idx, end_set, predicate_filter=pred_filter_set
         ):
+            neighbors_after_pred += 1
+
             # Check node filters on the end node
             if not apply_node_filters(node_filters, graph, obj_idx):
                 continue
@@ -648,6 +680,11 @@ def _query_both_pinned(
                 if not matches_attribute_constraints(end_attrs, end_node_constraints):
                     continue
 
+            # Count edges scanned at the CSR level (end_idx outgoing)
+            neighbors_scanned += int(
+                graph.fwd_offsets[end_idx + 1] - graph.fwd_offsets[end_idx]
+            )
+
             for (
                 obj_idx,
                 stored_pred,
@@ -656,7 +693,7 @@ def _query_both_pinned(
             ) in graph.neighbors_filtered_by_targets(
                 end_idx, start_set, predicate_filter=inverse_pred_set or None
             ):
-                total_neighbors += 1
+                neighbors_after_pred += 1
 
                 # Check node filters on the target (start) node
                 if not apply_node_filters(node_filters, graph, obj_idx):
@@ -692,11 +729,14 @@ def _query_both_pinned(
                 add_match(end_idx, stored_pred, obj_idx, fwd_edge_idx, via_inverse=True)
 
     t1 = time.perf_counter()
-    _record_traversal_metrics(graph, total_neighbors, slow_nodes)
+    _record_traversal_metrics(
+        graph, neighbors_scanned, neighbors_after_pred, slow_nodes
+    )
     logger.debug(
-        "    Neighbor traversal: %.3fs (%s neighbors)",
+        "    Neighbor traversal: %.3fs (%s scanned, %s after pred filter)",
         t1 - t_neighbors_start,
-        total_neighbors,
+        neighbors_scanned,
+        neighbors_after_pred,
     )
     if slow_nodes:
         logger.debug("    Slow nodes (>0.1s): %s", len(slow_nodes))
@@ -709,15 +749,25 @@ def _query_both_pinned(
 _SLOW_NODE_EVENT_LIMIT = 10
 
 
-def _record_traversal_metrics(graph, total_neighbors, slow_nodes):
+def _record_traversal_metrics(
+    graph, neighbors_scanned, neighbors_after_pred, slow_nodes
+):
     """Surface neighborhood-size and slow-node detail to the profiler.
 
     Aggregates onto the currently-active query_* stage. ``slow_nodes`` is
     the list ``[(node_idx, neighbors, duration_seconds), ...]`` collected by
     the search loop for nodes that took longer than the inline threshold.
+
+    Two complementary edge-count metrics are recorded:
+    - ``neighbors_scanned``: total CSR edges considered (predicate filter
+      applied at the integer level). Cheap to compute from offsets.
+    - ``neighbors_after_pred``: edges that survived predicate filtering and
+      entered the Python loop. The ratio of the two is the predicate hit
+      rate — the headline diagnostic for query_forward / query_backward.
     """
     prof = current_profiler()
-    prof.add_metric("total_neighbors", int(total_neighbors))
+    prof.add_metric("neighbors_scanned", int(neighbors_scanned))
+    prof.add_metric("neighbors_after_pred", int(neighbors_after_pred))
     prof.add_metric("slow_nodes", len(slow_nodes))
     if not slow_nodes:
         return

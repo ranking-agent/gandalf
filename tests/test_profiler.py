@@ -210,9 +210,12 @@ class TestProfilerInLookup:
             assert "n_predicates" in fields
             assert "check_inverse" in fields
             metrics = qs.get("metrics", {})
-            # _record_traversal_metrics always writes these two.
-            assert "total_neighbors" in metrics
+            # _record_traversal_metrics always writes these three.
+            assert "neighbors_scanned" in metrics
+            assert "neighbors_after_pred" in metrics
             assert "slow_nodes" in metrics
+            # Post-predicate-filter count can never exceed the scan count.
+            assert metrics["neighbors_after_pred"] <= metrics["neighbors_scanned"]
 
     def test_lmdb_metrics_present_when_profile_on(self, graph, bmt):
         response = lookup(graph, _ONE_HOP_BOTH_PINNED, bmt=bmt, profile=True)

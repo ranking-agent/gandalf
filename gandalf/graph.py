@@ -544,13 +544,15 @@ class CSRGraph:
             return sources[mask]
 
     def neighbors_with_properties(
-        self, node_idx: int, predicate_filter: Optional[list] = None
+        self, node_idx: int, predicate_filter: Optional[set] = None
     ):
         """Get neighbors with edge properties (qualifiers + sources).
 
-        Predicate filtering is done FIRST (in-memory from CSR arrays),
-        then qualifier/source properties are fetched only for matching
-        edges — avoiding unnecessary dedup store lookups.
+        Predicate filtering is done as a cheap integer compare against the
+        CSR predicate array BEFORE any predicate-string lookup or
+        property-dict materialization. When ``predicate_filter`` resolves
+        to an empty int set (no requested predicates exist in this graph),
+        returns an empty list without scanning.
 
         Returns list of (neighbor_idx, predicate_str, edge_props, fwd_edge_idx)
         tuples where edge_props = {"qualifiers": [...], "sources": [...]}.
@@ -558,19 +560,33 @@ class CSRGraph:
         ``fwd_edge_idx`` is the forward-CSR array position — unique per edge
         even when (src, dst, pred) repeats with different qualifiers/sources.
         """
+        pred_id_filter = None
+        if predicate_filter is not None:
+            pred_id_filter = {
+                self.predicate_to_idx[p]
+                for p in predicate_filter
+                if p in self.predicate_to_idx
+            }
+            if not pred_id_filter:
+                return []
+
         start = int(self.fwd_offsets[node_idx])
         end = int(self.fwd_offsets[node_idx + 1])
 
+        fwd_predicates = self.fwd_predicates
+        fwd_targets = self.fwd_targets
+        id_to_predicate = self.id_to_predicate
+        get_props = self.edge_properties._get_props
+
         result = []
         for pos in range(start, end):
-            pred_id = int(self.fwd_predicates[pos])
-            pred_str = self.id_to_predicate[pred_id]
-
-            if predicate_filter is not None and pred_str not in predicate_filter:
+            pred_id = int(fwd_predicates[pos])
+            if pred_id_filter is not None and pred_id not in pred_id_filter:
                 continue
 
-            target = int(self.fwd_targets[pos])
-            props = self.edge_properties._get_props(pos)
+            target = int(fwd_targets[pos])
+            pred_str = id_to_predicate[pred_id]
+            props = get_props(pos)
             result.append((target, pred_str, props, pos))
 
         return result
@@ -585,6 +601,9 @@ class CSRGraph:
         a small fraction of neighbors match, this avoids millions of
         unnecessary dict allocations and dramatically reduces memory pressure.
 
+        Order of checks per edge: target-set (cheap int hash), then integer
+        predicate match (no string lookup), then property materialization.
+
         Args:
             node_idx: Source node index.
             target_set: Set of target node indices to keep.
@@ -594,28 +613,42 @@ class CSRGraph:
             List of (target_idx, predicate_str, edge_props, fwd_edge_idx) tuples
             for edges whose target is in *target_set*.
         """
+        pred_id_filter = None
+        if predicate_filter is not None:
+            pred_id_filter = {
+                self.predicate_to_idx[p]
+                for p in predicate_filter
+                if p in self.predicate_to_idx
+            }
+            if not pred_id_filter:
+                return []
+
         start = int(self.fwd_offsets[node_idx])
         end = int(self.fwd_offsets[node_idx + 1])
 
+        fwd_targets = self.fwd_targets
+        fwd_predicates = self.fwd_predicates
+        id_to_predicate = self.id_to_predicate
+        get_props = self.edge_properties._get_props
+
         result = []
         for pos in range(start, end):
-            target = int(self.fwd_targets[pos])
+            target = int(fwd_targets[pos])
             if target not in target_set:
                 continue
 
-            pred_id = int(self.fwd_predicates[pos])
-            pred_str = self.id_to_predicate[pred_id]
-
-            if predicate_filter is not None and pred_str not in predicate_filter:
+            pred_id = int(fwd_predicates[pos])
+            if pred_id_filter is not None and pred_id not in pred_id_filter:
                 continue
 
-            props = self.edge_properties._get_props(pos)
+            pred_str = id_to_predicate[pred_id]
+            props = get_props(pos)
             result.append((target, pred_str, props, pos))
 
         return result
 
     def incoming_neighbors_with_properties(
-        self, node_idx, predicate_filter: Optional[list] = None
+        self, node_idx, predicate_filter: Optional[set] = None
     ):
         """Get incoming neighbors with edge properties (qualifiers + sources).
 
@@ -624,23 +657,42 @@ class CSRGraph:
         in qualifiers / sources — each reverse-CSR position maps to its own
         unique forward-CSR position.
 
+        Predicate filtering is performed as an integer-set compare against
+        the reverse-CSR predicate array BEFORE any string lookup or property
+        materialization. If ``predicate_filter`` is provided but none of the
+        requested predicates exist in this graph, returns an empty list.
+
         Returns list of (src_idx, predicate, edge_props, fwd_edge_idx) tuples.
         """
+        pred_id_filter = None
+        if predicate_filter is not None:
+            pred_id_filter = {
+                self.predicate_to_idx[p]
+                for p in predicate_filter
+                if p in self.predicate_to_idx
+            }
+            if not pred_id_filter:
+                return []
+
         start = int(self.rev_offsets[node_idx])
         end = int(self.rev_offsets[node_idx + 1])
 
+        rev_sources = self.rev_sources
+        rev_predicates = self.rev_predicates
+        rev_to_fwd = self.rev_to_fwd
+        id_to_predicate = self.id_to_predicate
+        get_props = self.edge_properties._get_props
+
         result = []
         for pos in range(start, end):
-            src_idx = int(self.rev_sources[pos])
-            pred_id = int(self.rev_predicates[pos])
-            predicate = self.id_to_predicate[pred_id]
-
-            if predicate_filter is not None and predicate not in predicate_filter:
+            pred_id = int(rev_predicates[pos])
+            if pred_id_filter is not None and pred_id not in pred_id_filter:
                 continue
 
-            # O(1) forward edge index lookup via rev_to_fwd mapping
-            fwd_idx = int(self.rev_to_fwd[pos])
-            props = self.edge_properties._get_props(fwd_idx)
+            src_idx = int(rev_sources[pos])
+            predicate = id_to_predicate[pred_id]
+            fwd_idx = int(rev_to_fwd[pos])
+            props = get_props(fwd_idx)
 
             result.append((src_idx, predicate, props, fwd_idx))
 
