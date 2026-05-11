@@ -27,6 +27,7 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any
 
+from gandalf.profiler import current_profiler
 from gandalf.search.response_annotators import build_response_annotators
 
 logger = logging.getLogger(__name__)
@@ -64,9 +65,12 @@ def annotate_response(response: dict, graph: Any, annotator_config: dict) -> dic
         return response
 
     logs = response.setdefault("logs", [])
+    prof = current_profiler()
 
     for name, annotator in active:
         t0 = time.perf_counter()
+        ann_cm = prof.stage("annotator", annotator=name)
+        ann_cm.__enter__()
         try:
             annotator(response, graph)
         except Exception:
@@ -79,8 +83,10 @@ def annotate_response(response: dict, graph: Any, annotator_config: dict) -> dic
                     code="AnnotatorError",
                 )
             )
+            ann_cm.__exit__(None, None, None)
             continue
         dt_ms = (time.perf_counter() - t0) * 1000
+        ann_cm.__exit__(None, None, None)
         logs.append(
             _log_entry(
                 "DEBUG",

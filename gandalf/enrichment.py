@@ -13,6 +13,7 @@ LMDB cold-path store.
 from __future__ import annotations
 
 from gandalf.graph import CSRGraph
+from gandalf.profiler import current_profiler
 
 
 def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
@@ -43,8 +44,14 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
     """
     kg = message.get("message", {}).get("knowledge_graph", {})
 
-    _enrich_nodes(kg.get("nodes", {}), graph)
-    _enrich_edges(kg.get("edges", {}), graph)
+    prof = current_profiler()
+    nodes = kg.get("nodes", {})
+    edges = kg.get("edges", {})
+    with prof.stage("enrich", n_nodes=len(nodes), n_edges=len(edges)):
+        with prof.stage("enrich_nodes", n_nodes=len(nodes)):
+            _enrich_nodes(nodes, graph)
+        with prof.stage("enrich_edges", n_edges=len(edges)):
+            _enrich_edges(edges, graph)
 
     return message
 
