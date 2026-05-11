@@ -8,22 +8,22 @@ N = 1_000_000  # total number of nodes
 R = 25  # number of edges per node
 
 
-def get_next_qedge(qgraph):
-    """Get next qedge to solve."""
+def get_next_qedge(qgraph, graph=None):
+    """Get next qedge to solve.
+
+    When ``graph`` is supplied, pinned qnode "size" is the sum of CSR
+    degrees of the pinned ids — a much better proxy for traversal cost than
+    raw id count when degrees are skewed across the pinned set. The
+    fallback (no graph) is the legacy id-count behavior used by existing
+    tests and offline tools.
+    """
     qgraph = copy.deepcopy(qgraph)
-    for qnode in qgraph["nodes"].values():
-        if (
-            qnode.get("set_interpretation") == "MANY"
-            and len(qnode.get("member_ids") or []) > 0
-        ):
-            # MCQ
-            qnode["ids"] = len(qnode["member_ids"])
-        elif qnode.get("ids") is not None:
-            qnode["ids"] = len(qnode["ids"])
-        else:
-            qnode["ids"] = N
+    num_ids = _compute_num_ids(qgraph, graph)
+    for qnode_id, qnode in qgraph["nodes"].items():
+        qnode["ids"] = num_ids[qnode_id]
     pinnednesses = {
-        qnode_id: get_pinnedness(qgraph, qnode_id) for qnode_id in qgraph["nodes"]
+        qnode_id: get_pinnedness(qgraph, qnode_id, graph=graph)
+        for qnode_id in qgraph["nodes"]
     }
     efforts = {
         qedge_id: math.log(qgraph["nodes"][qedge["subject"]]["ids"])
@@ -40,10 +40,10 @@ def get_next_qedge(qgraph):
     return qedge_id, qgraph["edges"][qedge_id]
 
 
-def get_pinnedness(qgraph, qnode_id):
+def get_pinnedness(qgraph, qnode_id, graph=None):
     """Get pinnedness of each node."""
     adjacency_mat = get_adjacency_matrix(qgraph)
-    num_ids = get_num_ids(qgraph)
+    num_ids = get_num_ids(qgraph, graph=graph)
     return -compute_log_expected_n(
         adjacency_mat,
         num_ids,
@@ -85,9 +85,80 @@ def get_adjacency_matrix(qgraph):
     return A
 
 
-def get_num_ids(qgraph):
-    """Get the number of ids for each node."""
-    return {qnode_id: qnode["ids"] for qnode_id, qnode in qgraph["nodes"].items()}
+def get_num_ids(qgraph, graph=None):
+    """Get the per-qnode "size" feeding the planner's effort/pinnedness math.
+
+    With no ``graph``: legacy behaviour — pinned qnodes use raw id count
+    (and ``len(member_ids)`` for MCQ); unpinned qnodes use ``N``.
+
+    With ``graph``: pinned qnodes use ``max(sum_fwd_degree, sum_rev_degree)``
+    over the pinned ids, since the traversal cost we are scheduling around
+    is proportional to total degree, not id count. Ids unknown to the
+    graph are skipped. Unpinned qnodes still use ``N``.
+    """
+    return _compute_num_ids(qgraph, graph)
+
+
+def _compute_num_ids(qgraph, graph=None):
+    """Internal helper shared by get_num_ids and get_next_qedge.
+
+    If ``qnode["ids"]`` is already an int, it has been pre-normalised by
+    ``get_next_qedge``; trust it and return it directly.
+    """
+    out = {}
+    for qnode_id, qnode in qgraph["nodes"].items():
+        ids = qnode.get("ids")
+        if isinstance(ids, int):
+            out[qnode_id] = ids
+            continue
+        pinned_ids = _pinned_ids_for_qnode(qnode)
+        if pinned_ids is None:
+            out[qnode_id] = N
+            continue
+        if graph is None:
+            out[qnode_id] = max(1, len(pinned_ids))
+        else:
+            out[qnode_id] = max(1, _sum_degree(graph, pinned_ids))
+    return out
+
+
+def _pinned_ids_for_qnode(qnode):
+    """Return the list of pinned ids for a qnode, or None if unpinned.
+
+    Supports both regular pinning via ``ids`` and the MANY/MCQ form which
+    pins via ``member_ids``.
+    """
+    if (
+        qnode.get("set_interpretation") == "MANY"
+        and len(qnode.get("member_ids") or []) > 0
+    ):
+        return list(qnode["member_ids"])
+    ids = qnode.get("ids")
+    if ids is None:
+        return None
+    return list(ids)
+
+
+def _sum_degree(graph, node_ids):
+    """Conservative work estimate for traversing from ``node_ids``.
+
+    Returns max(sum_fwd_degree, sum_rev_degree). Whichever direction the
+    planner ends up traversing, the cost is dominated by that direction's
+    degree sum; using the larger of the two avoids underestimating.
+
+    Ids that don't resolve in the graph are silently skipped.
+    """
+    sum_fwd = 0
+    sum_rev = 0
+    fwd_offsets = graph.fwd_offsets
+    rev_offsets = graph.rev_offsets
+    for nid in node_ids:
+        idx = graph.get_node_idx(nid)
+        if idx is None:
+            continue
+        sum_fwd += int(fwd_offsets[idx + 1] - fwd_offsets[idx])
+        sum_rev += int(rev_offsets[idx + 1] - rev_offsets[idx])
+    return max(sum_fwd, sum_rev)
 
 
 def connected_edges(qgraph, node_id):

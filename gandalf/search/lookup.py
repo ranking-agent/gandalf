@@ -200,7 +200,7 @@ def _lookup_inner(
     # Process edges one at a time
     while len(subqgraph["edges"].keys()) > 0:
         # Get next edge to query
-        next_edge_id, next_edge = get_next_qedge(subqgraph)
+        next_edge_id, next_edge = get_next_qedge(subqgraph, graph)
 
         qedge_cm = prof.stage("qedge", qedge_id=next_edge_id)
         qedge_cm.__enter__()
@@ -556,7 +556,17 @@ def _build_response(
     # Build results -- one per unique node binding combination.
     # Edge dicts are created only for unique edges (not per-path).
     for node_key, path_indices in node_binding_groups.items():
-        first_idx = path_indices[0]
+        # Prefer a "direct" path -- one where every qnode with a superclass
+        # binds to the superclass id itself (no subclass child substitution).
+        # Falling back to path_indices[0] when no direct path exists keeps
+        # behaviour unchanged for queries that genuinely need subclass
+        # expansion; the preference matters when both direct and
+        # subclass-expanded paths coexist in the same group, in which case
+        # the direct path should drive the per-result KG node selection so
+        # that child nodes do not leak in for results bound to a direct edge.
+        first_idx = _pick_direct_first_idx(
+            path_indices, pa_nodes, node_id_cache, qnode_to_superclass, qnode_to_col
+        )
 
         result = {
             "node_bindings": {},
@@ -870,6 +880,38 @@ def _build_response(
         t_built - t_grouped,
     )
     logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
+
+
+def _pick_direct_first_idx(
+    path_indices, pa_nodes, node_id_cache, qnode_to_superclass, qnode_to_col
+):
+    """Pick a representative path index from a group, preferring direct paths.
+
+    A "direct" path is one where, for every qnode that has a superclass,
+    the path binds the qnode to the same id as its superclass column
+    (i.e. no child-substitution happened on this path). When a direct path
+    exists in the group, the result emitted for that group should source
+    its KG node selection from there so that subclass child nodes do not
+    leak into the KG for direct-edge results.
+    """
+    if not qnode_to_superclass:
+        return path_indices[0]
+    for pidx in path_indices:
+        is_direct = True
+        for qnode_id, sc_qnode in qnode_to_superclass.items():
+            if qnode_id not in qnode_to_col or sc_qnode not in qnode_to_col:
+                continue
+            col = qnode_to_col[qnode_id]
+            sc_col = qnode_to_col[sc_qnode]
+            if (
+                node_id_cache[int(pa_nodes[pidx, col])]
+                != node_id_cache[int(pa_nodes[pidx, sc_col])]
+            ):
+                is_direct = False
+                break
+        if is_direct:
+            return pidx
+    return path_indices[0]
 
 
 def _rewrite_for_subclass(query_graph, subclass_depth=1):

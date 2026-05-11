@@ -215,8 +215,10 @@ class TestMinInformationContent:
 
         Two-hop: Metformin --affects--> Gene --gene_associated--> T2D
         Without filtering, 3 genes bridge the path: PPARG(92.3), INSR(88.7), GCK(81.2).
-        T2D has IC=78.2, which is also below 85, so it gets filtered in the second
-        hop as well, yielding 0 total results.
+        With min_ic=85, GCK (81.2) is filtered at the intermediate gene node;
+        PPARG and INSR survive. The two pinned endpoints (Metformin IC=85.5,
+        T2D IC=78.2) are not filtered because the IC check applies to
+        discovered nodes during traversal, not pinned endpoints.
         """
         query = {
             "message": {
@@ -246,12 +248,17 @@ class TestMinInformationContent:
         response_unfiltered = lookup(graph, query, bmt=bmt)
         assert len(response_unfiltered["message"]["results"]) == 3
 
-        # With min_information_content=85: GCK (81.2) filtered in first hop,
-        # AND T2D (78.2) filtered in second hop → 0 results
+        # With min_information_content=85: GCK (81.2) is filtered out as a
+        # discovered intermediate gene, leaving PPARG and INSR → 2 results.
         response_filtered = lookup(
             graph, query, bmt=bmt, filter_config={"min_information_content": 85}
         )
-        assert len(response_filtered["message"]["results"]) == 0
+        assert len(response_filtered["message"]["results"]) == 2
+        gene_ids = {
+            r["node_bindings"]["n1"][0]["id"]
+            for r in response_filtered["message"]["results"]
+        }
+        assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643"}
 
     def test_min_ic_filters_backward_discovered_nodes(self, graph, bmt):
         """min_information_content should filter discovered nodes in backward search.
