@@ -730,13 +730,19 @@ class CSRGraph:
         props["predicate"] = predicate
         return props
 
-    def get_edge_properties_by_index(self, fwd_edge_idx):
+    def get_edge_properties_by_index(self, fwd_edge_idx, lmdb_detail=None):
         """Get all properties for an edge by its forward-CSR array position.
 
         This is O(1) for hot-path data (qualifiers, sources) and a single
         LMDB lookup for cold-path data (attributes).  Prefer
         this over ``get_all_edge_properties`` when you already have the
         forward edge index (e.g. from ``neighbors_with_properties``).
+
+        When *lmdb_detail* is provided, use it as the cold-path blob and
+        skip the per-call LMDB ``get``.  Pass an empty dict to skip LMDB
+        entirely (e.g. for an edge known not to have stored attributes).
+        Callers performing many lookups should pre-fetch with
+        ``lmdb_store.get_batch`` and pass the result through here.
         """
         fwd_edge_idx = int(fwd_edge_idx)
         props = self.edge_properties._get_props(fwd_edge_idx)
@@ -744,7 +750,10 @@ class CSRGraph:
         pred_id = int(self.fwd_predicates[fwd_edge_idx])
         props["predicate"] = self.id_to_predicate[pred_id]
 
-        if self.lmdb_store is not None:
+        if lmdb_detail is not None:
+            if lmdb_detail:
+                props.update(lmdb_detail)
+        elif self.lmdb_store is not None:
             detail = self.lmdb_store.get(fwd_edge_idx)
             props.update(detail)
 

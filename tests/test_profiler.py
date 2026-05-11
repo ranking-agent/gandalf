@@ -223,6 +223,61 @@ class TestProfilerInLookup:
         assert "batch_sizes" in lmdb
         assert "by_kind" in lmdb
 
+    def test_build_response_uses_batched_lmdb_lookup(self, graph, bmt):
+        """build_response should pre-fetch edge attributes with one batched
+        LMDB read instead of one ``get`` per (result, edge) pair.
+
+        With dedup happening per-result inside the loop, the unbatched code
+        path issued one LMDB call per unique edge per result; with batching
+        all unique forward edge indices collapse into a single ``get_batch``
+        call.
+        """
+        # Two-hop query that produces multiple results (each gene that joins
+        # both edges) so several edges flow through _build_response.
+        two_hop_query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"categories": ["biolink:Gene"]},
+                        "n2": {"ids": ["MONDO:0005148"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                        },
+                        "e1": {
+                            "subject": "n1",
+                            "object": "n2",
+                            "predicates": ["biolink:gene_associated_with_condition"],
+                        },
+                    },
+                },
+            },
+        }
+        response = lookup(graph, two_hop_query, bmt=bmt, profile=True)
+        # Sanity: we actually built some results
+        assert len(response["message"]["results"]) > 0
+
+        tree = _profile_summary(response)
+        lmdb = tree["lmdb"]
+        by_kind = lmdb["by_kind"]
+
+        # _build_response should reach LMDB via get_batch
+        assert "get_batch" in by_kind, (
+            "Expected build_response to issue a get_batch instead of "
+            "per-edge get calls"
+        )
+        # And it should not be issuing one-at-a-time gets for edge
+        # attributes any more.  Other phases may still issue a small
+        # number of gets, but it must be far less than the number of
+        # unique edges fetched in the batch.
+        batched_keys = by_kind["get_batch"]["total_keys"]
+        single_get_calls = by_kind.get("get", {}).get("calls", 0)
+        assert single_get_calls < batched_keys
+
 
 class TestProfilerOverHTTP:
     """Smoke-test the FastAPI ``/query`` endpoint with profile=true."""

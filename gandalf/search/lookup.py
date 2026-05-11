@@ -8,6 +8,7 @@ import uuid
 from collections import defaultdict
 from typing import Optional, Union
 
+import numpy as np
 from bmt.toolkit import Toolkit
 
 logger = logging.getLogger(__name__)
@@ -446,6 +447,22 @@ def _build_response(
     pa_num_edges = path_data.num_edges
     lightweight = path_data.lightweight
 
+    # Pre-fetch all cold-path edge attributes from LMDB in a single batched
+    # read.  Without this, ``get_edge_properties_by_index`` would issue one
+    # LMDB ``get`` per (result, edge) pair -- at hundreds of thousands of
+    # results this dominates response building.  Dedup is per-result inside
+    # the loop below, so the same forward edge index is asked for many
+    # times; collapsing those into a single transaction trades ~1M small
+    # gets for one ``get_batch`` over the unique indices.
+    edge_props_cache: dict[int, dict] = {}
+    if not lightweight and graph.lmdb_store is not None and pa_num_edges > 0:
+        eidx_view = pa_fwd_eidx[:, :pa_num_edges]
+        unique_fwd_eidx = np.unique(eidx_view[eidx_view >= 0])
+        if unique_fwd_eidx.size:
+            edge_props_cache = graph.lmdb_store.get_batch(
+                [int(x) for x in unique_fwd_eidx]
+            )
+
     # Pre-compute subclass metadata for result building
     superclass_qnodes = {
         qnode_id
@@ -693,8 +710,9 @@ def _build_response(
                             edge_props = {}
                         else:
                             edge_props = graph.get_edge_properties_by_index(
-                                fwd_eidx
-                            ).copy()
+                                fwd_eidx,
+                                lmdb_detail=edge_props_cache.get(fwd_eidx, {}),
+                            )
                         edge_props["predicate"] = predicate
                         edge_props["subject"] = subj_id
                         edge_props["object"] = obj_id
