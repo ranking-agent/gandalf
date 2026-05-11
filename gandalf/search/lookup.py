@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, Union
 
 from bmt.toolkit import Toolkit
 
@@ -94,7 +94,9 @@ def lookup(
 
     node_filters = build_node_filters(filter_config or {})
 
-    prof: object = Profiler(root_name="lookup") if profile else NullProfiler()
+    prof: Union[Profiler, NullProfiler] = (
+        Profiler(root_name="lookup") if profile else NullProfiler()
+    )
     lmdb_originals = None
 
     try:
