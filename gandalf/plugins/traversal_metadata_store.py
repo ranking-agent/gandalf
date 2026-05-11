@@ -289,9 +289,7 @@ class TraversalMetadataStore:
                     break
         return result
 
-    def iter_namespace(
-        self, namespace: str
-    ) -> Iterator[Tuple[Optional[int], Any]]:
+    def iter_namespace(self, namespace: str) -> Iterator[Tuple[Optional[int], Any]]:
         """Yield ``(sub_key, value)`` for every record in ``namespace``."""
         if self._env is None:
             return
@@ -304,7 +302,7 @@ class TraversalMetadataStore:
                 key = bytes(key_buf)
                 if not key.startswith(prefix):
                     return
-                sub_bytes = key[len(prefix):]
+                sub_bytes = key[len(prefix) :]
                 if sub_bytes == b"":
                     sub_key: Optional[int] = None
                 else:

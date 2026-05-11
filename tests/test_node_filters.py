@@ -149,7 +149,9 @@ class TestMinInformationContent:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, filter_config={"min_information_content": 90})
+        response = lookup(
+            graph, query, bmt=bmt, filter_config={"min_information_content": 90}
+        )
         results = response["message"]["results"]
 
         assert len(results) == 2
@@ -201,7 +203,9 @@ class TestMinInformationContent:
             },
         }
 
-        response = lookup(graph, query, bmt=bmt, filter_config={"min_information_content": 100})
+        response = lookup(
+            graph, query, bmt=bmt, filter_config={"min_information_content": 100}
+        )
         results = response["message"]["results"]
 
         assert len(results) == 0

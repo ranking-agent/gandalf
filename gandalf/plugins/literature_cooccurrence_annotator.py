@@ -73,15 +73,12 @@ def _factory(cfg):
         )
 
     service_url = (
-        settings_for_request.get("service_url")
-        or settings.cooccurrence_service_url
+        settings_for_request.get("service_url") or settings.cooccurrence_service_url
     )
     min_cooccurrence = int(
         settings_for_request.get("min_cooccurrence", _DEFAULT_MIN_COOCCURRENCE)
     )
-    include_pair_edges = bool(
-        settings_for_request.get("include_pair_edges", True)
-    )
+    include_pair_edges = bool(settings_for_request.get("include_pair_edges", True))
     timeout_s = float(settings_for_request.get("timeout_s", _DEFAULT_TIMEOUT_S))
     infores_id = settings_for_request.get("infores_id") or _DEFAULT_INFORES
 
@@ -104,17 +101,13 @@ def _factory(cfg):
                 service_url, curies, timeout_s
             )
         except Exception as exc:
-            logger.warning(
-                "literature_cooccurrence service call failed: %s", exc
-            )
+            logger.warning("literature_cooccurrence service call failed: %s", exc)
             return
 
         _attach_node_counts(nodes, node_counts, infores_id)
 
         if include_pair_edges:
-            _insert_pair_edges(
-                edges, pair_counts, min_cooccurrence, infores_id
-            )
+            _insert_pair_edges(edges, pair_counts, min_cooccurrence, infores_id)
 
     return _annotator
 
@@ -149,9 +142,7 @@ def _fetch_cooccurrence(
     return node_counts, pair_counts
 
 
-def _attach_node_counts(
-    nodes: dict, node_counts: dict, infores_id: str
-) -> None:
+def _attach_node_counts(nodes: dict, node_counts: dict, infores_id: str) -> None:
     for curie, count in node_counts.items():
         node = nodes.get(curie)
         if node is None:

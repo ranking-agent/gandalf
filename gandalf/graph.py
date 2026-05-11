@@ -283,6 +283,7 @@ class CSRGraph:
         # enrichment / response-building code: this store is invisible to
         # TRAPI clients.
         from gandalf.plugins.traversal_metadata_store import TraversalMetadataStore
+
         self.traversal_metadata = TraversalMetadataStore.open_writable()
 
         # Predicate vocabulary
@@ -1289,6 +1290,7 @@ class CSRGraph:
         # are filled in by ``run_enrichers`` below; for that we need a
         # writable store, so legacy graphs fall back to a temp env.
         from gandalf.plugins.traversal_metadata_store import TraversalMetadataStore
+
         traversal_metadata_path = directory / "traversal_metadata.lmdb"
         if traversal_metadata_path.exists():
             graph.traversal_metadata = TraversalMetadataStore.open_readonly(
@@ -1468,6 +1470,7 @@ class CSRGraph:
         # Run plugin enrichers so traversal_metadata is populated before any
         # query is executed against this graph.
         from gandalf.plugins.enrichers import run_enrichers
+
         run_enrichers(graph)
 
         return graph
