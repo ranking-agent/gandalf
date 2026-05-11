@@ -104,6 +104,13 @@ def _compute_num_ids(qgraph, graph=None):
 
     If ``qnode["ids"]`` is already an int, it has been pre-normalised by
     ``get_next_qedge``; trust it and return it directly.
+
+    Pinned-qnode sizes are capped at ``N - 1`` so that a pinned qnode is
+    always strictly cheaper than an unpinned one (which uses ``N``).
+    Without the cap, a pinned id with very high CSR degree could exceed
+    ``N``, causing the planner to treat it as unpinned and potentially
+    select an edge whose both endpoints are unpinned — which then trips
+    ``query_edge``'s "Both nodes unpinned" guard.
     """
     out = {}
     for qnode_id, qnode in qgraph["nodes"].items():
@@ -116,9 +123,9 @@ def _compute_num_ids(qgraph, graph=None):
             out[qnode_id] = N
             continue
         if graph is None:
-            out[qnode_id] = max(1, len(pinned_ids))
+            out[qnode_id] = max(1, min(N - 1, len(pinned_ids)))
         else:
-            out[qnode_id] = max(1, _sum_degree(graph, pinned_ids))
+            out[qnode_id] = max(1, min(N - 1, _sum_degree(graph, pinned_ids)))
     return out
 
 

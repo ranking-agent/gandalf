@@ -64,6 +64,40 @@ class TestGetNumIds:
         assert get_num_ids(qgraph, graph=None)["n0"] == 7
 
 
+class TestPinnedSizeCap:
+    def test_pinned_capped_below_N(self, graph):
+        # Simulate a pinned qnode whose sum_degree exceeds N: ask for the
+        # size with a fake high-N constant by passing many ids. Even with
+        # a synthetic 2 * N member_ids count the result must remain < N
+        # so the planner never confuses pinned with unpinned.
+        qgraph = {
+            "nodes": {
+                "n0": {
+                    "set_interpretation": "MANY",
+                    "member_ids": ["X"] * (2 * N),
+                }
+            },
+            "edges": {},
+        }
+        size = get_num_ids(qgraph)["n0"]
+        assert size < N
+        assert size == N - 1
+
+    def test_high_degree_pinned_does_not_match_unpinned(self, graph):
+        # Pinned-with-high-degree must remain strictly cheaper than truly
+        # unpinned, otherwise get_next_qedge can pick a both-unpinned edge.
+        # The fixture's CHEBI:6801 has the highest fwd degree.
+        qgraph = {
+            "nodes": {
+                "n_pinned": {"ids": ["CHEBI:6801"]},
+                "n_unpinned": {"categories": ["biolink:Gene"]},
+            },
+            "edges": {},
+        }
+        sizes = get_num_ids(qgraph, graph=graph)
+        assert sizes["n_pinned"] < sizes["n_unpinned"]
+
+
 class TestGetNextQedge:
     def test_picks_more_pinned_edge_first(self):
         # e0 has both endpoints pinned (id counts 1, 1).
@@ -107,6 +141,26 @@ class TestGetNextQedge:
         # estimate and therefore the higher priority.
         qedge_id, _ = get_next_qedge(qgraph, graph)
         assert qedge_id == "e_low"
+
+    def test_never_picks_both_unpinned_edge_when_pinned_edge_exists(self, graph):
+        # 3-node chain with one pinned endpoint at each end and an
+        # unpinned-unpinned edge bridging them. The planner must pick
+        # one of the pinned-side edges first regardless of degree.
+        qgraph = {
+            "nodes": {
+                "n0": {"ids": ["CHEBI:6801"]},  # high degree (~11)
+                "n1": {"categories": ["biolink:Gene"]},
+                "n2": {"categories": ["biolink:Gene"]},
+                "n3": {"ids": ["MONDO:0005148"]},  # also fairly high degree
+            },
+            "edges": {
+                "e_pinned_left": {"subject": "n0", "object": "n1"},
+                "e_middle_unpinned": {"subject": "n1", "object": "n2"},
+                "e_pinned_right": {"subject": "n2", "object": "n3"},
+            },
+        }
+        qedge_id, _ = get_next_qedge(qgraph, graph)
+        assert qedge_id != "e_middle_unpinned"
 
     def test_with_graph_does_not_change_obviously_correct_ordering(self, graph):
         # Single-pinned-vs-unpinned-only should always pick the pinned edge
