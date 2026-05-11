@@ -56,7 +56,9 @@ def test_build_node_filters_preserves_registration_order(isolated_registry):
             def _filter(graph, node_idx):
                 calls.append(name)
                 return True
+
             return _filter
+
         return _factory
 
     nf.register_node_filter("a", _make("a"))

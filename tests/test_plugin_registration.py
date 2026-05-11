@@ -48,9 +48,7 @@ def test_register_node_enricher_adds_in_order(isolated_enricher_registry):
     assert enr.registered_enricher_names() == ["a", "b"]
 
 
-def test_run_enrichers_invokes_in_registration_order(
-    isolated_enricher_registry, store
-):
+def test_run_enrichers_invokes_in_registration_order(isolated_enricher_registry, store):
     calls = []
     enr.register_node_enricher("first", lambda g: calls.append("first"))
     enr.register_node_enricher("second", lambda g: calls.append("second"))
@@ -70,6 +68,7 @@ def test_run_enrichers_skips_namespaces_already_in_store(
         def _enrich(g):
             calls.append(name)
             g.traversal_metadata.put(name, 0, "computed")
+
         return _enrich
 
     enr.register_node_enricher("alpha", _record("alpha"))
@@ -122,7 +121,9 @@ def test_enricher_writes_to_store_without_touching_attributes(
             self.traversal_metadata = store
             # Stand-in for node_properties; mimics the read path used by
             # response enrichment.
-            self._attrs_by_node = {0: [{"original_attribute_name": "name", "value": "x"}]}
+            self._attrs_by_node = {
+                0: [{"original_attribute_name": "name", "value": "x"}]
+            }
 
         def get_node_property(self, node_idx, key, default=None):
             if key == "attributes":
@@ -182,7 +183,9 @@ def test_store_iter_namespace(store):
     store.put("ns", None, "global")
     store.put("other_ns", 0, "shouldnt-show")
 
-    pairs = sorted(store.iter_namespace("ns"), key=lambda kv: (kv[0] is not None, kv[0]))
+    pairs = sorted(
+        store.iter_namespace("ns"), key=lambda kv: (kv[0] is not None, kv[0])
+    )
     assert pairs == [(None, "global"), (0, "a"), (5, "b")]
 
 

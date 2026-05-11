@@ -67,9 +67,7 @@ def test_attaches_node_counts(fake_fetch):
         node_counts={"CURIE:A": 100, "CURIE:B": 200},
         pair_counts={},
     )
-    ann = plugin._factory(
-        {"literature_cooccurrence": {"service_url": "http://stub"}}
-    )
+    ann = plugin._factory({"literature_cooccurrence": {"service_url": "http://stub"}})
     response = _response_with_nodes("CURIE:A", "CURIE:B")
     ann(response, None)
 
@@ -89,9 +87,7 @@ def test_inserts_pair_edges_above_threshold(fake_fetch):
             "CURIE:A\tCURIE:C": 10,  # below default 50
         },
     )
-    ann = plugin._factory(
-        {"literature_cooccurrence": {"service_url": "http://stub"}}
-    )
+    ann = plugin._factory({"literature_cooccurrence": {"service_url": "http://stub"}})
     response = _response_with_nodes("CURIE:A", "CURIE:B", "CURIE:C")
     ann(response, None)
 
@@ -151,9 +147,7 @@ def test_service_failure_is_swallowed(monkeypatch):
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(plugin, "_fetch_cooccurrence", _boom)
-    ann = plugin._factory(
-        {"literature_cooccurrence": {"service_url": "http://stub"}}
-    )
+    ann = plugin._factory({"literature_cooccurrence": {"service_url": "http://stub"}})
     response = _response_with_nodes("CURIE:A")
     # Plugin must not raise; response must remain unmodified.
     ann(response, None)
