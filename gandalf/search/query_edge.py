@@ -722,9 +722,7 @@ def _record_traversal_metrics(graph, total_neighbors, slow_nodes):
     if not slow_nodes:
         return
     # Top-N by wall time so big offenders aren't crowded out by the cap.
-    top = sorted(slow_nodes, key=lambda r: r[2], reverse=True)[
-        :_SLOW_NODE_EVENT_LIMIT
-    ]
+    top = sorted(slow_nodes, key=lambda r: r[2], reverse=True)[:_SLOW_NODE_EVENT_LIMIT]
     for node_idx, neighbors, node_time in top:
         node_id = None
         try:

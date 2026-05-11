@@ -14,7 +14,6 @@ from gandalf.profiler import (
 from gandalf.search import lookup
 from tests.search_fixtures import graph  # noqa: F401
 
-
 _ONE_HOP_BOTH_PINNED = {
     "message": {
         "query_graph": {
@@ -155,9 +154,7 @@ class TestProfilerInLookup:
         assert "ProfileSummary" not in codes
 
     def test_profile_kwarg_emits_summary_with_expected_stages(self, graph, bmt):
-        response = lookup(
-            graph, _ONE_HOP_BOTH_PINNED, bmt=bmt, profile=True
-        )
+        response = lookup(graph, _ONE_HOP_BOTH_PINNED, bmt=bmt, profile=True)
         tree = _profile_summary(response)
         assert tree is not None, "Expected a ProfileSummary log entry"
         assert tree["name"] == "lookup"
@@ -170,9 +167,7 @@ class TestProfilerInLookup:
 
     def test_profile_response_shape_unchanged(self, graph, bmt):
         baseline = lookup(graph, _ONE_HOP_PINNED_TO_GENE, bmt=bmt)
-        profiled = lookup(
-            graph, _ONE_HOP_PINNED_TO_GENE, bmt=bmt, profile=True
-        )
+        profiled = lookup(graph, _ONE_HOP_PINNED_TO_GENE, bmt=bmt, profile=True)
         # Same number of results, same node bindings — only logs differ.
         assert len(profiled["message"]["results"]) == len(
             baseline["message"]["results"]

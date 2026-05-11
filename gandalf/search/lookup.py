@@ -103,7 +103,10 @@ def lookup(
         with set_profiler(prof):
             if profile:
                 lmdb_originals = install_lmdb_hook(getattr(graph, "lmdb_store", None))
-                if lmdb_originals is None and getattr(graph, "lmdb_store", None) is not None:
+                if (
+                    lmdb_originals is None
+                    and getattr(graph, "lmdb_store", None) is not None
+                ):
                     prof.add_metric(
                         "lmdb_hook_skipped",
                         "another_profile_already_active",

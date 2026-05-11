@@ -139,9 +139,7 @@ class Profiler:
     def finalize(self) -> None:
         """Close the root node and attach LMDB totals. Safe to call twice."""
         if self._root["duration_ms"] is None:
-            self._root["duration_ms"] = (
-                time.perf_counter() - self._t_origin
-            ) * 1000.0
+            self._root["duration_ms"] = (time.perf_counter() - self._t_origin) * 1000.0
         self._root["lmdb"] = dict(self._lmdb_totals)
 
     def to_dict(self) -> dict:
@@ -221,7 +219,9 @@ def current_profiler() -> Union[Profiler, NullProfiler]:
 
 
 @contextmanager
-def set_profiler(prof: Union[Profiler, NullProfiler]) -> Iterator[Union[Profiler, NullProfiler]]:
+def set_profiler(
+    prof: Union[Profiler, NullProfiler],
+) -> Iterator[Union[Profiler, NullProfiler]]:
     """Bind *prof* as the active profiler for the duration of the block."""
     token = profiler_var.set(prof)
     try:
