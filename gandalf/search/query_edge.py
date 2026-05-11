@@ -153,10 +153,20 @@ def query_edge(
             matches.append((subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx))
 
     prof = current_profiler()
+    n_allowed_preds = len(allowed_predicates) if allowed_predicates else 0
+    n_inverse_preds = len(inverse_pred_set) if check_inverse else 0
 
     # Case 1: Start pinned, end unpinned
     if start_idxes is not None and end_idxes is None:
-        with prof.stage("query_forward", n_pinned=len(start_idxes)):
+        with prof.stage(
+            "query_forward",
+            n_pinned=len(start_idxes),
+            n_predicates=n_allowed_preds,
+            n_inverse_preds=n_inverse_preds,
+            check_inverse=check_inverse,
+            n_end_categories=len(end_categories) if end_categories else 0,
+            has_attribute_constraints=bool(attribute_constraints),
+        ):
             _query_forward(
                 graph,
                 start_idxes,
@@ -174,7 +184,15 @@ def query_edge(
 
     # Case 2: Start unpinned, end pinned
     elif start_idxes is None and end_idxes is not None:
-        with prof.stage("query_backward", n_pinned=len(end_idxes)):
+        with prof.stage(
+            "query_backward",
+            n_pinned=len(end_idxes),
+            n_predicates=n_allowed_preds,
+            n_inverse_preds=n_inverse_preds,
+            check_inverse=check_inverse,
+            n_start_categories=len(start_categories) if start_categories else 0,
+            has_attribute_constraints=bool(attribute_constraints),
+        ):
             _query_backward(
                 graph,
                 end_idxes,
@@ -196,6 +214,10 @@ def query_edge(
             "query_both_pinned",
             n_start=len(start_idxes),
             n_end=len(end_idxes),
+            n_predicates=n_allowed_preds,
+            n_inverse_preds=n_inverse_preds,
+            check_inverse=check_inverse,
+            has_attribute_constraints=bool(attribute_constraints),
         ):
             _query_both_pinned(
                 graph,
@@ -356,6 +378,7 @@ def _query_forward(
             slow_nodes.append((start_idx, node_neighbors, node_time))
 
     t1 = time.perf_counter()
+    _record_traversal_metrics(graph, total_neighbors, slow_nodes)
     logger.debug("  Traversed %s total neighbors", total_neighbors)
     if slow_nodes:
         logger.debug("  Slow nodes (>0.1s): %s", len(slow_nodes))
@@ -508,6 +531,7 @@ def _query_backward(
             slow_nodes.append((end_idx, node_neighbors, node_time))
 
     t1 = time.perf_counter()
+    _record_traversal_metrics(graph, total_neighbors, slow_nodes)
     logger.debug("  Traversed %s total incoming neighbors", total_neighbors)
     if slow_nodes:
         logger.debug("  Slow nodes (>0.1s): %s", len(slow_nodes))
@@ -668,6 +692,7 @@ def _query_both_pinned(
                 add_match(end_idx, stored_pred, obj_idx, fwd_edge_idx, via_inverse=True)
 
     t1 = time.perf_counter()
+    _record_traversal_metrics(graph, total_neighbors, slow_nodes)
     logger.debug(
         "    Neighbor traversal: %.3fs (%s neighbors)",
         t1 - t_neighbors_start,
@@ -679,6 +704,40 @@ def _query_both_pinned(
             logger.debug(
                 "      Node %s: %s neighbors, %.2fs", node_idx, neighbors, node_time
             )
+
+
+_SLOW_NODE_EVENT_LIMIT = 10
+
+
+def _record_traversal_metrics(graph, total_neighbors, slow_nodes):
+    """Surface neighborhood-size and slow-node detail to the profiler.
+
+    Aggregates onto the currently-active query_* stage. ``slow_nodes`` is
+    the list ``[(node_idx, neighbors, duration_seconds), ...]`` collected by
+    the search loop for nodes that took longer than the inline threshold.
+    """
+    prof = current_profiler()
+    prof.add_metric("total_neighbors", int(total_neighbors))
+    prof.add_metric("slow_nodes", len(slow_nodes))
+    if not slow_nodes:
+        return
+    # Top-N by wall time so big offenders aren't crowded out by the cap.
+    top = sorted(slow_nodes, key=lambda r: r[2], reverse=True)[
+        :_SLOW_NODE_EVENT_LIMIT
+    ]
+    for node_idx, neighbors, node_time in top:
+        node_id = None
+        try:
+            node_id = graph.get_node_id(node_idx)
+        except Exception:
+            pass
+        prof.event(
+            "slow_node",
+            node_idx=int(node_idx),
+            node_id=node_id,
+            neighbors=int(neighbors),
+            duration_ms=node_time * 1000.0,
+        )
 
 
 def _edge_passes_attribute_constraints(graph, fwd_edge_idx, attribute_constraints):

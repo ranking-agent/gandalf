@@ -200,13 +200,24 @@ class TestProfilerInLookup:
         assert qedge_nodes
         # Find any qedge whose subtree contains a query_* stage.
         all_sub_names = set()
+        query_stages = []
         for qe in qedge_nodes:
             for sub in qe["children"]:
                 all_sub_names.add(sub["name"])
-                # query_* duration should be <= parent qedge duration
                 if sub["name"].startswith("query_"):
+                    query_stages.append(sub)
+                    # query_* duration should be <= parent qedge duration
                     assert sub["duration_ms"] <= qe["duration_ms"] + 1.0
         assert all_sub_names & {"query_forward", "query_backward", "query_both_pinned"}
+        # Diagnostic fields/metrics so callers can see why a stage was slow.
+        for qs in query_stages:
+            fields = qs.get("fields", {})
+            assert "n_predicates" in fields
+            assert "check_inverse" in fields
+            metrics = qs.get("metrics", {})
+            # _record_traversal_metrics always writes these two.
+            assert "total_neighbors" in metrics
+            assert "slow_nodes" in metrics
 
     def test_lmdb_metrics_present_when_profile_on(self, graph, bmt):
         response = lookup(graph, _ONE_HOP_BOTH_PINNED, bmt=bmt, profile=True)
