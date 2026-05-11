@@ -23,9 +23,7 @@ ResponseAnnotatorFactory = Callable[[dict], Optional[ResponseAnnotator]]
 _REGISTRY: list[tuple[str, ResponseAnnotatorFactory]] = []
 
 
-def register_response_annotator(
-    name: str, factory: ResponseAnnotatorFactory
-) -> None:
+def register_response_annotator(name: str, factory: ResponseAnnotatorFactory) -> None:
     """Register a ResponseAnnotator factory under a name.
 
     A factory takes the per-request ``annotator_config`` dict and returns

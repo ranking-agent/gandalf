@@ -472,11 +472,13 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     # ``__init__`` via ``__new__`` above means we have to set this
     # explicitly before ``run_enrichers`` reads it.
     from gandalf.plugins.traversal_metadata_store import TraversalMetadataStore
+
     graph.traversal_metadata = TraversalMetadataStore.open_writable()
 
     # Run plugin enrichers so traversal_metadata is populated before any
     # query is executed against this graph.
     from gandalf.plugins.enrichers import run_enrichers
+
     run_enrichers(graph)
 
     return graph

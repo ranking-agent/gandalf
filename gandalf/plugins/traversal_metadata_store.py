@@ -198,11 +198,13 @@ class TraversalMetadataStore:
         if self._readonly:
             raise RuntimeError("TraversalMetadataStore is readonly")
         self._open()
+        env = self._env
+        assert env is not None  # _open() guarantees this
         key = _build_key(namespace, sub_key)
         val = msgpack.packb(value, use_bin_type=True)
         # Single-write path: small overhead per call. Plugins iterating
         # millions of nodes should use ``put_many`` for batching.
-        with self._env.begin(write=True) as txn:
+        with env.begin(write=True) as txn:
             txn.put(key, val)
 
     def put_many(
@@ -215,23 +217,25 @@ class TraversalMetadataStore:
         if self._readonly:
             raise RuntimeError("TraversalMetadataStore is readonly")
         self._open()
+        env = self._env
+        assert env is not None  # _open() guarantees this
         ns_bytes = namespace.encode("utf-8")
         if _NS_SEP in ns_bytes:
             raise ValueError(f"Namespace must not contain a NUL byte: {namespace!r}")
 
         count = 0
         pending: list[tuple[bytes, bytes]] = []
-        txn = self._env.begin(write=True)
+        txn = env.begin(write=True)
         try:
             for sub_key, value in items:
                 key = ns_bytes + _NS_SEP + _encode_subkey(sub_key)
                 val = msgpack.packb(value, use_bin_type=True)
-                txn = _put_with_resize(self._env, txn, key, val, pending)
+                txn = _put_with_resize(env, txn, key, val, pending)
                 count += 1
                 if count % commit_every == 0:
                     txn.commit()
                     pending.clear()
-                    txn = self._env.begin(write=True)
+                    txn = env.begin(write=True)
             txn.commit()
             pending.clear()
         except Exception:
@@ -285,9 +289,7 @@ class TraversalMetadataStore:
                     break
         return result
 
-    def iter_namespace(
-        self, namespace: str
-    ) -> Iterator[Tuple[Optional[int], Any]]:
+    def iter_namespace(self, namespace: str) -> Iterator[Tuple[Optional[int], Any]]:
         """Yield ``(sub_key, value)`` for every record in ``namespace``."""
         if self._env is None:
             return
@@ -300,7 +302,7 @@ class TraversalMetadataStore:
                 key = bytes(key_buf)
                 if not key.startswith(prefix):
                     return
-                sub_bytes = key[len(prefix):]
+                sub_bytes = key[len(prefix) :]
                 if sub_bytes == b"":
                     sub_key: Optional[int] = None
                 else:
