@@ -260,7 +260,7 @@ def _current_rss_kb() -> int:
     gunicorn preload_app=True each worker reads its own RSS instead of the
     master's PID it inherited at fork time.
     """
-    return psutil.Process().memory_info().rss // 1024
+    return int(psutil.Process().memory_info().rss) // 1024
 
 
 def _current_rss_anon_kb() -> int:
@@ -280,7 +280,7 @@ def _current_rss_anon_kb() -> int:
     except OSError:
         pass
     try:
-        return psutil.Process().memory_full_info().uss // 1024
+        return int(psutil.Process().memory_full_info().uss) // 1024
     except Exception:
         return -1
 
