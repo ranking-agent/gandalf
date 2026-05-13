@@ -22,6 +22,11 @@ timeout = 300
 # Graceful shutdown timeout
 graceful_timeout = 30
 
+# Recycle workers after this many requests (plus jitter) to release memory
+# that Python/glibc allocators hold onto after large queries.
+max_requests = 500
+max_requests_jitter = 100
+
 # Access log to stdout (structured logging handled by app middleware)
 accesslog = "-"
 
@@ -30,11 +35,11 @@ errorlog = "-"
 loglevel = settings.log_level.lower()
 
 
-# Hooks run in the master process, so they survive worker SIGKILL (OOM, timeout)
-# and let us correlate a dead PID with the in-flight request_id seen in the
-# worker's "request start" log line.
-def worker_exit(server, worker):
-    server.log.warning("worker_exit pid=%s age=%s", worker.pid, worker.age)
+# child_exit runs in the master after waitpid() reaps the worker, so it fires
+# even on SIGKILL (kernel OOM) — unlike worker_exit, which runs in the worker
+# itself and is skipped when SIGKILL bypasses the worker's finally block.
+def child_exit(server, worker):
+    server.log.warning("child_exit pid=%s age=%s", worker.pid, worker.age)
 
 
 def worker_abort(worker):
