@@ -250,33 +250,20 @@ if settings.otel_enabled:
     _otel_provider = TracerProvider(resource=_otel_resource)
     _otel_provider.add_span_processor(BatchSpanProcessor(_otel_exporter))
     trace.set_tracer_provider(_otel_provider)
-
-    # Register the trace-context response middleware BEFORE instrumenting the
-    # app so FastAPIInstrumentor's ASGI middleware wraps it.  That places this
-    # middleware INSIDE the server span, so ``inject()`` sees the active span
-    # context and emits the request's traceparent (the one extracted from the
-    # incoming header, or a new one if absent).
-    @APP.middleware("http")
-    async def _otel_response_propagator(request: Request, call_next):
-        """Echo the active OTel trace context into the response headers.
-
-        Adds ``traceparent`` (and ``tracestate`` when present) so clients can
-        correlate their request with the server-side span.  Does nothing when
-        no valid span is active (e.g. for ``excluded_urls``).
-        """
-        response = await call_next(request)
-        carrier: dict[str, str] = {}
-        _real_otel_inject(carrier)
-        for key, value in carrier.items():
-            response.headers[key] = value
-        return response
-
     FastAPIInstrumentor.instrument_app(
         APP,
         tracer_provider=_otel_provider,
         excluded_urls="docs,openapi.json",
     )
 
+    # Exposed so ``/asyncquery`` can capture the live trace context and forward
+    # it as ``traceparent`` on the background callback POST.  Without this the
+    # callback goes out untraced (httpx is not auto-instrumented and the
+    # background threadpool does not inherit the request's contextvars), and
+    # the callback receiver would start a brand-new disconnected trace in
+    # Jaeger.  FastAPIInstrumentor already handles inbound extraction and the
+    # sync /query response carries no further trace hop, so no response-side
+    # middleware is needed for Jaeger to join spans correctly.
     _otel_inject_headers = _real_otel_inject  # type: ignore[assignment]
     logger.info(
         "OpenTelemetry tracing enabled (service=%s).", settings.otel_service_name

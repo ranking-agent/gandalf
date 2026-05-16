@@ -1,19 +1,20 @@
 """End-to-end tests for W3C ``traceparent`` propagation through Gandalf.
 
-The server is Plater-compatible, which means it advertises OpenTelemetry
-support.  Two behaviours must hold:
+``FastAPIInstrumentor`` already handles the inbound side for both ``/query``
+and ``/asyncquery``: it extracts the incoming ``traceparent`` and makes the
+server span a child of the caller's span, so Jaeger joins the two sides by
+trace_id.  The only piece that does NOT happen for free is the async
+callback POST — httpx is not auto-instrumented, and the FastAPI background
+task runs on a worker thread that does not inherit the request's OTel
+contextvars.  Without explicit propagation the callback receiver would
+start a brand-new disconnected trace.
 
-1.  Synchronous ``POST /query`` echoes the active server-side ``traceparent``
-    in the response headers so callers can correlate their request with the
-    span Gandalf produced (and verify the same trace_id when they supplied
-    an incoming ``traceparent``).
-2.  ``POST /asyncquery`` forwards the originating trace context to the
-    eventual callback POST, so the asynchronous result the caller receives
-    later is still linked to their trace.
+These tests verify that ``/asyncquery`` forwards the originating trace
+context to the eventual callback POST so the full chain stays linked.
 
-These tests reload :mod:`gandalf.server` with OpenTelemetry enabled.  The
-shared ``conftest.py`` disables it by default so other tests do not require
-the instrumentation packages.
+They reload :mod:`gandalf.server` with OpenTelemetry enabled; the shared
+``conftest.py`` disables it by default so the rest of the suite does not
+require the instrumentation packages.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ _QUERY_MESSAGE = {
     },
 }
 
-# A valid W3C traceparent: version-tracestate-parent_id-flags.
+# A valid W3C traceparent: version-trace_id-parent_id-flags.
 # trace_id chosen from the W3C spec example so failures are easy to spot.
 _INCOMING_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 _INCOMING_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
@@ -90,41 +91,6 @@ def _trace_id_of(traceparent: str) -> str:
     parts = traceparent.split("-")
     assert len(parts) == 4, f"malformed traceparent: {traceparent!r}"
     return parts[1]
-
-
-# ---------------------------------------------------------------------------
-# Sync /query
-# ---------------------------------------------------------------------------
-
-
-def test_sync_response_echoes_incoming_traceparent_trace_id(otel_server):
-    """When the client sends a ``traceparent``, the response carries the same trace_id."""
-    client = TestClient(otel_server.APP)
-    resp = client.post(
-        "/query",
-        headers={"traceparent": _INCOMING_TRACEPARENT},
-        json={"message": _QUERY_MESSAGE},
-    )
-    assert resp.status_code == 200, resp.text
-    assert "traceparent" in resp.headers, resp.headers
-    assert _trace_id_of(resp.headers["traceparent"]) == _INCOMING_TRACE_ID
-
-
-def test_sync_response_carries_traceparent_without_incoming(otel_server):
-    """Without an incoming ``traceparent`` the server still emits its own."""
-    client = TestClient(otel_server.APP)
-    resp = client.post("/query", json={"message": _QUERY_MESSAGE})
-    assert resp.status_code == 200, resp.text
-    assert "traceparent" in resp.headers
-    trace_id = _trace_id_of(resp.headers["traceparent"])
-    assert len(trace_id) == 32
-    # All-zero trace_id is reserved for "invalid" — the server-side span must be valid.
-    assert int(trace_id, 16) != 0
-
-
-# ---------------------------------------------------------------------------
-# Async /asyncquery
-# ---------------------------------------------------------------------------
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
@@ -186,9 +152,6 @@ def test_async_callback_forwards_request_traceparent(otel_server, callback_serve
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "accepted"
-    # The /asyncquery response itself should also echo the trace context.
-    assert "traceparent" in resp.headers
-    assert _trace_id_of(resp.headers["traceparent"]) == _INCOMING_TRACE_ID
 
     assert _wait_for(lambda: len(received) > 0), "callback never received the POST"
     cb = received[0]
