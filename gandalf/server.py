@@ -211,8 +211,20 @@ if STATIC_DIR.exists():
 # OpenTelemetry / Jaeger tracing (Plater-compatible)
 # ---------------------------------------------------------------------------
 
+
+def _otel_inject_headers(carrier: dict) -> None:
+    """No-op stub when OpenTelemetry is disabled.
+
+    Replaced below with the real W3C TraceContext propagator when
+    ``settings.otel_enabled`` is True.  Callers always pass a dict and
+    forward whatever keys end up in it to outgoing requests / responses,
+    so the no-op simply leaves the carrier untouched.
+    """
+
+
 if settings.otel_enabled:
     from opentelemetry import trace
+    from opentelemetry.propagate import inject as _real_otel_inject
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
@@ -238,11 +250,34 @@ if settings.otel_enabled:
     _otel_provider = TracerProvider(resource=_otel_resource)
     _otel_provider.add_span_processor(BatchSpanProcessor(_otel_exporter))
     trace.set_tracer_provider(_otel_provider)
+
+    # Register the trace-context response middleware BEFORE instrumenting the
+    # app so FastAPIInstrumentor's ASGI middleware wraps it.  That places this
+    # middleware INSIDE the server span, so ``inject()`` sees the active span
+    # context and emits the request's traceparent (the one extracted from the
+    # incoming header, or a new one if absent).
+    @APP.middleware("http")
+    async def _otel_response_propagator(request: Request, call_next):
+        """Echo the active OTel trace context into the response headers.
+
+        Adds ``traceparent`` (and ``tracestate`` when present) so clients can
+        correlate their request with the server-side span.  Does nothing when
+        no valid span is active (e.g. for ``excluded_urls``).
+        """
+        response = await call_next(request)
+        carrier: dict[str, str] = {}
+        _real_otel_inject(carrier)
+        for key, value in carrier.items():
+            response.headers[key] = value
+        return response
+
     FastAPIInstrumentor.instrument_app(
         APP,
         tracer_provider=_otel_provider,
         excluded_urls="docs,openapi.json",
     )
+
+    _otel_inject_headers = _real_otel_inject  # type: ignore[assignment]
     logger.info(
         "OpenTelemetry tracing enabled (service=%s).", settings.otel_service_name
     )
@@ -514,8 +549,19 @@ def sync_lookup(
 # ---------------------------------------------------------------------------
 
 
-def _async_lookup(callback_url: str, query: dict):
-    """Execute lookup and POST results to callback URL."""
+def _async_lookup(
+    callback_url: str,
+    query: dict,
+    trace_headers: Optional[dict] = None,
+):
+    """Execute lookup and POST results to callback URL.
+
+    ``trace_headers`` carries the W3C trace context (``traceparent`` /
+    ``tracestate``) captured from the original ``/asyncquery`` request so the
+    callback POST stays linked to the originating trace.  The background task
+    runs in a worker thread that does not inherit the request's contextvars,
+    so the headers must be passed explicitly.
+    """
     subclass = query.get("subclass", True)
     subclass_depth = query.get("subclass_depth", 1)
     log_level = query.pop("log_level", None)
@@ -537,7 +583,9 @@ def _async_lookup(callback_url: str, query: dict):
 
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout=600.0)) as client:
-            res = client.post(callback_url, json=response)
+            res = client.post(
+                callback_url, json=response, headers=trace_headers or None
+            )
             res.raise_for_status()
             logger.info("Posted to %s with code %s", callback_url, res.status_code)
     except Exception:
@@ -582,8 +630,15 @@ def async_query(
 
     validate_set_interpretation(raw["message"]["query_graph"])
 
+    # Capture the active OTel trace context now (while still inside the
+    # request span) so the background callback can propagate it to the
+    # downstream service.  When OTel is disabled this is a no-op and the
+    # carrier stays empty.
+    trace_headers: dict[str, str] = {}
+    _otel_inject_headers(trace_headers)
+
     logger.info("Doing async lookup for %s", callback)
-    background_tasks.add_task(_async_lookup, callback, raw)
+    background_tasks.add_task(_async_lookup, callback, raw, trace_headers)
 
     return {"status": "accepted", "callback": callback}
 
