@@ -7,7 +7,7 @@ for the Swagger UI documentation.
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # TRAPI log components
@@ -113,15 +113,84 @@ class QEdge(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class QPathConstraint(BaseModel):
+    """A constraint applied to a Pathfinder query path.
+
+    Constrains intermediate nodes on the path between the path's
+    subject and object endpoints (e.g. by biolink category).
+    """
+
+    intermediate_categories: Optional[List[str]] = Field(
+        None,
+        description="Biolink categories that must appear at intermediate "
+        "nodes along the path (e.g. 'biolink:Gene')",
+    )
+
+    model_config = ConfigDict(extra="allow")
+
+
+class QPath(BaseModel):
+    """A path in the TRAPI Pathfinder query graph.
+
+    Represents an arbitrary-length connection between two pinned nodes
+    (``subject`` → ``object``). Unlike a QEdge, which describes a single
+    direct edge, a QPath asks the knowledge graph to discover intermediate
+    nodes and edges that link the endpoints. Optional ``predicates`` and
+    ``constraints`` restrict which paths qualify.
+    """
+
+    subject: str = Field(
+        ..., description="Key of the subject node in the query graph"
+    )
+    object: str = Field(
+        ..., description="Key of the object node in the query graph"
+    )
+    predicates: Optional[List[str]] = Field(
+        None,
+        description="Biolink predicates that may appear on edges along "
+        "the path (e.g. 'biolink:related_to')",
+    )
+    constraints: Optional[List[QPathConstraint]] = Field(
+        None,
+        description="Constraints applied to intermediate nodes along the path",
+    )
+
+    model_config = ConfigDict(extra="allow")
+
+
 class QueryGraph(BaseModel):
-    """TRAPI query graph containing nodes and edges to match."""
+    """TRAPI query graph containing nodes plus edges and/or paths to match.
+
+    Supports both the standard one/multi-hop query form (``nodes`` +
+    ``edges``) and the Pathfinder query form (``nodes`` + ``paths``), as
+    well as hybrid graphs that mix both. ``nodes`` is always required;
+    at least one of ``edges`` or ``paths`` must be supplied.
+    """
 
     nodes: Dict[str, QNode] = Field(
         ..., description="Named query nodes keyed by identifier (e.g. 'n0', 'n1')"
     )
-    edges: Dict[str, QEdge] = Field(
-        ..., description="Named query edges keyed by identifier (e.g. 'e0', 'e1')"
+    edges: Optional[Dict[str, QEdge]] = Field(
+        None,
+        description="Named query edges keyed by identifier (e.g. 'e0', 'e1'). "
+        "Required for standard TRAPI queries; may be omitted in Pathfinder "
+        "queries that supply ``paths`` instead.",
     )
+    paths: Optional[Dict[str, QPath]] = Field(
+        None,
+        description="Named query paths keyed by identifier (e.g. 'p0', 'p1') "
+        "for TRAPI Pathfinder queries. Each path connects two pinned nodes "
+        "with optional predicate filters and intermediate-node constraints.",
+    )
+
+    @model_validator(mode="after")
+    def _require_edges_or_paths(self) -> "QueryGraph":
+        if not self.edges and not self.paths:
+            raise ValueError(
+                "query_graph must include 'edges' (standard query) or "
+                "'paths' (Pathfinder query); at least one is required."
+            )
+        return self
 
 
 class Message(BaseModel):
@@ -207,6 +276,27 @@ _QUERY_EXAMPLE_QUALIFIERS: dict = {
                                 }
                             ]
                         }
+                    ],
+                }
+            },
+        }
+    }
+}
+
+_QUERY_EXAMPLE_PATHFINDER: dict = {
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "n0": {"ids": ["CHEBI:6801"]},
+                "n1": {"ids": ["MONDO:0005148"]},
+            },
+            "paths": {
+                "p0": {
+                    "subject": "n0",
+                    "object": "n1",
+                    "predicates": ["biolink:related_to"],
+                    "constraints": [
+                        {"intermediate_categories": ["biolink:Gene"]}
                     ],
                 }
             },
@@ -331,6 +421,7 @@ class TRAPIQuery(BaseModel):
                 _QUERY_EXAMPLE_ONEHOP,
                 _QUERY_EXAMPLE_TWOHOP,
                 _QUERY_EXAMPLE_QUALIFIERS,
+                _QUERY_EXAMPLE_PATHFINDER,
                 _QUERY_EXAMPLE_WITH_PARAMS,
             ]
         },
