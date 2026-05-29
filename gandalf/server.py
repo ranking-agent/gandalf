@@ -29,6 +29,7 @@ from gandalf.models import (
     EdgesResponse,
     EdgeSummaryResponse,
     MetadataResponse,
+    NodeDegreeResponse,
     NodeResponse,
     TRAPIQuery,
     TRAPIResponse,
@@ -472,6 +473,30 @@ def metadata():
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
     return GRAPH.graph_metadata
+
+
+# ---------------------------------------------------------------------------
+# Node degree
+# ---------------------------------------------------------------------------
+
+
+@APP.get(
+    "/node_degree/{curie}",
+    response_model=NodeDegreeResponse if _validate else None,
+    responses={200: {"model": NodeDegreeResponse}},
+)
+def node_degree(curie: str):
+    """Return the total degree (incoming + outgoing edges) of a node."""
+    if GRAPH is None:
+        raise HTTPException(503, "Graph not loaded")
+
+    node_idx = GRAPH.get_node_idx(curie)
+    if node_idx is None:
+        raise HTTPException(404, f"Node not found: {curie}")
+
+    out_deg = int(GRAPH.fwd_offsets[node_idx + 1] - GRAPH.fwd_offsets[node_idx])
+    in_deg = int(GRAPH.rev_offsets[node_idx + 1] - GRAPH.rev_offsets[node_idx])
+    return {"id": curie, "degree": out_deg + in_deg}
 
 
 # ---------------------------------------------------------------------------

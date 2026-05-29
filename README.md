@@ -134,6 +134,7 @@ gunicorn gandalf.server:APP -c gunicorn.conf.py
 | `GET` | `/` | Redirect to `/docs` |
 | `GET` | `/docs` | Swagger UI documentation |
 | `GET` | `/metadata` | Graph statistics and metadata |
+| `GET` | `/node_degree/{curie}` | Total degree (in + out) of a node |
 | `GET` | `/meta_knowledge_graph` | Meta KG with predicates, categories, and counts |
 | `GET` | `/sri_testing_data` | Representative edges for SRI Testing Harness |
 | `POST` | `/query` | Synchronous TRAPI query |

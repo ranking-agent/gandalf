@@ -445,6 +445,17 @@ class NodeResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class NodeDegreeResponse(BaseModel):
+    """Response from ``GET /node_degree/{curie}``."""
+
+    id: str = Field(..., description="Node CURIE identifier")
+    degree: int = Field(
+        ..., description="Total node degree (incoming + outgoing edges)"
+    )
+
+    model_config = ConfigDict(extra="allow")
+
+
 class EdgeItem(BaseModel):
     """A single edge returned by the edges endpoint."""
 
