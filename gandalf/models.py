@@ -214,6 +214,71 @@ _QUERY_EXAMPLE_QUALIFIERS: dict = {
     }
 }
 
+_QUERY_EXAMPLE_WITH_PARAMS: dict = {
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "n0": {"ids": ["CHEBI:6801"]},
+                "n1": {"categories": ["biolink:Gene"]},
+            },
+            "edges": {
+                "e0": {
+                    "subject": "n0",
+                    "object": "n1",
+                    "predicates": ["biolink:affects"],
+                }
+            },
+        }
+    },
+    "log_level": "DEBUG",
+    "parameters": {
+        "subclass": True,
+        "subclass_depth": 1,
+        "dehydrated": False,
+        "filter_config": {"max_node_degree": 50},
+        "annotator_config": {},
+    },
+}
+
+
+class QueryParameters(BaseModel):
+    """Nested request configuration for ``/query`` and ``/asyncquery``.
+
+    All fields are optional; absent fields fall back to server defaults.
+    """
+
+    subclass: Optional[bool] = Field(
+        None, description="Enable biolink subclass inference (default True)"
+    )
+    subclass_depth: Optional[int] = Field(
+        None, description="Maximum subclass_of hops to traverse (default 1)"
+    )
+    dehydrated: Optional[bool] = Field(
+        None,
+        description="Return a dehydrated response (skip edge attribute "
+        "enrichment). Automatically enabled when path count exceeds the large "
+        "result threshold.",
+    )
+    filter_config: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Plugin-defined node filter settings passed to lookup(). "
+        "Each registered NodeFilter plugin reads its own key; unknown keys are "
+        "ignored.",
+    )
+    annotator_config: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Per-request opt-in dict of response-annotator settings. "
+        "Each key activates one registered annotator plugin and the value (a "
+        "dict) is the plugin's per-request settings. Unknown keys are ignored.",
+    )
+    rehydration: Optional[Dict[str, Any]] = Field(
+        None,
+        description="When present, skip lookup entirely and only enrich the "
+        "knowledge_graph already supplied in message (presence-based).",
+    )
+
+    model_config = ConfigDict(extra="allow")
+
 
 class TRAPIQuery(BaseModel):
     """Request body for ``POST /query``.
@@ -246,14 +311,6 @@ class TRAPIQuery(BaseModel):
     message: Message = Field(
         ..., description="TRAPI message containing the query graph"
     )
-    subclass: Optional[bool] = Field(
-        None,
-        description="Enable biolink subclass inference "
-        "(overridden by query parameter if provided)",
-    )
-    subclass_depth: Optional[int] = Field(
-        None, description="Maximum subclass_of hops to traverse (default 1)"
-    )
     log_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = (
         Field(
             None,
@@ -261,23 +318,10 @@ class TRAPIQuery(BaseModel):
             "(e.g. 'DEBUG' to see serialization timings)",
         )
     )
-    dehydrated: Optional[bool] = Field(
+    parameters: Optional[QueryParameters] = Field(
         None,
-        description="Return a dehydrated response (skip edge attribute enrichment). "
-        "Automatically enabled when path count exceeds the large result threshold "
-        "(overridden by query parameter if provided)",
-    )
-    profile: Optional[bool] = Field(
-        None,
-        description="Emit per-stage timings into message.logs as ProfileStage / "
-        "ProfileSummary entries (overridden by query parameter if provided)",
-    )
-    gandalf_annotators: Optional[Dict[str, Any]] = Field(
-        None,
-        description="Per-request opt-in dict of response-annotator settings. "
-        "Each key activates one registered annotator plugin and the value "
-        "(a dict) is the plugin's per-request settings. Plugins validate "
-        "their own values; unknown keys are ignored.",
+        description="Nested request configuration: subclass, subclass_depth, "
+        "dehydrated, filter_config, annotator_config, rehydration.",
     )
 
     model_config = ConfigDict(
@@ -287,6 +331,7 @@ class TRAPIQuery(BaseModel):
                 _QUERY_EXAMPLE_ONEHOP,
                 _QUERY_EXAMPLE_TWOHOP,
                 _QUERY_EXAMPLE_QUALIFIERS,
+                _QUERY_EXAMPLE_WITH_PARAMS,
             ]
         },
     )
@@ -333,16 +378,10 @@ class AsyncTRAPIQuery(BaseModel):
             "(e.g. 'DEBUG' to see detailed query processing)",
         )
     )
-    profile: Optional[bool] = Field(
+    parameters: Optional[QueryParameters] = Field(
         None,
-        description="Emit per-stage timings into message.logs as ProfileStage / "
-        "ProfileSummary entries",
-    )
-    gandalf_annotators: Optional[Dict[str, Any]] = Field(
-        None,
-        description="Per-request opt-in dict of response-annotator settings. "
-        "Each key activates one registered annotator plugin and the value "
-        "(a dict) is the plugin's per-request settings.",
+        description="Nested request configuration: subclass, subclass_depth, "
+        "dehydrated, filter_config, annotator_config, rehydration.",
     )
 
     model_config = ConfigDict(
@@ -367,6 +406,7 @@ class AsyncTRAPIQuery(BaseModel):
                         }
                     },
                     "workflow": [{"id": "lookup"}],
+                    "parameters": {"subclass": True},
                 }
             ]
         },

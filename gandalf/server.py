@@ -22,7 +22,7 @@ from fastapi.openapi.docs import (
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from gandalf import CSRGraph, annotate_response, lookup
+from gandalf import CSRGraph, annotate_response, enrich_knowledge_graph, lookup
 from gandalf.logging_config import configure_logging, request_id_var
 from gandalf.models import (
     AsyncTRAPIQuery,
@@ -486,13 +486,6 @@ def metadata():
 )
 def sync_lookup(
     request: TRAPIQuery,
-    subclass: Optional[bool] = Query(
-        None, description="Enable biolink subclass inference"
-    ),
-    dehydrated: Optional[bool] = Query(
-        None,
-        description="Return a dehydrated response (skip edge attribute enrichment)",
-    ),
     profile: Optional[bool] = Query(
         None,
         description="Emit per-stage timings into message.logs as ProfileStage / ProfileSummary entries",
@@ -500,21 +493,29 @@ def sync_lookup(
 ):
     """Execute a TRAPI query against the knowledge graph.
 
-    Supports the 'lookup' workflow operation.
+    Supports the 'lookup' workflow operation. All request configuration other
+    than ``profile`` is read from the body's ``parameters`` object.
     """
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
 
     raw = request.model_dump(exclude_none=True)
+    params = raw.get("parameters", {})
+
+    # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
+    if params.get("rehydration") is not None:
+        enrich_knowledge_graph(raw, GRAPH)
+        return {"message": raw["message"]}
+
     validate_set_interpretation(raw["message"]["query_graph"])
     log_level = raw.pop("log_level", None)
 
-    # Query params take precedence, fall back to request body
-    sc = subclass if subclass is not None else raw.get("subclass", True)
-    subclass_depth = raw.get("subclass_depth", 1)
-    dehydrated_param = dehydrated if dehydrated is not None else raw.get("dehydrated")
-    profile_param = profile if profile is not None else bool(raw.get("profile", False))
-    annotator_config = raw.get("gandalf_annotators") or {}
+    sc = params.get("subclass", True)
+    subclass_depth = params.get("subclass_depth", 1)
+    dehydrated_param = params.get("dehydrated")
+    filter_config = params.get("filter_config")
+    annotator_config = params.get("annotator_config") or {}
+    profile_param = bool(profile)
 
     response = lookup(
         GRAPH,
@@ -522,6 +523,7 @@ def sync_lookup(
         bmt=BMT,
         subclass=sc,
         subclass_depth=subclass_depth,
+        filter_config=filter_config,
         log_level=log_level,
         dehydrated=dehydrated_param,
         profile=profile_param,
@@ -540,6 +542,7 @@ def _async_lookup(
     callback_url: str,
     query: dict,
     trace_headers: Optional[dict] = None,
+    profile: bool = False,
 ):
     """Execute lookup and POST results to callback URL.
 
@@ -547,26 +550,35 @@ def _async_lookup(
     ``tracestate``) captured from the original ``/asyncquery`` request so the
     callback POST stays linked to the originating trace.  The background task
     runs in a worker thread that does not inherit the request's contextvars,
-    so the headers must be passed explicitly.
+    so the headers must be passed explicitly.  ``profile`` arrives from the
+    request's URL query parameter (it is no longer a body field).
     """
-    subclass = query.get("subclass", True)
-    subclass_depth = query.get("subclass_depth", 1)
-    log_level = query.pop("log_level", None)
-    dehydrated = query.get("dehydrated")
-    profile = bool(query.get("profile", False))
-    annotator_config = query.get("gandalf_annotators") or {}
-    response = lookup(
-        GRAPH,
-        query,
-        bmt=BMT,
-        subclass=subclass,
-        subclass_depth=subclass_depth,
-        log_level=log_level,
-        dehydrated=dehydrated,
-        profile=profile,
-    )
-    if annotator_config:
-        annotate_response(response, GRAPH, annotator_config)
+    params = query.get("parameters", {})
+
+    # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
+    if params.get("rehydration") is not None:
+        enrich_knowledge_graph(query, GRAPH)
+        response = {"message": query["message"]}
+    else:
+        subclass = params.get("subclass", True)
+        subclass_depth = params.get("subclass_depth", 1)
+        log_level = query.pop("log_level", None)
+        dehydrated = params.get("dehydrated")
+        filter_config = params.get("filter_config")
+        annotator_config = params.get("annotator_config") or {}
+        response = lookup(
+            GRAPH,
+            query,
+            bmt=BMT,
+            subclass=subclass,
+            subclass_depth=subclass_depth,
+            filter_config=filter_config,
+            log_level=log_level,
+            dehydrated=dehydrated,
+            profile=profile,
+        )
+        if annotator_config:
+            annotate_response(response, GRAPH, annotator_config)
 
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout=600.0)) as client:
@@ -583,6 +595,10 @@ def _async_lookup(
 def async_query(
     background_tasks: BackgroundTasks,
     query: AsyncTRAPIQuery,
+    profile: Optional[bool] = Query(
+        None,
+        description="Emit per-stage timings into message.logs as ProfileStage / ProfileSummary entries",
+    ),
 ):
     """Handle asynchronous query."""
     raw = query.model_dump(exclude_none=True)
@@ -591,6 +607,17 @@ def async_query(
     # Validate callback URL scheme
     if not callback.startswith(("http://", "https://")):
         raise HTTPException(400, "callback must be an http:// or https:// URL")
+
+    # Rehydration: skip lookup/workflow validation, only enrich the supplied
+    # knowledge graph in the background and POST it to the callback.
+    if raw.get("parameters", {}).get("rehydration") is not None:
+        trace_headers: dict[str, str] = {}
+        _otel_inject_headers(trace_headers)
+        logger.info("Doing async rehydration for %s", callback)
+        background_tasks.add_task(
+            _async_lookup, callback, raw, trace_headers, bool(profile)
+        )
+        return {"status": "accepted", "callback": callback}
 
     # parse requested workflow
     workflow = query.workflow or [WorkflowStep(id="lookup", parameters=None)]
@@ -625,7 +652,9 @@ def async_query(
     _otel_inject_headers(trace_headers)
 
     logger.info("Doing async lookup for %s", callback)
-    background_tasks.add_task(_async_lookup, callback, raw, trace_headers)
+    background_tasks.add_task(
+        _async_lookup, callback, raw, trace_headers, bool(profile)
+    )
 
     return {"status": "accepted", "callback": callback}
 
