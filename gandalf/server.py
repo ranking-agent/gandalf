@@ -578,6 +578,8 @@ def _async_lookup(
     so the headers must be passed explicitly.  ``profile`` arrives from the
     request's URL query parameter (it is no longer a body field).
     """
+    if GRAPH is None:
+        raise HTTPException(503, "Graph not loaded")
     params = query.get("parameters", {})
 
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
@@ -626,6 +628,8 @@ def async_query(
     ),
 ):
     """Handle asynchronous query."""
+    if GRAPH is None:
+        raise HTTPException(503, "Graph not loaded")
     raw = query.model_dump(exclude_none=True)
     callback = query.callback
 
@@ -633,10 +637,10 @@ def async_query(
     if not callback.startswith(("http://", "https://")):
         raise HTTPException(400, "callback must be an http:// or https:// URL")
 
+    trace_headers: dict[str, str] = {}
     # Rehydration: skip lookup/workflow validation, only enrich the supplied
     # knowledge graph in the background and POST it to the callback.
     if raw.get("parameters", {}).get("rehydrate") is not None:
-        trace_headers: dict[str, str] = {}
         _otel_inject_headers(trace_headers)
         logger.info("Doing async rehydration for %s", callback)
         background_tasks.add_task(
@@ -673,7 +677,6 @@ def async_query(
     # request span) so the background callback can propagate it to the
     # downstream service.  When OTel is disabled this is a no-op and the
     # carrier stays empty.
-    trace_headers: dict[str, str] = {}
     _otel_inject_headers(trace_headers)
 
     logger.info("Doing async lookup for %s", callback)
