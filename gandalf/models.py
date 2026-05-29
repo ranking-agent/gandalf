@@ -259,6 +259,11 @@ class QueryParameters(BaseModel):
         "enrichment). Automatically enabled when path count exceeds the large "
         "result threshold.",
     )
+    rehydrate: Optional[bool] = Field(
+        None,
+        description="When true, skip lookup entirely and only enrich the "
+        "knowledge_graph already supplied in message (presence-based).",
+    )
     filter_config: Optional[Dict[str, Any]] = Field(
         None,
         description="Plugin-defined node filter settings passed to lookup(). "
@@ -270,11 +275,6 @@ class QueryParameters(BaseModel):
         description="Per-request opt-in dict of response-annotator settings. "
         "Each key activates one registered annotator plugin and the value (a "
         "dict) is the plugin's per-request settings. Unknown keys are ignored.",
-    )
-    rehydration: Optional[Dict[str, Any]] = Field(
-        None,
-        description="When present, skip lookup entirely and only enrich the "
-        "knowledge_graph already supplied in message (presence-based).",
     )
 
     model_config = ConfigDict(extra="allow")
@@ -321,7 +321,7 @@ class TRAPIQuery(BaseModel):
     parameters: Optional[QueryParameters] = Field(
         None,
         description="Nested request configuration: subclass, subclass_depth, "
-        "dehydrated, filter_config, annotator_config, rehydration.",
+        "dehydrated, rehydrate, filter_config, annotator_config.",
     )
 
     model_config = ConfigDict(
@@ -381,7 +381,7 @@ class AsyncTRAPIQuery(BaseModel):
     parameters: Optional[QueryParameters] = Field(
         None,
         description="Nested request configuration: subclass, subclass_depth, "
-        "dehydrated, filter_config, annotator_config, rehydration.",
+        "dehydrated, rehydrate, filter_config, annotator_config.",
     )
 
     model_config = ConfigDict(

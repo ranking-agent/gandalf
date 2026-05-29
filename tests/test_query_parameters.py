@@ -1,10 +1,10 @@
-"""Tests for the nested ``parameters`` request object and ``rehydration``.
+"""Tests for the nested ``parameters`` request object and ``rehydrate``.
 
 These exercise the refactor that moved request configuration out of URL query
 params / top-level body fields into a single ``parameters`` object, kept
 ``profile`` as a URL query param, renamed ``gandalf_annotators`` ->
 ``annotator_config``, wired ``filter_config`` into ``lookup()``, and added a
-presence-based ``rehydration`` field that skips lookup and only enriches the
+presence-based ``rehydrate`` field that skips lookup and only enriches the
 supplied knowledge graph.
 """
 
@@ -53,16 +53,16 @@ class TestQueryParametersModel:
                 "dehydrated": True,
                 "filter_config": {"max_node_degree": 5},
                 "annotator_config": {"some_plugin": {}},
-                "rehydration": {},
+                "rehydrate": False,
             },
         )
         assert isinstance(q.parameters, QueryParameters)
         assert q.parameters.subclass is False
         assert q.parameters.subclass_depth == 3
         assert q.parameters.dehydrated is True
+        assert q.parameters.rehydrate is False
         assert q.parameters.filter_config == {"max_node_degree": 5}
         assert q.parameters.annotator_config == {"some_plugin": {}}
-        assert q.parameters.rehydration == {}
 
     def test_parameters_absent_dumps_clean(self):
         q = TRAPIQuery(**_ONE_HOP)
@@ -186,7 +186,7 @@ class TestRehydration:
             },
             "results": [],
         }
-        body["parameters"] = {"rehydration": {}}
+        body["parameters"] = {"rehydrate": True}
         return body
 
     def test_sync_rehydration_skips_lookup_and_enriches(self, server, monkeypatch):

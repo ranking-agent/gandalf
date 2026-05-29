@@ -162,9 +162,9 @@ All other request configuration lives under the body's `parameters` object:
 - `subclass` (bool): Enable biolink subclass inference (default `true`)
 - `subclass_depth` (int): Maximum `subclass_of` hops (default `1`)
 - `dehydrated` (bool): Skip edge attribute enrichment for faster, lighter responses (auto-enabled for very large result sets)
+- `rehydrate` (bool): When true, the server skips the graph lookup and **only** enriches the `knowledge_graph` already supplied in `message` — used to re-enrich a previously dehydrated response
 - `filter_config` (object): Plugin-defined node filter settings (each NodeFilter plugin reads its own key)
 - `annotator_config` (object): Per-request opt-in response-annotator settings (each key activates one annotator plugin)
-- `rehydration` (object): When present, the server skips the graph lookup and **only** enriches the `knowledge_graph` already supplied in `message` — used to re-enrich a previously dehydrated response
 
 ## CLI Commands
 

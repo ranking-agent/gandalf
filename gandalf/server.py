@@ -528,7 +528,7 @@ def sync_lookup(
     params = raw.get("parameters", {})
 
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
-    if params.get("rehydration") is not None:
+    if params.get("rehydrate") is not None:
         enrich_knowledge_graph(raw, GRAPH)
         return {"message": raw["message"]}
 
@@ -581,7 +581,7 @@ def _async_lookup(
     params = query.get("parameters", {})
 
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
-    if params.get("rehydration") is not None:
+    if params.get("rehydrate") is not None:
         enrich_knowledge_graph(query, GRAPH)
         response = {"message": query["message"]}
     else:
@@ -635,7 +635,7 @@ def async_query(
 
     # Rehydration: skip lookup/workflow validation, only enrich the supplied
     # knowledge graph in the background and POST it to the callback.
-    if raw.get("parameters", {}).get("rehydration") is not None:
+    if raw.get("parameters", {}).get("rehydrate") is not None:
         trace_headers: dict[str, str] = {}
         _otel_inject_headers(trace_headers)
         logger.info("Doing async rehydration for %s", callback)
