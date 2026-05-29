@@ -139,12 +139,8 @@ class QPath(BaseModel):
     ``constraints`` restrict which paths qualify.
     """
 
-    subject: str = Field(
-        ..., description="Key of the subject node in the query graph"
-    )
-    object: str = Field(
-        ..., description="Key of the object node in the query graph"
-    )
+    subject: str = Field(..., description="Key of the subject node in the query graph")
+    object: str = Field(..., description="Key of the object node in the query graph")
     predicates: Optional[List[str]] = Field(
         None,
         description="Biolink predicates that may appear on edges along "
@@ -295,9 +291,7 @@ _QUERY_EXAMPLE_PATHFINDER: dict = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:related_to"],
-                    "constraints": [
-                        {"intermediate_categories": ["biolink:Gene"]}
-                    ],
+                    "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
                 }
             },
         }

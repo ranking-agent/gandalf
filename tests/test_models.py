@@ -204,9 +204,7 @@ PATHFINDER_QUERY = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:related_to"],
-                    "constraints": [
-                        {"intermediate_categories": ["biolink:Gene"]}
-                    ],
+                    "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
                 }
             },
         }
