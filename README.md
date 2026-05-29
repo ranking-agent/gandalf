@@ -139,9 +139,31 @@ gunicorn gandalf.server:APP -c gunicorn.conf.py
 | `POST` | `/query` | Synchronous TRAPI query |
 | `POST` | `/asyncquery` | Async TRAPI query with callback URL |
 
-The `/query` endpoint accepts optional query parameters:
-- `?subclass=true` — Enable biolink subclass inference
-- `?dehydrated=true` — Skip edge attribute enrichment for faster, lighter responses
+Both `/query` and `/asyncquery` accept a single optional query parameter:
+- `?profile=true` — Emit per-stage timing diagnostics into `message.logs`
+
+All other request configuration lives under the body's `parameters` object:
+
+```json
+{
+  "message": { "query_graph": { ... } },
+  "log_level": "INFO",
+  "parameters": {
+    "subclass": true,
+    "subclass_depth": 1,
+    "dehydrated": false,
+    "filter_config": { "max_node_degree": 50 },
+    "annotator_config": {}
+  }
+}
+```
+
+- `subclass` (bool): Enable biolink subclass inference (default `true`)
+- `subclass_depth` (int): Maximum `subclass_of` hops (default `1`)
+- `dehydrated` (bool): Skip edge attribute enrichment for faster, lighter responses (auto-enabled for very large result sets)
+- `filter_config` (object): Plugin-defined node filter settings (each NodeFilter plugin reads its own key)
+- `annotator_config` (object): Per-request opt-in response-annotator settings (each key activates one annotator plugin)
+- `rehydration` (object): When present, the server skips the graph lookup and **only** enriches the `knowledge_graph` already supplied in `message` — used to re-enrich a previously dehydrated response
 
 ## CLI Commands
 
