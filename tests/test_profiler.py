@@ -250,14 +250,16 @@ class TestProfilerOverHTTP:
         codes = {e.get("code") for e in body.get("logs", [])}
         assert "ProfileSummary" in codes
 
-    def test_body_field_profile_true(self, client):
+    def test_body_field_profile_ignored(self, client):
+        # profile is no longer a body field; it is only a URL query param.
+        # A body-level profile is accepted (extra=allow) but ignored.
         body_in = dict(_ONE_HOP_BOTH_PINNED)
         body_in["profile"] = True
         resp = client.post("/query", json=body_in)
         assert resp.status_code == 200
         body = resp.json()
         codes = {e.get("code") for e in body.get("logs", [])}
-        assert "ProfileSummary" in codes
+        assert "ProfileSummary" not in codes
 
     def test_no_profile_by_default(self, client):
         resp = client.post("/query", json=_ONE_HOP_BOTH_PINNED)

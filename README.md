@@ -134,14 +134,37 @@ gunicorn gandalf.server:APP -c gunicorn.conf.py
 | `GET` | `/` | Redirect to `/docs` |
 | `GET` | `/docs` | Swagger UI documentation |
 | `GET` | `/metadata` | Graph statistics and metadata |
+| `GET` | `/node_degree/{curie}` | Total degree (in + out) of a node |
 | `GET` | `/meta_knowledge_graph` | Meta KG with predicates, categories, and counts |
 | `GET` | `/sri_testing_data` | Representative edges for SRI Testing Harness |
 | `POST` | `/query` | Synchronous TRAPI query |
 | `POST` | `/asyncquery` | Async TRAPI query with callback URL |
 
-The `/query` endpoint accepts optional query parameters:
-- `?subclass=true` — Enable biolink subclass inference
-- `?dehydrated=true` — Skip edge attribute enrichment for faster, lighter responses
+Both `/query` and `/asyncquery` accept a single optional query parameter:
+- `?profile=true` — Emit per-stage timing diagnostics into `message.logs`
+
+All other request configuration lives under the body's `parameters` object:
+
+```json
+{
+  "message": { "query_graph": { ... } },
+  "log_level": "INFO",
+  "parameters": {
+    "subclass": true,
+    "subclass_depth": 1,
+    "dehydrated": false,
+    "filter_config": { "max_node_degree": 50 },
+    "annotator_config": {}
+  }
+}
+```
+
+- `subclass` (bool): Enable biolink subclass inference (default `true`)
+- `subclass_depth` (int): Maximum `subclass_of` hops (default `1`)
+- `dehydrated` (bool): Skip edge attribute enrichment for faster, lighter responses (auto-enabled for very large result sets)
+- `rehydrate` (bool): When true, the server skips the graph lookup and **only** enriches the `knowledge_graph` already supplied in `message` — used to re-enrich a previously dehydrated response
+- `filter_config` (object): Plugin-defined node filter settings (each NodeFilter plugin reads its own key)
+- `annotator_config` (object): Per-request opt-in response-annotator settings (each key activates one annotator plugin)
 
 ## CLI Commands
 

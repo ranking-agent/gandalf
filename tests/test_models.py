@@ -125,14 +125,15 @@ class TestTRAPIQuery:
             )
 
     def test_optional_subclass_fields(self):
-        q = TRAPIQuery(**ONEHOP_QUERY, subclass=True, subclass_depth=2)
-        assert q.subclass is True
-        assert q.subclass_depth == 2
+        q = TRAPIQuery(
+            **ONEHOP_QUERY, parameters={"subclass": True, "subclass_depth": 2}
+        )
+        assert q.parameters.subclass is True
+        assert q.parameters.subclass_depth == 2
 
     def test_optional_subclass_defaults_none(self):
         q = TRAPIQuery(**ONEHOP_QUERY)
-        assert q.subclass is None
-        assert q.subclass_depth is None
+        assert q.parameters is None
 
     def test_log_level_valid_values(self):
         for level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
@@ -200,6 +201,7 @@ class TestTRAPIQueryRoundTrip:
         # No None values should be present
         assert "subclass" not in raw
         assert "subclass_depth" not in raw
+        assert "parameters" not in raw
 
     def test_twohop_roundtrip(self):
         q = TRAPIQuery(**TWOHOP_QUERY)
