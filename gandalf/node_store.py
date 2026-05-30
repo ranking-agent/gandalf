@@ -117,6 +117,39 @@ class NodeStore:
         props = self.get_properties(node_idx)
         return props.get(key, default)
 
+    def get_batch(self, node_indices) -> dict:
+        """Get properties for many nodes in a single transaction.
+
+        Indices are read in sorted order so the LMDB B-tree is walked in
+        key order (near-sequential page access) instead of random point
+        lookups -- a large win when the result set is scattered and the
+        page cache is cold.
+
+        Returns dict mapping node_idx -> properties dict (missing nodes
+        are simply absent).
+        """
+        results: dict = {}
+        with self._env.begin(db=self._db_properties, buffers=True) as txn:
+            for idx in sorted({int(i) for i in node_indices}):
+                val = txn.get(_encode_idx(idx))
+                if val is not None:
+                    results[idx] = msgpack.unpackb(val, raw=False)
+        return results
+
+    def get_node_ids_batch(self, node_indices) -> dict:
+        """Get original ID strings for many node indices in one transaction.
+
+        Reads in sorted index order for B-tree locality.  Returns dict
+        mapping node_idx -> node_id string (missing indices are absent).
+        """
+        results: dict = {}
+        with self._env.begin(db=self._db_idx_to_id, buffers=True) as txn:
+            for idx in sorted({int(i) for i in node_indices}):
+                val = txn.get(_encode_idx(idx))
+                if val is not None:
+                    results[idx] = bytes(val).decode("utf-8")
+        return results
+
     def iter_id_to_idx(self) -> Iterator[Tuple[str, int]]:
         """Iterate all (node_id, node_idx) pairs. For build-time use."""
         with self._env.begin(db=self._db_id_to_idx, buffers=True) as txn:

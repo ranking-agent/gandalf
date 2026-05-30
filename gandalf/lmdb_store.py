@@ -104,16 +104,19 @@ class LMDBPropertyStore:
             return msgpack.unpackb(val, raw=False)
 
     def get_batch(self, edge_indices):
-        """Get detail properties for multiple edges.
+        """Get detail properties for multiple edges in a single transaction.
 
-        Used during response enrichment for the result set (typically
-        tens to low hundreds of edges).
+        Indices are read in sorted order so the LMDB B-tree is walked in
+        key order (near-sequential page access) rather than random point
+        lookups -- a large win for big, scattered result sets with a cold
+        page cache.
 
-        Returns dict mapping edge_idx -> properties dict.
+        Returns dict mapping edge_idx -> properties dict (missing edges
+        are simply absent).
         """
         results = {}
         with self._env.begin(buffers=True) as txn:
-            for idx in edge_indices:
+            for idx in sorted({int(i) for i in edge_indices}):
                 key = _encode_key(idx)
                 val = txn.get(key)
                 if val is not None:

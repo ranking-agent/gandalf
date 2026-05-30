@@ -320,11 +320,20 @@ def reconstruct_paths(
     with prof.stage("node_cache_build"):
         unique_node_indices = np.unique(paths_nodes[:, :num_node_cols])
 
+        # Fetch all node properties and IDs in two single-transaction batch
+        # reads (sorted for B-tree locality) instead of one LMDB lookup per
+        # node.  For result sets with hundreds of thousands of unique nodes
+        # this collapses ~N transactions into 2.
+        props_batch = graph.get_all_node_properties_batch(unique_node_indices)
+        id_batch = graph.get_node_ids_batch(unique_node_indices)
+
         node_cache = {}
         node_id_cache = {}
         for node_idx in unique_node_indices:
+            # pop (not get) so each property dict is freed as it is consumed,
+            # avoiding a transient 2x peak alongside node_cache.
+            all_props = props_batch.pop(int(node_idx), {})
             if lightweight and bmt is not None:
-                all_props = graph.get_all_node_properties(node_idx)
                 node_cache[node_idx] = {
                     "name": all_props.get("name"),
                     "categories": _get_most_specific_category(
@@ -332,13 +341,13 @@ def reconstruct_paths(
                     ),
                 }
             else:
-                node_props = graph.get_all_node_properties(node_idx).copy()
+                node_props = all_props.copy()
                 if "categories" not in node_props:
                     node_props["categories"] = []
                 if "attributes" not in node_props:
                     node_props["attributes"] = []
                 node_cache[node_idx] = node_props
-            node_id_cache[node_idx] = graph.get_node_id(node_idx)
+            node_id_cache[node_idx] = id_batch.get(int(node_idx))
         prof.add_metric("unique_nodes", int(len(unique_node_indices)))
 
     t_cache_end = time.perf_counter()
