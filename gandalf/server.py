@@ -40,7 +40,10 @@ from gandalf.heartbeat import start_heartbeat
 
 _validate = settings.validate_responses
 from gandalf.openapi import construct_open_api_schema
-from gandalf.request_validation import validate_set_interpretation
+from gandalf.request_validation import (
+    validate_edge_node_references,
+    validate_set_interpretation,
+)
 
 configure_logging(
     getattr(logging, settings.log_level, logging.INFO), fmt=settings.log_format
@@ -533,6 +536,7 @@ def sync_lookup(
         return {"message": raw["message"]}
 
     validate_set_interpretation(raw["message"]["query_graph"])
+    validate_edge_node_references(raw["message"]["query_graph"])
     log_level = raw.pop("log_level", None)
 
     sc = params.get("subclass", True)
@@ -672,6 +676,7 @@ def async_query(
         raise HTTPException(422, "set_interpretation MANY not supported.")
 
     validate_set_interpretation(raw["message"]["query_graph"])
+    validate_edge_node_references(raw["message"]["query_graph"])
 
     # Capture the active OTel trace context now (while still inside the
     # request span) so the background callback can propagate it to the
