@@ -14,6 +14,8 @@ from gandalf.models import (
     NodeResponse,
     QEdge,
     QNode,
+    QPath,
+    QPathConstraint,
     QueryGraph,
     SetInterpretation,
     TRAPIQuery,
@@ -98,7 +100,7 @@ class TestTRAPIQuery:
         with pytest.raises(ValidationError, match="nodes"):
             TRAPIQuery(message={"query_graph": {"edges": {}}})
 
-    def test_missing_edges_raises(self):
+    def test_missing_edges_and_paths_raises(self):
         with pytest.raises(ValidationError, match="edges"):
             TRAPIQuery(message={"query_graph": {"nodes": {}}})
 
@@ -183,6 +185,112 @@ class TestTRAPIQuery:
         q = TRAPIQuery(**data)
         qc = q.message.query_graph.edges["e0"].qualifier_constraints
         assert len(qc) == 1
+
+
+# ---------------------------------------------------------------------------
+# Pathfinder query graphs (nodes + paths)
+# ---------------------------------------------------------------------------
+
+
+PATHFINDER_QUERY = {
+    "message": {
+        "query_graph": {
+            "nodes": {
+                "n0": {"ids": ["CHEBI:6801"]},
+                "n1": {"ids": ["MONDO:0005148"]},
+            },
+            "paths": {
+                "p0": {
+                    "subject": "n0",
+                    "object": "n1",
+                    "predicates": ["biolink:related_to"],
+                    "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
+                }
+            },
+        }
+    }
+}
+
+
+class TestPathfinderQuery:
+    """Tests for Pathfinder-style query graphs (nodes + paths)."""
+
+    def test_valid_pathfinder_query(self):
+        q = TRAPIQuery(**PATHFINDER_QUERY)
+        assert q.message.query_graph.nodes["n0"].ids == ["CHEBI:6801"]
+        assert q.message.query_graph.edges is None
+        path = q.message.query_graph.paths["p0"]
+        assert path.subject == "n0"
+        assert path.object == "n1"
+        assert path.predicates == ["biolink:related_to"]
+        assert path.constraints[0].intermediate_categories == ["biolink:Gene"]
+
+    def test_path_missing_subject_raises(self):
+        with pytest.raises(ValidationError, match="subject"):
+            TRAPIQuery(
+                message={
+                    "query_graph": {
+                        "nodes": {"n0": {}, "n1": {}},
+                        "paths": {"p0": {"object": "n1"}},
+                    }
+                }
+            )
+
+    def test_path_missing_object_raises(self):
+        with pytest.raises(ValidationError, match="object"):
+            TRAPIQuery(
+                message={
+                    "query_graph": {
+                        "nodes": {"n0": {}, "n1": {}},
+                        "paths": {"p0": {"subject": "n0"}},
+                    }
+                }
+            )
+
+    def test_hybrid_edges_and_paths_allowed(self):
+        data = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"ids": ["MONDO:0005148"]},
+                    },
+                    "edges": {
+                        "e0": {"subject": "n0", "object": "n1"},
+                    },
+                    "paths": {
+                        "p0": {"subject": "n0", "object": "n1"},
+                    },
+                }
+            }
+        }
+        q = TRAPIQuery(**data)
+        assert q.message.query_graph.edges["e0"].subject == "n0"
+        assert q.message.query_graph.paths["p0"].subject == "n0"
+
+    def test_pathfinder_roundtrip_excludes_none(self):
+        q = TRAPIQuery(**PATHFINDER_QUERY)
+        raw = q.model_dump(exclude_none=True)
+        qg = raw["message"]["query_graph"]
+        assert "edges" not in qg
+        assert qg["paths"]["p0"]["subject"] == "n0"
+        assert qg["paths"]["p0"]["constraints"][0]["intermediate_categories"] == [
+            "biolink:Gene"
+        ]
+
+    def test_qpath_direct_construction(self):
+        p = QPath(
+            subject="n0",
+            object="n1",
+            predicates=["biolink:treats"],
+            constraints=[QPathConstraint(intermediate_categories=["biolink:Gene"])],
+        )
+        assert p.subject == "n0"
+        assert p.constraints[0].intermediate_categories == ["biolink:Gene"]
+
+    def test_query_graph_requires_edges_or_paths(self):
+        with pytest.raises(ValidationError, match="edges"):
+            QueryGraph(nodes={"n0": QNode()})
 
 
 # ---------------------------------------------------------------------------
