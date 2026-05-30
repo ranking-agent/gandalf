@@ -261,6 +261,30 @@ class TestResponseFastPath:
             calls == []
         ), "fast path must not call serialize_response/jsonable_encoder"
 
+    def test_query_skips_inbound_pydantic_validation_on_fast_path(
+        self, server, monkeypatch
+    ):
+        """The incoming body must not be run through TRAPIQuery validation (or
+        the model_dump re-walk that follows) on the default path -- that pair
+        of passes costs seconds for large rehydrate payloads."""
+        import gandalf.models as gm
+
+        gandalf_server, client = server
+
+        calls = []
+        orig = gm.TRAPIQuery.model_validate
+
+        def spy(body, *args, **kwargs):
+            calls.append(1)
+            return orig(body, *args, **kwargs)
+
+        monkeypatch.setattr(gm.TRAPIQuery, "model_validate", spy)
+
+        resp = client.post("/query", json=_ONE_HOP)
+        assert resp.status_code == 200, resp.text
+        assert "knowledge_graph" in resp.json()["message"]
+        assert calls == [], "fast path must not validate the request via Pydantic"
+
 
 # ---------------------------------------------------------------------------
 # Tiny recording callback server (mirrors tests/test_otel_traceparent.py)

@@ -14,7 +14,15 @@ import httpx
 import orjson
 import psutil
 from bmt.toolkit import Toolkit
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import (
     get_swagger_ui_html,
@@ -33,7 +41,6 @@ from gandalf.models import (
     NodeResponse,
     TRAPIQuery,
     TRAPIResponse,
-    WorkflowStep,
 )
 from gandalf.config import settings
 from gandalf.heartbeat import start_heartbeat
@@ -88,6 +95,26 @@ def _trapi_response(content: Any) -> Any:
     if _validate:
         return content
     return CustomORJSONResponse(content)
+
+
+def _request_dict(body: dict, model: type) -> dict:
+    """Return the request body as a plain dict for downstream handling.
+
+    On the default (non-validating) path the JSON body -- already parsed into
+    a dict by Starlette -- is used as-is, skipping Pydantic validation and the
+    ``model_dump()`` re-walk that follows it.  For large incoming messages
+    (e.g. ``rehydrate`` payloads carrying a full knowledge graph) that pair of
+    passes can cost seconds; the handlers below read everything via ``dict``
+    access with defaults, so the model is not needed.
+
+    When ``validate_responses`` is enabled (dev/testing) the body is validated
+    against *model* and normalized via ``model_dump(exclude_none=True)`` so
+    malformed requests are still rejected.  Gating inbound validation on the
+    same flag keeps a single switch for "strict" mode.
+    """
+    if _validate:
+        return model.model_validate(body).model_dump(exclude_none=True)
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +557,7 @@ def node_degree(curie: str):
     responses={200: {"model": TRAPIResponse}},
 )
 def sync_lookup(
-    request: TRAPIQuery,
+    request: dict = Body(...),
     profile: Optional[bool] = Query(
         None,
         description="Emit per-stage timings into message.logs as ProfileStage / ProfileSummary entries",
@@ -540,11 +567,14 @@ def sync_lookup(
 
     Supports the 'lookup' workflow operation. All request configuration other
     than ``profile`` is read from the body's ``parameters`` object.
+
+    The body is taken as a raw dict and not run through Pydantic validation
+    unless ``validate_responses`` is enabled -- see ``_request_dict``.
     """
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
 
-    raw = request.model_dump(exclude_none=True)
+    raw = _request_dict(request, TRAPIQuery)
     params = raw.get("parameters", {})
 
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
@@ -646,20 +676,26 @@ def _async_lookup(
 @APP.post("/asyncquery")
 def async_query(
     background_tasks: BackgroundTasks,
-    query: AsyncTRAPIQuery,
+    query: dict = Body(...),
     profile: Optional[bool] = Query(
         None,
         description="Emit per-stage timings into message.logs as ProfileStage / ProfileSummary entries",
     ),
 ):
-    """Handle asynchronous query."""
+    """Handle asynchronous query.
+
+    The body is taken as a raw dict and not run through Pydantic validation
+    unless ``validate_responses`` is enabled -- see ``_request_dict``.
+    """
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
-    raw = query.model_dump(exclude_none=True)
-    callback = query.callback
+    raw = _request_dict(query, AsyncTRAPIQuery)
+    callback = raw.get("callback")
 
-    # Validate callback URL scheme
-    if not callback.startswith(("http://", "https://")):
+    # Validate callback URL is present and uses an http(s) scheme
+    if not isinstance(callback, str) or not callback.startswith(
+        ("http://", "https://")
+    ):
         raise HTTPException(400, "callback must be an http:// or https:// URL")
 
     trace_headers: dict[str, str] = {}
@@ -673,14 +709,13 @@ def async_query(
         )
         return {"status": "accepted", "callback": callback}
 
-    # parse requested workflow
-    workflow = query.workflow or [WorkflowStep(id="lookup", parameters=None)]
-    workflow_dicts = [w.model_dump(exclude_none=True) for w in workflow]
+    # parse requested workflow (already a list of dicts in raw form)
+    workflow_dicts = raw.get("workflow") or [{"id": "lookup", "parameters": None}]
 
     if len(workflow_dicts) != 1:
         raise HTTPException(400, "workflow must contain exactly 1 operation")
-    if workflow_dicts[0]["id"] == "filter_results_top_n":
-        params = workflow_dicts[0].get("parameters", {})
+    if workflow_dicts[0].get("id") == "filter_results_top_n":
+        params = workflow_dicts[0].get("parameters") or {}
         max_results = params.get("max_results")
         if max_results is None:
             raise HTTPException(
@@ -689,11 +724,11 @@ def async_query(
         results = raw.get("message", {}).get("results", [])
         if max_results < len(results):
             raw["message"]["results"] = results[:max_results]
-        return raw
-    if workflow_dicts[0]["id"] != "lookup":
+        return _trapi_response(raw)
+    if workflow_dicts[0].get("id") != "lookup":
         raise HTTPException(400, "operations must have id 'lookup'")
 
-    if (query.set_interpretation or "BATCH") == "MANY":
+    if (raw.get("set_interpretation") or "BATCH") == "MANY":
         raise HTTPException(422, "set_interpretation MANY not supported.")
 
     validate_set_interpretation(raw["message"]["query_graph"])
