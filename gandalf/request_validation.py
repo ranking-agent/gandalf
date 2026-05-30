@@ -36,3 +36,29 @@ def validate_set_interpretation(query_graph: dict) -> None:
                 f"set_interpretation COLLATE is only valid for unpinned nodes "
                 f"without ids (node '{qnode_id}')",
             )
+
+
+def validate_edge_node_references(query_graph: dict) -> None:
+    """Validate that every qedge references nodes that exist in the graph.
+
+    The query planner indexes into ``query_graph["nodes"]`` using each
+    qedge's ``subject`` and ``object``. If an edge references a node key
+    that is not present, that lookup raises ``KeyError`` deep in the planner
+    and surfaces to the client as an opaque 500. Catch it up front and return
+    a 400 instead, since this is a malformed request rather than a server
+    fault.
+
+    Raises ``HTTPException(400)`` for the first edge found referencing a
+    missing node.
+    """
+    nodes = query_graph.get("nodes") or {}
+    edges = query_graph.get("edges") or {}
+    for qedge_id, qedge in edges.items():
+        for endpoint in ("subject", "object"):
+            node_ref = qedge.get(endpoint)
+            if node_ref not in nodes:
+                raise HTTPException(
+                    400,
+                    f"edge '{qedge_id}' references missing {endpoint} node "
+                    f"'{node_ref}'",
+                )
