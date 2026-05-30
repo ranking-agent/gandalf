@@ -285,6 +285,25 @@ class TestResponseFastPath:
         assert "knowledge_graph" in resp.json()["message"]
         assert calls == [], "fast path must not validate the request via Pydantic"
 
+    def test_openapi_documents_request_bodies(self, server):
+        """Even though the handlers take a raw dict, the OpenAPI schema must
+        still document the TRAPI request shape via a clean component ref."""
+        gandalf_server, client = server
+        schema = client.get("/openapi.json").json()
+        comps = schema["components"]["schemas"]
+
+        for path, model_name in (
+            ("/query", "TRAPIQuery"),
+            ("/asyncquery", "AsyncTRAPIQuery"),
+        ):
+            rb = schema["paths"][path]["post"]["requestBody"]
+            sch = rb["content"]["application/json"]["schema"]
+            # Clean $ref with no leftover siblings, resolving to a real component.
+            assert sch == {"$ref": f"#/components/schemas/{model_name}"}
+            assert model_name in comps
+            # Examples carried over from the model.
+            assert rb["content"]["application/json"].get("examples")
+
 
 # ---------------------------------------------------------------------------
 # Tiny recording callback server (mirrors tests/test_otel_traceparent.py)
