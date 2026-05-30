@@ -229,6 +229,39 @@ class TestRehydration:
             _stop_callback_server()
 
 
+class TestResponseFastPath:
+    """The sync /query endpoint must serialize directly with orjson, bypassing
+    FastAPI's serialize_response()/jsonable_encoder().  jsonable_encoder is a
+    pure-Python recursive re-walk of the entire response and dominates request
+    time for large result sets (~30x slower than orjson alone)."""
+
+    def test_query_returns_response_and_skips_serialize_response(
+        self, server, monkeypatch
+    ):
+        import fastapi.routing
+
+        gandalf_server, client = server
+
+        calls = []
+        orig = fastapi.routing.serialize_response
+
+        async def spy(*args, **kwargs):
+            calls.append(1)
+            return await orig(*args, **kwargs)
+
+        monkeypatch.setattr(fastapi.routing, "serialize_response", spy)
+
+        resp = client.post("/query", json=_ONE_HOP)
+        assert resp.status_code == 200, resp.text
+        # Response is still valid TRAPI JSON...
+        assert "knowledge_graph" in resp.json()["message"]
+        # ...and FastAPI never invoked serialize_response (the slow encoder path)
+        # because the endpoint returned a pre-rendered Response.
+        assert (
+            calls == []
+        ), "fast path must not call serialize_response/jsonable_encoder"
+
+
 # ---------------------------------------------------------------------------
 # Tiny recording callback server (mirrors tests/test_otel_traceparent.py)
 # ---------------------------------------------------------------------------

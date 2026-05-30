@@ -63,11 +63,31 @@ class CustomORJSONResponse(JSONResponse):
 
     def render(self, content: Any) -> bytes:
         t0 = time.perf_counter()
-        data: bytes = orjson.dumps(content, default=_orjson_default)
+        data: bytes = orjson.dumps(
+            content, default=_orjson_default, option=orjson.OPT_SERIALIZE_NUMPY
+        )
         dt_ms = (time.perf_counter() - t0) * 1000
         size_kb = len(data) / 1024
         logger.debug("orjson serialization: %.2f ms, %.1f KB", dt_ms, size_kb)
         return data
+
+
+def _trapi_response(content: Any) -> Any:
+    """Wrap a TRAPI response body for return from an endpoint.
+
+    On the default (non-validating) path this returns a pre-rendered
+    ``CustomORJSONResponse`` so FastAPI skips ``serialize_response()`` and its
+    ``jsonable_encoder()`` -- a pure-Python recursive re-walk of the entire
+    response that, for large result sets (hundreds of thousands of results),
+    dominates request time (~30x slower than orjson alone) even though our
+    renderer then serializes the result a second time.
+
+    When ``validate_responses`` is enabled (dev/testing) we return the raw
+    dict so FastAPI still validates it against the declared response_model.
+    """
+    if _validate:
+        return content
+    return CustomORJSONResponse(content)
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +550,7 @@ def sync_lookup(
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
     if params.get("rehydrate") is not None:
         enrich_knowledge_graph(raw, GRAPH)
-        return {"message": raw["message"]}
+        return _trapi_response({"message": raw["message"]})
 
     validate_set_interpretation(raw["message"]["query_graph"])
     log_level = raw.pop("log_level", None)
@@ -555,7 +575,7 @@ def sync_lookup(
     )
     if annotator_config:
         annotate_response(response, GRAPH, annotator_config)
-    return response
+    return _trapi_response(response)
 
 
 # ---------------------------------------------------------------------------
@@ -608,10 +628,15 @@ def _async_lookup(
             annotate_response(response, GRAPH, annotator_config)
 
     try:
+        # Serialize with orjson rather than httpx's stdlib-json ``json=`` path,
+        # which is markedly slower for large result sets.
+        body = orjson.dumps(
+            response, default=_orjson_default, option=orjson.OPT_SERIALIZE_NUMPY
+        )
+        headers = dict(trace_headers or {})
+        headers["Content-Type"] = "application/json"
         with httpx.Client(timeout=httpx.Timeout(timeout=600.0)) as client:
-            res = client.post(
-                callback_url, json=response, headers=trace_headers or None
-            )
+            res = client.post(callback_url, content=body, headers=headers)
             res.raise_for_status()
             logger.info("Posted to %s with code %s", callback_url, res.status_code)
     except Exception:
