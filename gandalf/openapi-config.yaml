@@ -4,7 +4,7 @@ contact:
   x-id: https://github.com/maximusunc
   x-role: responsible developer
 description: '<img src="/static/gandalf.png" width="200px"><br /><br />GANDALF: Graph Analysis Navigator for Discovery And Link Finding'
-version: 0.3.5
+version: 0.3.6
 servers:
 - description: Default server
   url: https://automat.renci.org

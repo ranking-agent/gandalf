@@ -10,7 +10,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="gandalf",
-    version="0.3.5",
+    version="0.3.6",
     author="Max Wang",
     author_email="max@covar.com",
     description="Fast 3-hop path finding in large knowledge graphs",
