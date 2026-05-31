@@ -33,20 +33,23 @@ import httpx
 
 # A generic two-hop shape; replace with --query for a real workload.
 _DEFAULT_QUERY = {
-    "message": {
-        "query_graph": {
-            "nodes": {
-                "n0": {"ids": ["MONDO:0005148"]},
-                "n1": {"categories": ["biolink:Gene"]},
-                "n2": {"categories": ["biolink:ChemicalEntity"]},
-            },
-            "edges": {
-                "e0": {"subject": "n0", "object": "n1"},
-                "e1": {"subject": "n1", "object": "n2"},
-            },
-        }
-    },
-    "parameters": {},
+  "message": {
+    "query_graph": {
+        "nodes": {
+            "n0": {"categories": ["biolink:ChemicalEntity"]},
+            "n1": {"categories": ["biolink:Gene"]},
+            "n2": {"ids": ["MONDO:0004975"], "categories": ["biolink:Disease"]},
+        },
+        "edges": {
+            "e0": {"subject": "n0", "object": "n1",
+                   "predicates": ["biolink:affects"],
+                   "knowledge_type": "lookup"},
+            "e1": {"subject": "n1", "object": "n2",
+                   "predicates": ["biolink:associated_with"],
+                   "knowledge_type": "lookup"},
+        },
+    }
+  },
 }
 
 
