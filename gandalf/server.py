@@ -28,6 +28,7 @@ from fastapi.openapi.docs import (
     get_swagger_ui_html,
 )
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from gandalf import CSRGraph, annotate_response, enrich_knowledge_graph, lookup
@@ -100,7 +101,7 @@ def _trapi_response(content: Any) -> Any:
     return CustomORJSONResponse(content)
 
 
-def _request_dict(body: dict, model: type) -> dict:
+def _request_dict(body: dict, model: type[BaseModel]) -> dict:
     """Return the request body as a plain dict for downstream handling.
 
     On the default (non-validating) path the JSON body -- already parsed into
@@ -116,7 +117,8 @@ def _request_dict(body: dict, model: type) -> dict:
     same flag keeps a single switch for "strict" mode.
     """
     if _validate:
-        return model.model_validate(body).model_dump(exclude_none=True)
+        validated: dict = model.model_validate(body).model_dump(exclude_none=True)
+        return validated
     return body
 
 
