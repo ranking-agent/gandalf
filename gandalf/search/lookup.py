@@ -8,6 +8,7 @@ import uuid
 from collections import defaultdict
 from typing import Optional, Union
 
+import numpy as np
 from bmt.toolkit import Toolkit
 
 logger = logging.getLogger(__name__)
@@ -552,6 +553,21 @@ def _build_response(
         t_grouped - t_post_start,
     )
 
+    # Prefetch cold-path edge data in bulk.  The per-group loop below builds
+    # edge dicts only for unique edges, but previously hit LMDB once per edge
+    # (a fresh transaction + msgpack unpack each).  Collect every forward edge
+    # index up front and issue a single sorted batch read per store, then look
+    # the detail up in-memory inside the loop.  Edge attributes are only needed
+    # when not in lightweight mode; edge IDs are needed in both.
+    edge_detail_map: dict = {}
+    edge_id_map: dict = {}
+    if pa_num_edges > 0 and pa_fwd_eidx.size:
+        unique_eidx = [int(e) for e in np.unique(pa_fwd_eidx) if e >= 0]
+        if unique_eidx:
+            if not lightweight and graph.lmdb_store is not None:
+                edge_detail_map = graph.lmdb_store.get_batch(unique_eidx)
+            edge_id_map = graph.get_edge_ids_batch(unique_eidx)
+
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
     # Edge dicts are created only for unique edges (not per-path).
@@ -693,14 +709,15 @@ def _build_response(
                             edge_props = {}
                         else:
                             edge_props = graph.get_edge_properties_by_index(
-                                fwd_eidx
+                                fwd_eidx,
+                                lmdb_detail=edge_detail_map.get(fwd_eidx, {}),
                             ).copy()
                         edge_props["predicate"] = predicate
                         edge_props["subject"] = subj_id
                         edge_props["object"] = obj_id
 
                     if fwd_eidx >= 0:
-                        orig_id = graph.get_edge_id(fwd_eidx)
+                        orig_id = edge_id_map.get(fwd_eidx)
                         if orig_id is not None:
                             edge_props["_edge_id"] = orig_id
 

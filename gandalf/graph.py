@@ -730,13 +730,18 @@ class CSRGraph:
         props["predicate"] = predicate
         return props
 
-    def get_edge_properties_by_index(self, fwd_edge_idx):
+    def get_edge_properties_by_index(self, fwd_edge_idx, lmdb_detail=None):
         """Get all properties for an edge by its forward-CSR array position.
 
         This is O(1) for hot-path data (qualifiers, sources) and a single
         LMDB lookup for cold-path data (attributes).  Prefer
         this over ``get_all_edge_properties`` when you already have the
         forward edge index (e.g. from ``neighbors_with_properties``).
+
+        When the cold-path detail has already been fetched in bulk (e.g.
+        via :meth:`LMDBPropertyStore.get_batch`), pass it as *lmdb_detail*
+        to skip the per-edge LMDB lookup.  Pass an empty dict for edges
+        with no stored detail.
         """
         fwd_edge_idx = int(fwd_edge_idx)
         props = self.edge_properties._get_props(fwd_edge_idx)
@@ -744,11 +749,32 @@ class CSRGraph:
         pred_id = int(self.fwd_predicates[fwd_edge_idx])
         props["predicate"] = self.id_to_predicate[pred_id]
 
-        if self.lmdb_store is not None:
+        if lmdb_detail is not None:
+            props.update(lmdb_detail)
+        elif self.lmdb_store is not None:
             detail = self.lmdb_store.get(fwd_edge_idx)
             props.update(detail)
 
         return props
+
+    def get_edge_ids_batch(self, fwd_edge_indices):
+        """Batch-fetch original edge IDs for many forward-CSR positions.
+
+        Returns dict mapping fwd_edge_idx -> edge ID string.  Reads from
+        the edge-ID LMDB in sorted index order for B-tree locality, or
+        from the in-memory list when the graph was loaded without LMDB.
+        """
+        if getattr(self, "_edge_ids_env", None) is not None:
+            results = {}
+            with self._edge_ids_env.begin(buffers=True) as txn:
+                for idx in sorted({int(i) for i in fwd_edge_indices}):
+                    val = txn.get(struct.pack(">I", idx))
+                    if val is not None:
+                        results[idx] = bytes(val).decode("utf-8")
+            return results
+        if self.edge_ids is not None:
+            return {int(i): self.edge_ids[int(i)] for i in fwd_edge_indices}
+        return {}
 
     def get_edge_id(self, fwd_edge_idx):
         """Return the original edge ID for a forward-CSR position, or None."""
@@ -791,6 +817,27 @@ class CSRGraph:
         if self.node_store is not None:
             return self.node_store.get_properties(node_idx)
         return self.node_properties.get(node_idx, {})
+
+    def get_all_node_properties_batch(self, node_indices):
+        """Batch-fetch properties for many nodes in one LMDB transaction.
+
+        Returns dict mapping node_idx -> properties dict.  Falls back to
+        the in-memory node_properties dict when the graph was loaded
+        without a NodeStore.
+        """
+        if self.node_store is not None:
+            return self.node_store.get_batch(node_indices)
+        return {int(n): self.node_properties.get(int(n), {}) for n in node_indices}
+
+    def get_node_ids_batch(self, node_indices):
+        """Batch-fetch original ID strings for many node indices.
+
+        Returns dict mapping node_idx -> node_id string.  Falls back to
+        the in-memory idx_to_node_id dict when loaded without a NodeStore.
+        """
+        if self.node_store is not None:
+            return self.node_store.get_node_ids_batch(node_indices)
+        return {int(n): self.idx_to_node_id.get(int(n)) for n in node_indices}
 
     def degree(self, node_idx, predicate_filter=None):
         """Get degree of a node, optionally filtered by predicate."""
