@@ -8,6 +8,38 @@ triggering module-level graph loading.
 from fastapi import HTTPException
 
 
+def normalize_query_graph(query_graph: dict) -> None:
+    """Drop optional fields whose value is ``None`` from a query graph in place.
+
+    On the default (non-validating) request path the raw client body is used
+    as-is (see ``server._request_dict``), skipping the
+    ``model_dump(exclude_none=True)`` re-walk that the validating path applies.
+    A client that sends an optional field explicitly as ``null`` -- e.g.
+    ``"ids": null`` on an unpinned node -- therefore leaves the key present
+    with a ``None`` value.
+
+    Downstream code reads these fields with the ``node.get("ids", [])`` idiom,
+    which only substitutes the default when the key is *absent*; a present
+    ``None`` slips through and breaks operations like ``len(...)`` / ``set(...)``
+    / ``x in ...`` with an opaque 500 (e.g. ``search/lookup.py`` reading a
+    node's ``ids``).
+
+    Restore the invariant the pipeline relies on -- optional fields are absent
+    rather than ``None`` -- by stripping ``None`` values from each node and
+    edge. This mirrors ``model_dump(exclude_none=True)`` but only walks the
+    (small) query graph rather than the full request body, so it does not
+    reintroduce the per-request cost the fast path was added to avoid.
+    """
+    for container in (query_graph.get("nodes"), query_graph.get("edges")):
+        if not isinstance(container, dict):
+            continue
+        for element in container.values():
+            if not isinstance(element, dict):
+                continue
+            for key in [k for k, v in element.items() if v is None]:
+                del element[key]
+
+
 def validate_set_interpretation(query_graph: dict) -> None:
     """Validate node-level ``set_interpretation`` values.
 
