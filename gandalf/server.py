@@ -49,6 +49,7 @@ from gandalf.heartbeat import start_heartbeat
 _validate = settings.validate_responses
 from gandalf.openapi import construct_open_api_schema
 from gandalf.request_validation import (
+    normalize_query_graph,
     validate_edge_node_references,
     validate_set_interpretation,
 )
@@ -587,6 +588,7 @@ def sync_lookup(
         enrich_knowledge_graph(raw, GRAPH)
         return _trapi_response({"message": raw["message"]})
 
+    normalize_query_graph(raw["message"]["query_graph"])
     validate_set_interpretation(raw["message"]["query_graph"])
     validate_edge_node_references(raw["message"]["query_graph"])
     log_level = raw.pop("log_level", None)
@@ -737,6 +739,7 @@ def async_query(
     if (raw.get("set_interpretation") or "BATCH") == "MANY":
         raise HTTPException(422, "set_interpretation MANY not supported.")
 
+    normalize_query_graph(raw["message"]["query_graph"])
     validate_set_interpretation(raw["message"]["query_graph"])
     validate_edge_node_references(raw["message"]["query_graph"])
 
