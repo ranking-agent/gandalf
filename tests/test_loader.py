@@ -573,6 +573,23 @@ class TestQualifierExtraction:
             assert f"biolink:{field}" in by_type
             assert by_type[f"biolink:{field}"] == self.EDGE[field]
 
+    def test_list_valued_qualifier_split_into_scalar_entries(self):
+        """A list-valued qualifier must become multiple scalar entries (no lists).
+
+        TRAPI requires qualifier_value to be a scalar string; a list value would
+        crash downstream hashing/comparison in lookup.
+        """
+        edge = dict(self.EDGE, object_aspect_qualifier=["activity", "abundance"])
+        qualifiers = _extract_qualifiers(edge)
+        aspect_vals = [
+            q["qualifier_value"]
+            for q in qualifiers
+            if q["qualifier_type_id"] == "biolink:object_aspect_qualifier"
+        ]
+        assert sorted(aspect_vals) == ["abundance", "activity"]
+        # No qualifier_value should itself be a list.
+        assert all(not isinstance(q["qualifier_value"], list) for q in qualifiers)
+
     def test_qualifiers_not_in_attributes(self):
         """Qualifier fields must NOT leak into edge attributes."""
         attributes = _extract_attributes(self.EDGE)
@@ -638,3 +655,67 @@ class TestMetaKgListValuedQualifier:
                 "activity",
                 "abundance",
             }
+
+    def test_normal_lookup_with_list_qualifier_does_not_crash(self, bmt):
+        """A normal lookup over an edge with a list-valued qualifier must succeed.
+
+        Regression: the per-edge dedup key in lookup hashes (type_id, value)
+        pairs, so a list qualifier_value raised "unhashable type: 'list'".
+        """
+        from gandalf.search import lookup
+
+        with tempfile.TemporaryDirectory() as tmp_path:
+            nodes = (
+                '{"id": "CHEBI:6801", "name": "M", "category": ["biolink:SmallMolecule"]}\n'
+                '{"id": "NCBIGene:1028", "name": "G", "category": ["biolink:Gene"]}\n'
+            )
+            edge = {
+                "id": "e1",
+                "subject": "CHEBI:6801",
+                "predicate": "biolink:affects",
+                "object": "NCBIGene:1028",
+                "primary_knowledge_source": "infores:test",
+                "object_aspect_qualifier": ["activity", "abundance"],
+            }
+            nodes_file = os.path.join(tmp_path, "nodes.jsonl")
+            edges_file = os.path.join(tmp_path, "edges.jsonl")
+            with open(nodes_file, "w") as f:
+                f.write(nodes)
+            with open(edges_file, "w") as f:
+                import json
+
+                f.write(json.dumps(edge) + "\n")
+            graph = build_graph_from_jsonl(edges_file, nodes_file)
+
+            query = {
+                "message": {
+                    "query_graph": {
+                        "nodes": {
+                            "n0": {"ids": ["CHEBI:6801"]},
+                            "n1": {"ids": ["NCBIGene:1028"]},
+                        },
+                        "edges": {
+                            "e0": {
+                                "subject": "n0",
+                                "object": "n1",
+                                "predicates": ["biolink:affects"],
+                            },
+                        },
+                    },
+                },
+            }
+
+            response = lookup(graph, query, bmt=bmt)
+            results = response["message"]["results"]
+            assert len(results) == 1
+
+            # The returned edge's qualifiers should all carry scalar values.
+            kg_edges = response["message"]["knowledge_graph"]["edges"]
+            assert kg_edges
+            aspect_vals = sorted(
+                q["qualifier_value"]
+                for e in kg_edges.values()
+                for q in e.get("qualifiers", [])
+                if q["qualifier_type_id"] == "biolink:object_aspect_qualifier"
+            )
+            assert aspect_vals == ["abundance", "activity"]

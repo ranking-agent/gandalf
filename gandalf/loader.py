@@ -196,17 +196,26 @@ def _extract_qualifiers(data):
     Format: Top-level fields (object_aspect_qualifier, etc.). The set of
     qualifier field names is derived from the Biolink Model via
     ``_get_qualifier_fields``.
+
+    A TRAPI ``qualifier_value`` must be a scalar string. Some sources supply a
+    list (e.g. a multi-valued qualifier, or a scalar wrapped in a list); each
+    element is emitted as its own qualifier entry so that downstream code never
+    has to hash or string-compare a list value.
     """
     qualifier_fields = _get_qualifier_fields()
     qualifiers = []
     for field in qualifier_fields:
         if field in data:
-            qualifiers.append(
-                {
-                    "qualifier_type_id": f"biolink:{field}",
-                    "qualifier_value": data[field],
-                }
-            )
+            type_id = f"biolink:{field}"
+            value = data[field]
+            values = value if isinstance(value, list) else [value]
+            for v in values:
+                qualifiers.append(
+                    {
+                        "qualifier_type_id": type_id,
+                        "qualifier_value": v,
+                    }
+                )
 
     return qualifiers
 
