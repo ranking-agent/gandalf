@@ -9,10 +9,10 @@ WORKDIR /app
 RUN chmod -R 777 .
 
 # Install dependencies first for better layer caching
-COPY requirements.txt pyproject.toml setup.py README.md ./
+COPY requirements-lock.txt pyproject.toml README.md ./
 RUN pip install --no-cache-dir -U pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -e .[server]
+    pip install --no-cache-dir -r requirements-lock.txt && \
+    pip install --no-cache-dir --no-deps -e .
 
 # switch to the non-root user (nru). defined in the base image
 USER nru

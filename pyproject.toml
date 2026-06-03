@@ -34,7 +34,12 @@ dev = [
 ]
 server = [
     "fastapi>=0.100.0",
+    "gunicorn>=21.2.0",
     "httpx>=0.24.0",
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-exporter-otlp>=1.20.0",
+    "opentelemetry-instrumentation-fastapi>=0.41b0",
+    "opentelemetry-sdk>=1.20.0",
     "orjson>=3.9.0",
     "psutil>=5.9.0",
     "pydantic>=2.0.0",
@@ -46,6 +51,9 @@ server = [
 gandalf-build = "scripts.build_graph:main"
 gandalf-query = "scripts.query_paths:main"
 gandalf-diagnose = "scripts.diagnose:main"
+
+[tool.setuptools.packages.find]
+include = ["gandalf*", "scripts*"]
 
 [tool.mypy]
 warn_return_any = true
