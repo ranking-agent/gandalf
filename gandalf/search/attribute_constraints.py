@@ -88,6 +88,14 @@ def _apply_operator(operator, attr_value, constraint_value):
     Returns:
         True if the comparison holds.
     """
+    # Per TRAPI: a list constraint value means OR — the constraint is satisfied
+    # if the attribute matches ANY member of the list.  `===` is excluded: it
+    # intentionally compares lists by exact type/value/order.
+    if isinstance(constraint_value, list) and operator != "===":
+        return any(
+            _apply_operator(operator, attr_value, cv) for cv in constraint_value
+        )
+
     if operator == "==":
         return attr_value == constraint_value
 
