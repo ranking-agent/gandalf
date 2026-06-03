@@ -220,6 +220,88 @@ class TestMatchesAttributeConstraints:
             is False
         )
 
+    def test_equals_list_value_membership(self):
+        # Per TRAPI, a list constraint value means OR / membership.
+        attrs = [
+            {
+                "attribute_type_id": "biolink:agent_type",
+                "value": "data_analysis_pipeline",
+            }
+        ]
+        in_list = [
+            {
+                "id": "biolink:agent_type",
+                "name": "agent_type",
+                "operator": "==",
+                "value": ["data_analysis_pipeline", "text_mining_agent"],
+            }
+        ]
+        not_in_list = [
+            {
+                "id": "biolink:agent_type",
+                "name": "agent_type",
+                "operator": "==",
+                "value": ["manual_agent", "automated_agent"],
+            }
+        ]
+        assert matches_attribute_constraints(attrs, in_list) is True
+        assert matches_attribute_constraints(attrs, not_in_list) is False
+
+    def test_equals_list_value_negated(self):
+        # Exact scenario from issue #22: NOT (agent_type == one of [...]).
+        constraint = [
+            {
+                "id": "biolink:agent_type",
+                "name": "agent_type",
+                "operator": "==",
+                "not": True,
+                "value": ["data_analysis_pipeline", "text_mining_agent"],
+            }
+        ]
+        # Value in the excluded list -> rejected.
+        excluded = [
+            {
+                "attribute_type_id": "biolink:agent_type",
+                "value": "text_mining_agent",
+            }
+        ]
+        assert matches_attribute_constraints(excluded, constraint) is False
+        # Value outside the excluded list -> passes.
+        kept = [
+            {
+                "attribute_type_id": "biolink:agent_type",
+                "value": "manual_agent",
+            }
+        ]
+        assert matches_attribute_constraints(kept, constraint) is True
+
+    def test_matches_list_value_membership(self):
+        # `matches` with a list of patterns: OR semantics.
+        attrs = [
+            {
+                "attribute_type_id": "biolink:description",
+                "value": "Metformin treats diabetes",
+            }
+        ]
+        any_match = [
+            {
+                "id": "biolink:description",
+                "name": "desc",
+                "operator": "matches",
+                "value": ["^prevents", "treats.*diabetes"],
+            }
+        ]
+        none_match = [
+            {
+                "id": "biolink:description",
+                "name": "desc",
+                "operator": "matches",
+                "value": ["^prevents", "causes.*cancer"],
+            }
+        ]
+        assert matches_attribute_constraints(attrs, any_match) is True
+        assert matches_attribute_constraints(attrs, none_match) is False
+
     def test_not_negation(self):
         attrs = [
             {"attribute_type_id": "biolink:knowledge_level", "value": "prediction"}
