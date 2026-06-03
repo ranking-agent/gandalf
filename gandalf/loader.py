@@ -16,10 +16,12 @@ Pass 3: Sort numpy arrays by (src, dst, pred) via np.lexsort. Rewrite the temp
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import msgpack
 import numpy as np
 import orjson
+from bmt.toolkit import Toolkit
 
 from gandalf.config import settings
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
@@ -51,16 +53,75 @@ _CORE_FIELDS = {
 # Node fields that become top-level TRAPI Node properties (not attributes)
 _CORE_NODE_FIELDS = {"id", "name", "category"}
 
-# Known qualifier fields that appear as top-level JSONL keys
-_QUALIFIER_FIELDS = {
+# Fallback qualifier fields, used only if the Biolink Model cannot be loaded via
+# BMT at runtime. The authoritative set is derived from the model (see
+# ``_get_qualifier_fields``); this static list is just a safety net.
+_FALLBACK_QUALIFIER_FIELDS = {
     "qualified_predicate",
     "object_aspect_qualifier",
     "object_direction_qualifier",
+    "object_form_or_variant_qualifier",
+    "object_part_qualifier",
+    "object_derivative_qualifier",
+    "object_context_qualifier",
     "subject_aspect_qualifier",
     "subject_direction_qualifier",
+    "subject_form_or_variant_qualifier",
+    "subject_part_qualifier",
+    "subject_derivative_qualifier",
+    "subject_context_qualifier",
     "causal_mechanism_qualifier",
     "species_context_qualifier",
+    "anatomical_context_qualifier",
+    "frequency_qualifier",
+    "severity_qualifier",
+    "sex_qualifier",
+    "onset_qualifier",
+    "stage_qualifier",
+    "temporal_context_qualifier",
+    "population_context_qualifier",
 }
+
+# Module-level BMT instance and cached qualifier-field set (lazily initialized).
+_bmt: Optional[Toolkit] = None
+_qualifier_fields: Optional[set] = None
+
+
+def _get_bmt() -> Toolkit:
+    """Get or create the module-level BMT instance."""
+    global _bmt
+    if _bmt is None:
+        _bmt = Toolkit()
+    return _bmt
+
+
+def _get_qualifier_fields() -> set:
+    """Return the set of top-level edge field names that are Biolink qualifiers.
+
+    Derived from the Biolink Model: the snake_case names of every descendant of
+    the abstract ``qualifier`` slot (e.g. ``object_aspect_qualifier``,
+    ``frequency_qualifier``, ``qualified_predicate``). This keeps the loader in
+    sync with the model instead of relying on a hardcoded list. The result is
+    cached after the first build. If BMT or the model is unavailable, fall back
+    to ``_FALLBACK_QUALIFIER_FIELDS`` so loading never fails.
+    """
+    global _qualifier_fields
+    if _qualifier_fields is None:
+        try:
+            descendants = _get_bmt().get_descendants("qualifier", formatted=True)
+            # ``formatted=True`` yields e.g. "biolink:object_aspect_qualifier";
+            # strip the prefix to match the snake_case top-level JSONL keys.
+            fields = {d.split(":", 1)[-1] for d in descendants}
+            fields.discard("qualifier")  # abstract root, never a real edge field
+            _qualifier_fields = fields or set(_FALLBACK_QUALIFIER_FIELDS)
+        except Exception:
+            logger.warning(
+                "Could not load Biolink qualifier slots from BMT; "
+                "using fallback qualifier set",
+                exc_info=True,
+            )
+            _qualifier_fields = set(_FALLBACK_QUALIFIER_FIELDS)
+    return _qualifier_fields
 
 
 def _extract_sources(data):
@@ -132,10 +193,13 @@ def _extract_sources(data):
 def _extract_qualifiers(data):
     """Extract qualifiers.
 
-    Format: Top-level fields (object_aspect_qualifier, etc.)
+    Format: Top-level fields (object_aspect_qualifier, etc.). The set of
+    qualifier field names is derived from the Biolink Model via
+    ``_get_qualifier_fields``.
     """
+    qualifier_fields = _get_qualifier_fields()
     qualifiers = []
-    for field in _QUALIFIER_FIELDS:
+    for field in qualifier_fields:
         if field in data:
             qualifiers.append(
                 {
@@ -153,9 +217,10 @@ def _extract_attributes(data):
     Publications are included as a TRAPI Attribute with
     ``attribute_type_id`` of ``biolink:publications``.
     """
+    qualifier_fields = _get_qualifier_fields()
     attributes = []
     for field, value in data.items():
-        if field in _CORE_FIELDS or field in _QUALIFIER_FIELDS or field == "qualifiers":
+        if field in _CORE_FIELDS or field in qualifier_fields or field == "qualifiers":
             continue
         attributes.append(
             {

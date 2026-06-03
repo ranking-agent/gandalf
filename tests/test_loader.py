@@ -5,7 +5,12 @@ import tempfile
 
 import pytest
 
-from gandalf.loader import build_graph_from_jsonl
+from gandalf.loader import (
+    build_graph_from_jsonl,
+    _extract_qualifiers,
+    _extract_attributes,
+    _get_qualifier_fields,
+)
 from gandalf.graph import CSRGraph
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -524,3 +529,59 @@ class TestEdgeCases:
             metformin_idx, "nonexistent_key", default="default"
         )
         assert value == "default"
+
+
+class TestQualifierExtraction:
+    """Tests that top-level qualifier fields are routed to qualifiers, not attributes.
+
+    Regression test for issue #20: qualifier terms beyond the original hardcoded
+    set (e.g. frequency_qualifier, subject_form_or_variant_qualifier) were ending
+    up in edge ``attributes`` instead of ``qualifiers``.
+    """
+
+    EDGE = {
+        "id": "edge1",
+        "subject": "NCBIGene:1028",
+        "predicate": "biolink:associated_with",
+        "object": "MONDO:0004979",
+        "primary_knowledge_source": "infores:test",
+        "qualified_predicate": "biolink:causes",
+        "object_aspect_qualifier": "activity",
+        "frequency_qualifier": "HP:0040283",
+        "subject_form_or_variant_qualifier": "genetic_variant_form",
+        "p_value": 0.03,
+        "publications": ["PMID:11111111"],
+    }
+
+    EXPECTED_QUALIFIERS = {
+        "qualified_predicate",
+        "object_aspect_qualifier",
+        "frequency_qualifier",
+        "subject_form_or_variant_qualifier",
+    }
+
+    def test_qualifier_set_is_model_derived(self):
+        """The qualifier-field set should come from the Biolink Model via BMT."""
+        fields = _get_qualifier_fields()
+        assert self.EXPECTED_QUALIFIERS <= fields
+
+    def test_qualifiers_extracted_with_biolink_prefix(self):
+        """All qualifier fields become TRAPI qualifiers with biolink-prefixed type ids."""
+        qualifiers = _extract_qualifiers(self.EDGE)
+        by_type = {q["qualifier_type_id"]: q["qualifier_value"] for q in qualifiers}
+        for field in self.EXPECTED_QUALIFIERS:
+            assert f"biolink:{field}" in by_type
+            assert by_type[f"biolink:{field}"] == self.EDGE[field]
+
+    def test_qualifiers_not_in_attributes(self):
+        """Qualifier fields must NOT leak into edge attributes."""
+        attributes = _extract_attributes(self.EDGE)
+        attr_names = {a["original_attribute_name"] for a in attributes}
+        assert self.EXPECTED_QUALIFIERS.isdisjoint(attr_names)
+
+    def test_non_qualifier_fields_remain_attributes(self):
+        """Genuine attribute fields should still be extracted as attributes."""
+        attributes = _extract_attributes(self.EDGE)
+        attr_names = {a["original_attribute_name"] for a in attributes}
+        assert "p_value" in attr_names
+        assert "publications" in attr_names
