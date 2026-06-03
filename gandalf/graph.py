@@ -1007,7 +1007,16 @@ class CSRGraph:
                             if qtype not in qual_dict:
                                 qual_dict[qtype] = set()
                             if qval is not None:
-                                qual_dict[qtype].add(qval)
+                                # A qualifier_value is normally a scalar, but
+                                # some sources supply a list; flatten it so each
+                                # value is collected as an applicable_value and
+                                # the set stays hashable.
+                                values = qval if isinstance(qval, list) else [qval]
+                                for v in values:
+                                    try:
+                                        qual_dict[qtype].add(v)
+                                    except TypeError:
+                                        qual_dict[qtype].add(str(v))
 
         # Full scan of LMDB for edge attribute types
         if self.lmdb_store is not None:

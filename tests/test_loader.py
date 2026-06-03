@@ -585,3 +585,56 @@ class TestQualifierExtraction:
         attr_names = {a["original_attribute_name"] for a in attributes}
         assert "p_value" in attr_names
         assert "publications" in attr_names
+
+
+class TestMetaKgListValuedQualifier:
+    """Regression test: a qualifier whose value is a list must not crash meta-KG build.
+
+    Since qualifier terms are now routed to the hot-path qualifier store, the
+    meta knowledge graph builder iterates their values. Some sources provide a
+    list-valued qualifier, which previously raised ``TypeError: unhashable type:
+    'list'`` in ``build_meta_kg``.
+    """
+
+    def _build_graph_with_list_qualifier(self, tmp_path):
+        nodes = (
+            '{"id": "NCBIGene:1028", "name": "G", "category": ["biolink:Gene"]}\n'
+            '{"id": "MONDO:0004979", "name": "D", "category": ["biolink:Disease"]}\n'
+        )
+        edge = {
+            "id": "e1",
+            "subject": "NCBIGene:1028",
+            "predicate": "biolink:associated_with",
+            "object": "MONDO:0004979",
+            "primary_knowledge_source": "infores:test",
+            # List-valued qualifier value (the regression trigger)
+            "object_aspect_qualifier": ["activity", "abundance"],
+        }
+        nodes_file = os.path.join(tmp_path, "nodes.jsonl")
+        edges_file = os.path.join(tmp_path, "edges.jsonl")
+        with open(nodes_file, "w") as f:
+            f.write(nodes)
+        with open(edges_file, "w") as f:
+            import json
+
+            f.write(json.dumps(edge) + "\n")
+        return build_graph_from_jsonl(edges_file, nodes_file)
+
+    def test_build_metadata_flattens_list_qualifier(self):
+        with tempfile.TemporaryDirectory() as tmp_path:
+            graph = self._build_graph_with_list_qualifier(tmp_path)
+            # Must not raise TypeError on the list-valued qualifier.
+            graph.build_metadata()
+
+            qual_values = {
+                qtype: q["applicable_values"]
+                for edge in graph.meta_kg["edges"]
+                for q in edge["qualifiers"]
+                for qtype in [q["qualifier_type_id"]]
+            }
+            assert "biolink:object_aspect_qualifier" in qual_values
+            # The list value should be flattened into individual applicable values.
+            assert set(qual_values["biolink:object_aspect_qualifier"]) == {
+                "activity",
+                "abundance",
+            }
