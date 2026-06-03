@@ -12,11 +12,22 @@ class QualifierExpander:
 
     For example, if a query specifies qualifier_value "activity_or_abundance",
     this will expand to also match "activity" and "abundance" (the child values).
+
+    Most qualifier values are permissible values of a Biolink enum (e.g.
+    "activity" for object_aspect_qualifier) and are expanded through that enum's
+    value hierarchy. The "biolink:qualified_predicate" qualifier is special: its
+    values are Biolink predicate CURIEs (e.g. "biolink:causes") that live in the
+    predicate hierarchy rather than an enum, so they are expanded through the
+    predicate descendants (e.g. querying "biolink:contributes_to" also matches
+    edges with the descendant "biolink:causes").
     """
+
+    QUALIFIED_PREDICATE = "biolink:qualified_predicate"
 
     def __init__(self, bmt: Toolkit):
         self.bmt = bmt
         self._descendants_cache: dict[tuple[str, str], list[str]] = {}
+        self._predicate_descendants_cache: dict[str, list[str]] = {}
         self._enum_names: list[str] | None = None
 
     def _get_enum_names(self) -> list[str]:
@@ -64,6 +75,36 @@ class QualifierExpander:
         self._descendants_cache[cache_key] = result
         return result
 
+    def get_predicate_value_descendants(self, qualifier_value: str) -> list[str]:
+        """Get descendants for a predicate-valued qualifier (cached).
+
+        Used for the "biolink:qualified_predicate" qualifier, whose values are
+        Biolink predicate CURIEs. These are expanded through the predicate
+        hierarchy via BMT rather than through enum permissible values.
+
+        Args:
+            qualifier_value: The predicate CURIE to expand (e.g. "biolink:causes")
+
+        Returns:
+            List of descendant predicate CURIEs (always including the original value)
+        """
+        if qualifier_value in self._predicate_descendants_cache:
+            return self._predicate_descendants_cache[qualifier_value]
+
+        descendants = [qualifier_value]
+        try:
+            descendants.extend(
+                self.bmt.get_descendants(qualifier_value, formatted=True)
+            )
+        except Exception:
+            # If BMT lookup fails, fall back to just the original value
+            pass
+
+        # Deduplicate while preserving order (original value first)
+        result = list(dict.fromkeys(descendants))
+        self._predicate_descendants_cache[qualifier_value] = result
+        return result
+
     def expand_qualifier_constraints(
         self, qualifier_constraints: list[dict]
     ) -> list[dict]:
@@ -107,8 +148,13 @@ class QualifierExpander:
                     expanded_qualifiers.append(qualifier)
                     continue
 
-                # Get descendant values (includes original)
-                descendant_values = self.get_value_descendants(value)
+                # Get descendant values (includes original). The qualified_predicate
+                # qualifier takes predicate CURIEs as values, so expand it through
+                # the predicate hierarchy; all other qualifiers use enum values.
+                if type_id == self.QUALIFIED_PREDICATE:
+                    descendant_values = self.get_predicate_value_descendants(value)
+                else:
+                    descendant_values = self.get_value_descendants(value)
 
                 # Create expanded qualifier with list of acceptable values
                 expanded_qualifiers.append(

@@ -362,6 +362,59 @@ class TestQualifierExpander:
         assert "qualifier_values" in expanded_qualifier
         assert "activity" in expanded_qualifier["qualifier_values"]
 
+    def test_expand_qualified_predicate_uses_predicate_hierarchy(self, bmt):
+        """qualified_predicate values expand through the predicate hierarchy.
+
+        Regression test for issue #21: a query for the parent predicate
+        "biolink:contributes_to" should match edges whose qualified_predicate
+        is the descendant "biolink:causes". Unlike enum-valued qualifiers,
+        qualified_predicate values are Biolink predicate CURIEs and must be
+        expanded via get_descendants rather than enum permissible values.
+        """
+        expander = QualifierExpander(bmt)
+        constraints = [
+            {
+                "qualifier_set": [
+                    {
+                        "qualifier_type_id": "biolink:qualified_predicate",
+                        "qualifier_value": "biolink:contributes_to",
+                    }
+                ]
+            }
+        ]
+        result = expander.expand_qualifier_constraints(constraints)
+        expanded_qualifier = result[0]["qualifier_set"][0]
+        assert (
+            expanded_qualifier["qualifier_type_id"] == "biolink:qualified_predicate"
+        )
+        values = expanded_qualifier["qualifier_values"]
+        # Original value plus its predicate descendant
+        assert "biolink:contributes_to" in values
+        assert "biolink:causes" in values
+
+    def test_expand_non_predicate_qualifier_still_uses_enum(self, bmt):
+        """Enum-valued qualifiers must NOT use the predicate hierarchy.
+
+        Guards against the qualified_predicate branch leaking into ordinary
+        qualifiers: object_aspect_qualifier "activity" should expand via enum
+        values, not predicate descendants.
+        """
+        expander = QualifierExpander(bmt)
+        constraints = [
+            {
+                "qualifier_set": [
+                    {
+                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                        "qualifier_value": "activity",
+                    }
+                ]
+            }
+        ]
+        result = expander.expand_qualifier_constraints(constraints)
+        values = result[0]["qualifier_set"][0]["qualifier_values"]
+        assert "activity" in values
+        assert "biolink:causes" not in values
+
     def test_expand_qualifier_constraints_preserves_or_semantics(self, bmt):
         """Multiple qualifier_sets should be preserved (OR semantics)."""
         expander = QualifierExpander(bmt)

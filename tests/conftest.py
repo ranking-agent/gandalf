@@ -94,6 +94,7 @@ class MockBMT:
             "biolink:ameliorates_condition",
             "biolink:preventative_for_condition",
         ],
+        "biolink:contributes_to": ["biolink:causes"],
         "biolink:Drug": ["biolink:SmallMolecule"],
         "biolink:GeneOrGeneProduct": ["biolink:Gene"],
         "biolink:ChemicalEntity": ["biolink:SmallMolecule", "biolink:Drug"],
