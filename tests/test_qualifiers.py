@@ -384,9 +384,7 @@ class TestQualifierExpander:
         ]
         result = expander.expand_qualifier_constraints(constraints)
         expanded_qualifier = result[0]["qualifier_set"][0]
-        assert (
-            expanded_qualifier["qualifier_type_id"] == "biolink:qualified_predicate"
-        )
+        assert expanded_qualifier["qualifier_type_id"] == "biolink:qualified_predicate"
         values = expanded_qualifier["qualifier_values"]
         # Original value plus its predicate descendant
         assert "biolink:contributes_to" in values
