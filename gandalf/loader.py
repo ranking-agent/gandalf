@@ -190,32 +190,46 @@ def _extract_sources(data):
     return [gandalf_source] + sources
 
 
+def _ensure_biolink_prefix(value):
+    """Ensure a CURIE-like value carries the ``biolink:`` prefix.
+
+    Mirrors retriever's ``biolink.ensure_prefix`` (tier 1): strip any existing
+    prefix, then prepend ``biolink:``. Used for ``qualified_predicate`` values,
+    which are Biolink predicate CURIEs.
+    """
+    local = value.split(":", 1)[1] if ":" in value else value
+    return f"biolink:{local}"
+
+
 def _extract_qualifiers(data):
     """Extract qualifiers.
 
-    Format: Top-level fields (object_aspect_qualifier, etc.). The set of
+    Format: top-level fields (object_aspect_qualifier, etc.). The set of
     qualifier field names is derived from the Biolink Model via
     ``_get_qualifier_fields``.
 
-    A TRAPI ``qualifier_value`` must be a scalar string. Some sources supply a
-    list (e.g. a multi-valued qualifier, or a scalar wrapped in a list); each
-    element is emitted as its own qualifier entry so that downstream code never
-    has to hash or string-compare a list value.
+    A TRAPI ``qualifier_value`` must be a scalar string. This matches the tier 1
+    (BioPack/retriever Elasticsearch) driver so the same edge produces identical
+    qualifiers across tiers: a non-string value is coerced to a JSON string via
+    ``orjson`` (yielding exactly one qualifier entry per type, not split), and
+    ``qualified_predicate`` values are normalized to carry the ``biolink:``
+    prefix.
     """
     qualifier_fields = _get_qualifier_fields()
     qualifiers = []
     for field in qualifier_fields:
         if field in data:
-            type_id = f"biolink:{field}"
             value = data[field]
-            values = value if isinstance(value, list) else [value]
-            for v in values:
-                qualifiers.append(
-                    {
-                        "qualifier_type_id": type_id,
-                        "qualifier_value": v,
-                    }
-                )
+            if not isinstance(value, str):
+                value = orjson.dumps(value).decode()
+            if field == "qualified_predicate":
+                value = _ensure_biolink_prefix(value)
+            qualifiers.append(
+                {
+                    "qualifier_type_id": f"biolink:{field}",
+                    "qualifier_value": value,
+                }
+            )
 
     return qualifiers
 

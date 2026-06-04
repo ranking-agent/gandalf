@@ -1006,17 +1006,11 @@ class CSRGraph:
                             qual_dict = triple_qual_map[(subj_cat, pred, obj_cat)]
                             if qtype not in qual_dict:
                                 qual_dict[qtype] = set()
+                            # qualifier_value is always a scalar string (the
+                            # loader coerces non-strings to JSON strings), so it
+                            # is safe to collect directly.
                             if qval is not None:
-                                # A qualifier_value is normally a scalar, but
-                                # some sources supply a list; flatten it so each
-                                # value is collected as an applicable_value and
-                                # the set stays hashable.
-                                values = qval if isinstance(qval, list) else [qval]
-                                for v in values:
-                                    try:
-                                        qual_dict[qtype].add(v)
-                                    except TypeError:
-                                        qual_dict[qtype].add(str(v))
+                                qual_dict[qtype].add(qval)
 
         # Full scan of LMDB for edge attribute types
         if self.lmdb_store is not None:

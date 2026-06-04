@@ -573,22 +573,42 @@ class TestQualifierExtraction:
             assert f"biolink:{field}" in by_type
             assert by_type[f"biolink:{field}"] == self.EDGE[field]
 
-    def test_list_valued_qualifier_split_into_scalar_entries(self):
-        """A list-valued qualifier must become multiple scalar entries (no lists).
+    def test_list_valued_qualifier_coerced_to_json_string(self):
+        """A non-string (list) qualifier value becomes a single JSON-string entry.
 
-        TRAPI requires qualifier_value to be a scalar string; a list value would
-        crash downstream hashing/comparison in lookup.
+        Matches the tier 1 (BioPack/retriever) driver, which coerces non-string
+        qualifier values via orjson rather than splitting or dropping them. TRAPI
+        requires qualifier_value to be a scalar string.
         """
         edge = dict(self.EDGE, object_aspect_qualifier=["activity", "abundance"])
         qualifiers = _extract_qualifiers(edge)
-        aspect_vals = [
-            q["qualifier_value"]
+        aspect = [
+            q
             for q in qualifiers
             if q["qualifier_type_id"] == "biolink:object_aspect_qualifier"
         ]
-        assert sorted(aspect_vals) == ["abundance", "activity"]
-        # No qualifier_value should itself be a list.
-        assert all(not isinstance(q["qualifier_value"], list) for q in qualifiers)
+        # Exactly one entry, with the JSON-encoded value (no split).
+        assert len(aspect) == 1
+        assert aspect[0]["qualifier_value"] == '["activity","abundance"]'
+        # Every value is a string.
+        assert all(isinstance(q["qualifier_value"], str) for q in qualifiers)
+
+    def test_qualified_predicate_value_gets_biolink_prefix(self):
+        """qualified_predicate values are normalized to carry a biolink: prefix."""
+        # Unprefixed value gains the prefix.
+        quals = _extract_qualifiers(dict(self.EDGE, qualified_predicate="causes"))
+        qp = next(
+            q for q in quals if q["qualifier_type_id"] == "biolink:qualified_predicate"
+        )
+        assert qp["qualifier_value"] == "biolink:causes"
+        # Already-prefixed value is left intact (idempotent).
+        quals = _extract_qualifiers(
+            dict(self.EDGE, qualified_predicate="biolink:causes")
+        )
+        qp = next(
+            q for q in quals if q["qualifier_type_id"] == "biolink:qualified_predicate"
+        )
+        assert qp["qualifier_value"] == "biolink:causes"
 
     def test_qualifiers_not_in_attributes(self):
         """Qualifier fields must NOT leak into edge attributes."""
@@ -605,12 +625,13 @@ class TestQualifierExtraction:
 
 
 class TestMetaKgListValuedQualifier:
-    """Regression test: a qualifier whose value is a list must not crash meta-KG build.
+    """Regression test: a list-valued qualifier must not crash meta-KG build.
 
-    Since qualifier terms are now routed to the hot-path qualifier store, the
-    meta knowledge graph builder iterates their values. Some sources provide a
-    list-valued qualifier, which previously raised ``TypeError: unhashable type:
-    'list'`` in ``build_meta_kg``.
+    Qualifier terms are routed to the hot-path qualifier store, and the meta
+    knowledge graph builder iterates their values. A list-valued qualifier once
+    raised ``TypeError: unhashable type: 'list'`` in ``build_meta_kg``; the
+    loader now coerces such values to a JSON string (matching tier 1) so the
+    meta-KG only ever sees scalar strings.
     """
 
     def _build_graph_with_list_qualifier(self, tmp_path):
@@ -637,7 +658,7 @@ class TestMetaKgListValuedQualifier:
             f.write(json.dumps(edge) + "\n")
         return build_graph_from_jsonl(edges_file, nodes_file)
 
-    def test_build_metadata_flattens_list_qualifier(self):
+    def test_build_metadata_coerces_list_qualifier_to_json_string(self):
         with tempfile.TemporaryDirectory() as tmp_path:
             graph = self._build_graph_with_list_qualifier(tmp_path)
             # Must not raise TypeError on the list-valued qualifier.
@@ -650,10 +671,9 @@ class TestMetaKgListValuedQualifier:
                 for qtype in [q["qualifier_type_id"]]
             }
             assert "biolink:object_aspect_qualifier" in qual_values
-            # The list value should be flattened into individual applicable values.
+            # The list value is coerced to a single JSON-string applicable value.
             assert set(qual_values["biolink:object_aspect_qualifier"]) == {
-                "activity",
-                "abundance",
+                '["activity","abundance"]',
             }
 
     def test_normal_lookup_with_list_qualifier_does_not_crash(self, bmt):
@@ -709,13 +729,13 @@ class TestMetaKgListValuedQualifier:
             results = response["message"]["results"]
             assert len(results) == 1
 
-            # The returned edge's qualifiers should all carry scalar values.
+            # The returned edge carries a single qualifier whose value is the
+            # JSON-encoded list string (scalar string, matching tier 1).
             kg_edges = response["message"]["knowledge_graph"]["edges"]
-            assert kg_edges
-            aspect_vals = sorted(
+            aspect_vals = [
                 q["qualifier_value"]
                 for e in kg_edges.values()
                 for q in e.get("qualifiers", [])
                 if q["qualifier_type_id"] == "biolink:object_aspect_qualifier"
-            )
-            assert aspect_vals == ["abundance", "activity"]
+            ]
+            assert aspect_vals == ['["activity","abundance"]']
