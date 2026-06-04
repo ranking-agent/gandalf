@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     # Infores identifiers
     infores: str = "infores:gandalf"
 
+    # Biolink Model version to pin the BMT Toolkit to. Must match the version
+    # used by the tier 1 driver (BioPack/retriever) so qualifier/predicate
+    # classification is identical across tiers. Empty uses BMT's built-in
+    # default schema.
+    biolink_version: str = "4.3.2"
+
     # Heartbeat (Automat cluster registration)
     automat_host: str = ""  # e.g. "http://automat:8080"; empty = disabled
     heart_rate: int = 30  # seconds between heartbeats

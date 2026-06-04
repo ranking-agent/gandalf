@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from gandalf import CSRGraph, annotate_response, enrich_knowledge_graph, lookup
+from gandalf.biolink import make_toolkit
 from gandalf.logging_config import configure_logging, request_id_var
 from gandalf.models import (
     AsyncTRAPIQuery,
@@ -202,7 +203,7 @@ if not _SKIP_PRELOAD:
     )
     GRAPH = load_graph(settings.graph_path, settings.graph_format)
     logger.info("Initializing Biolink Model Toolkit...")
-    BMT = Toolkit()
+    BMT = make_toolkit()
 
     # Freeze all objects allocated so far (graph + BMT) into a permanent
     # generation that the cyclic GC will never scan.  This makes Gen 2

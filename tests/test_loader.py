@@ -549,6 +549,8 @@ class TestQualifierExtraction:
         "object_aspect_qualifier": "activity",
         "frequency_qualifier": "HP:0040283",
         "subject_form_or_variant_qualifier": "genetic_variant_form",
+        # Added in biolink 4.3.2 (the version tier 1 pins); must be a qualifier.
+        "disease_context_qualifier": "Orphanet:397590",
         "p_value": 0.03,
         "publications": ["PMID:11111111"],
     }
@@ -558,12 +560,29 @@ class TestQualifierExtraction:
         "object_aspect_qualifier",
         "frequency_qualifier",
         "subject_form_or_variant_qualifier",
+        "disease_context_qualifier",
     }
 
     def test_qualifier_set_is_model_derived(self):
         """The qualifier-field set should come from the Biolink Model via BMT."""
         fields = _get_qualifier_fields()
         assert self.EXPECTED_QUALIFIERS <= fields
+
+    def test_disease_context_qualifier_is_a_qualifier(self):
+        """disease_context_qualifier is a qualifier in biolink 4.3.2 (tier 1 parity).
+
+        It is NOT present in older biolink (e.g. 4.2.2, BMT's bare default), so
+        this guards against the toolkit silently using an unpinned version.
+        """
+        assert "disease_context_qualifier" in _get_qualifier_fields()
+        quals = _extract_qualifiers(self.EDGE)
+        by_type = {q["qualifier_type_id"]: q["qualifier_value"] for q in quals}
+        assert by_type.get("biolink:disease_context_qualifier") == "Orphanet:397590"
+        # And it must not also appear as an attribute.
+        attr_names = {
+            a["original_attribute_name"] for a in _extract_attributes(self.EDGE)
+        }
+        assert "disease_context_qualifier" not in attr_names
 
     def test_qualifiers_extracted_with_biolink_prefix(self):
         """All qualifier fields become TRAPI qualifiers with biolink-prefixed type ids."""
@@ -572,6 +591,43 @@ class TestQualifierExtraction:
         for field in self.EXPECTED_QUALIFIERS:
             assert f"biolink:{field}" in by_type
             assert by_type[f"biolink:{field}"] == self.EDGE[field]
+
+    def test_list_valued_qualifier_coerced_to_json_string(self):
+        """A non-string (list) qualifier value becomes a single JSON-string entry.
+
+        Matches the tier 1 (BioPack/retriever) driver, which coerces non-string
+        qualifier values via orjson rather than splitting or dropping them. TRAPI
+        requires qualifier_value to be a scalar string.
+        """
+        edge = dict(self.EDGE, object_aspect_qualifier=["activity", "abundance"])
+        qualifiers = _extract_qualifiers(edge)
+        aspect = [
+            q
+            for q in qualifiers
+            if q["qualifier_type_id"] == "biolink:object_aspect_qualifier"
+        ]
+        # Exactly one entry, with the JSON-encoded value (no split).
+        assert len(aspect) == 1
+        assert aspect[0]["qualifier_value"] == '["activity","abundance"]'
+        # Every value is a string.
+        assert all(isinstance(q["qualifier_value"], str) for q in qualifiers)
+
+    def test_qualified_predicate_value_gets_biolink_prefix(self):
+        """qualified_predicate values are normalized to carry a biolink: prefix."""
+        # Unprefixed value gains the prefix.
+        quals = _extract_qualifiers(dict(self.EDGE, qualified_predicate="causes"))
+        qp = next(
+            q for q in quals if q["qualifier_type_id"] == "biolink:qualified_predicate"
+        )
+        assert qp["qualifier_value"] == "biolink:causes"
+        # Already-prefixed value is left intact (idempotent).
+        quals = _extract_qualifiers(
+            dict(self.EDGE, qualified_predicate="biolink:causes")
+        )
+        qp = next(
+            q for q in quals if q["qualifier_type_id"] == "biolink:qualified_predicate"
+        )
+        assert qp["qualifier_value"] == "biolink:causes"
 
     def test_qualifiers_not_in_attributes(self):
         """Qualifier fields must NOT leak into edge attributes."""
@@ -585,3 +641,120 @@ class TestQualifierExtraction:
         attr_names = {a["original_attribute_name"] for a in attributes}
         assert "p_value" in attr_names
         assert "publications" in attr_names
+
+
+class TestMetaKgListValuedQualifier:
+    """Regression test: a list-valued qualifier must not crash meta-KG build.
+
+    Qualifier terms are routed to the hot-path qualifier store, and the meta
+    knowledge graph builder iterates their values. A list-valued qualifier once
+    raised ``TypeError: unhashable type: 'list'`` in ``build_meta_kg``; the
+    loader now coerces such values to a JSON string (matching tier 1) so the
+    meta-KG only ever sees scalar strings.
+    """
+
+    def _build_graph_with_list_qualifier(self, tmp_path):
+        nodes = (
+            '{"id": "NCBIGene:1028", "name": "G", "category": ["biolink:Gene"]}\n'
+            '{"id": "MONDO:0004979", "name": "D", "category": ["biolink:Disease"]}\n'
+        )
+        edge = {
+            "id": "e1",
+            "subject": "NCBIGene:1028",
+            "predicate": "biolink:associated_with",
+            "object": "MONDO:0004979",
+            "primary_knowledge_source": "infores:test",
+            # List-valued qualifier value (the regression trigger)
+            "object_aspect_qualifier": ["activity", "abundance"],
+        }
+        nodes_file = os.path.join(tmp_path, "nodes.jsonl")
+        edges_file = os.path.join(tmp_path, "edges.jsonl")
+        with open(nodes_file, "w") as f:
+            f.write(nodes)
+        with open(edges_file, "w") as f:
+            import json
+
+            f.write(json.dumps(edge) + "\n")
+        return build_graph_from_jsonl(edges_file, nodes_file)
+
+    def test_build_metadata_coerces_list_qualifier_to_json_string(self):
+        with tempfile.TemporaryDirectory() as tmp_path:
+            graph = self._build_graph_with_list_qualifier(tmp_path)
+            # Must not raise TypeError on the list-valued qualifier.
+            graph.build_metadata()
+
+            qual_values = {
+                qtype: q["applicable_values"]
+                for edge in graph.meta_kg["edges"]
+                for q in edge["qualifiers"]
+                for qtype in [q["qualifier_type_id"]]
+            }
+            assert "biolink:object_aspect_qualifier" in qual_values
+            # The list value is coerced to a single JSON-string applicable value.
+            assert set(qual_values["biolink:object_aspect_qualifier"]) == {
+                '["activity","abundance"]',
+            }
+
+    def test_normal_lookup_with_list_qualifier_does_not_crash(self, bmt):
+        """A normal lookup over an edge with a list-valued qualifier must succeed.
+
+        Regression: the per-edge dedup key in lookup hashes (type_id, value)
+        pairs, so a list qualifier_value raised "unhashable type: 'list'".
+        """
+        from gandalf.search import lookup
+
+        with tempfile.TemporaryDirectory() as tmp_path:
+            nodes = (
+                '{"id": "CHEBI:6801", "name": "M", "category": ["biolink:SmallMolecule"]}\n'
+                '{"id": "NCBIGene:1028", "name": "G", "category": ["biolink:Gene"]}\n'
+            )
+            edge = {
+                "id": "e1",
+                "subject": "CHEBI:6801",
+                "predicate": "biolink:affects",
+                "object": "NCBIGene:1028",
+                "primary_knowledge_source": "infores:test",
+                "object_aspect_qualifier": ["activity", "abundance"],
+            }
+            nodes_file = os.path.join(tmp_path, "nodes.jsonl")
+            edges_file = os.path.join(tmp_path, "edges.jsonl")
+            with open(nodes_file, "w") as f:
+                f.write(nodes)
+            with open(edges_file, "w") as f:
+                import json
+
+                f.write(json.dumps(edge) + "\n")
+            graph = build_graph_from_jsonl(edges_file, nodes_file)
+
+            query = {
+                "message": {
+                    "query_graph": {
+                        "nodes": {
+                            "n0": {"ids": ["CHEBI:6801"]},
+                            "n1": {"ids": ["NCBIGene:1028"]},
+                        },
+                        "edges": {
+                            "e0": {
+                                "subject": "n0",
+                                "object": "n1",
+                                "predicates": ["biolink:affects"],
+                            },
+                        },
+                    },
+                },
+            }
+
+            response = lookup(graph, query, bmt=bmt)
+            results = response["message"]["results"]
+            assert len(results) == 1
+
+            # The returned edge carries a single qualifier whose value is the
+            # JSON-encoded list string (scalar string, matching tier 1).
+            kg_edges = response["message"]["knowledge_graph"]["edges"]
+            aspect_vals = [
+                q["qualifier_value"]
+                for e in kg_edges.values()
+                for q in e.get("qualifiers", [])
+                if q["qualifier_type_id"] == "biolink:object_aspect_qualifier"
+            ]
+            assert aspect_vals == ['["activity","abundance"]']

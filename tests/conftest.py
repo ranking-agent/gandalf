@@ -11,6 +11,7 @@ os.environ.setdefault("GANDALF_OTEL_ENABLED", "false")
 
 import pytest
 
+import gandalf.loader as _loader_module
 import gandalf.validation as _validation_module
 
 
@@ -175,10 +176,17 @@ def bmt():
 
 @pytest.fixture(scope="session", autouse=True)
 def _patch_validation_bmt(bmt):
-    """Patch the validation module's global BMT singleton with our mock.
+    """Patch module-level BMT singletons with our mock.
 
-    gandalf.validation maintains its own module-level _bmt that is lazily
-    initialised via _get_bmt().  Setting it here ensures the validation
-    helpers never attempt to create a real Toolkit().
+    Both gandalf.validation and gandalf.loader maintain their own module-level
+    _bmt that is lazily initialised via _get_bmt().  Setting them here ensures
+    the helpers never attempt to create a real Toolkit() (which makes an
+    external call on init and can hang in network-restricted environments).
+
+    For the loader, MockBMT has no 'qualifier' descendants, so
+    _get_qualifier_fields() deterministically falls back to
+    _FALLBACK_QUALIFIER_FIELDS.
     """
     _validation_module._bmt = bmt
+    _loader_module._bmt = bmt
+    _loader_module._qualifier_fields = None

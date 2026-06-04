@@ -9,10 +9,10 @@ from collections import defaultdict
 from typing import Optional, Union
 
 import numpy as np
-from bmt.toolkit import Toolkit
 
 logger = logging.getLogger(__name__)
 
+from gandalf.biolink import make_toolkit
 from gandalf.config import settings
 from gandalf.logging_config import TRAPILogCollector
 from gandalf.profiler import (
@@ -155,7 +155,7 @@ def _lookup_inner(
 
     with prof.stage("bmt_init"):
         if bmt is None:
-            bmt = Toolkit()
+            bmt = make_toolkit()
             t_bmt = time.perf_counter()
             logger.warning("BMT initialization: %.2fs", t_bmt - t_start)
         else:

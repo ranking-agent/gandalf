@@ -1006,6 +1006,9 @@ class CSRGraph:
                             qual_dict = triple_qual_map[(subj_cat, pred, obj_cat)]
                             if qtype not in qual_dict:
                                 qual_dict[qtype] = set()
+                            # qualifier_value is always a scalar string (the
+                            # loader coerces non-strings to JSON strings), so it
+                            # is safe to collect directly.
                             if qval is not None:
                                 qual_dict[qtype].add(qval)
 

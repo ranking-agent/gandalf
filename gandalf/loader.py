@@ -23,6 +23,7 @@ import numpy as np
 import orjson
 from bmt.toolkit import Toolkit
 
+from gandalf.biolink import make_toolkit
 from gandalf.config import settings
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import (
@@ -55,31 +56,47 @@ _CORE_NODE_FIELDS = {"id", "name", "category"}
 
 # Fallback qualifier fields, used only if the Biolink Model cannot be loaded via
 # BMT at runtime. The authoritative set is derived from the model (see
-# ``_get_qualifier_fields``); this static list is just a safety net.
+# ``_get_qualifier_fields``); this static list is just a safety net. It mirrors
+# the descendants of the abstract ``qualifier`` slot in the pinned Biolink
+# version (settings.biolink_version, currently 4.3.2).
 _FALLBACK_QUALIFIER_FIELDS = {
-    "qualified_predicate",
+    "anatomical_context_qualifier",
+    "aspect_qualifier",
+    "causal_mechanism_qualifier",
+    "context_qualifier",
+    "derivative_qualifier",
+    "direction_qualifier",
+    "disease_context_qualifier",
+    "form_or_variant_qualifier",
+    "frequency_qualifier",
     "object_aspect_qualifier",
+    "object_context_qualifier",
+    "object_derivative_qualifier",
     "object_direction_qualifier",
     "object_form_or_variant_qualifier",
     "object_part_qualifier",
-    "object_derivative_qualifier",
-    "object_context_qualifier",
+    "object_specialization_qualifier",
+    "onset_qualifier",
+    "part_qualifier",
+    "population_context_qualifier",
+    "qualified_predicate",
+    "response_context_qualifier",
+    "response_target_context_qualifier",
+    "severity_qualifier",
+    "sex_qualifier",
+    "specialization_qualifier",
+    "species_context_qualifier",
+    "stage_qualifier",
+    "statement_qualifier",
     "subject_aspect_qualifier",
+    "subject_context_qualifier",
+    "subject_derivative_qualifier",
     "subject_direction_qualifier",
     "subject_form_or_variant_qualifier",
     "subject_part_qualifier",
-    "subject_derivative_qualifier",
-    "subject_context_qualifier",
-    "causal_mechanism_qualifier",
-    "species_context_qualifier",
-    "anatomical_context_qualifier",
-    "frequency_qualifier",
-    "severity_qualifier",
-    "sex_qualifier",
-    "onset_qualifier",
-    "stage_qualifier",
+    "subject_specialization_qualifier",
     "temporal_context_qualifier",
-    "population_context_qualifier",
+    "temporal_interval_qualifier",
 }
 
 # Module-level BMT instance and cached qualifier-field set (lazily initialized).
@@ -88,10 +105,10 @@ _qualifier_fields: Optional[set] = None
 
 
 def _get_bmt() -> Toolkit:
-    """Get or create the module-level BMT instance."""
+    """Get or create the module-level BMT instance (pinned biolink version)."""
     global _bmt
     if _bmt is None:
-        _bmt = Toolkit()
+        _bmt = make_toolkit()
     return _bmt
 
 
@@ -190,21 +207,44 @@ def _extract_sources(data):
     return [gandalf_source] + sources
 
 
+def _ensure_biolink_prefix(value):
+    """Ensure a CURIE-like value carries the ``biolink:`` prefix.
+
+    Mirrors retriever's ``biolink.ensure_prefix`` (tier 1): strip any existing
+    prefix, then prepend ``biolink:``. Used for ``qualified_predicate`` values,
+    which are Biolink predicate CURIEs.
+    """
+    local = value.split(":", 1)[1] if ":" in value else value
+    return f"biolink:{local}"
+
+
 def _extract_qualifiers(data):
     """Extract qualifiers.
 
-    Format: Top-level fields (object_aspect_qualifier, etc.). The set of
+    Format: top-level fields (object_aspect_qualifier, etc.). The set of
     qualifier field names is derived from the Biolink Model via
     ``_get_qualifier_fields``.
+
+    A TRAPI ``qualifier_value`` must be a scalar string. This matches the tier 1
+    (BioPack/retriever Elasticsearch) driver so the same edge produces identical
+    qualifiers across tiers: a non-string value is coerced to a JSON string via
+    ``orjson`` (yielding exactly one qualifier entry per type, not split), and
+    ``qualified_predicate`` values are normalized to carry the ``biolink:``
+    prefix.
     """
     qualifier_fields = _get_qualifier_fields()
     qualifiers = []
     for field in qualifier_fields:
         if field in data:
+            value = data[field]
+            if not isinstance(value, str):
+                value = orjson.dumps(value).decode()
+            if field == "qualified_predicate":
+                value = _ensure_biolink_prefix(value)
             qualifiers.append(
                 {
                     "qualifier_type_id": f"biolink:{field}",
-                    "qualifier_value": data[field],
+                    "qualifier_value": value,
                 }
             )
 

@@ -47,7 +47,19 @@ def _aggregator_source(sources):
 
 
 def _qualifier_map(qualifiers):
-    """Convert a qualifiers list to a {type_id: value} dict for easy assertion."""
+    """Convert a qualifiers list to a {type_id: value} dict for easy assertion.
+
+    A TRAPI edge may legally carry more than one Qualifier with the same
+    qualifier_type_id (e.g. a multi-valued source field split into scalar
+    entries). This helper assumes one value per type, so guard against silently
+    dropping values -- callers that need multi-valued qualifiers should compare
+    the list directly instead.
+    """
+    type_ids = [q["qualifier_type_id"] for q in qualifiers]
+    assert len(type_ids) == len(set(type_ids)), (
+        "duplicate qualifier_type_id in qualifiers; _qualifier_map would drop "
+        f"values: {type_ids}"
+    )
     return {q["qualifier_type_id"]: q["qualifier_value"] for q in qualifiers}
 
 

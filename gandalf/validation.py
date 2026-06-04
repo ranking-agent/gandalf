@@ -10,6 +10,7 @@ from typing import Optional
 
 from bmt.toolkit import Toolkit
 
+from gandalf.biolink import make_toolkit
 from gandalf.graph import CSRGraph
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ def _get_bmt() -> Toolkit:
     """Get or create the BMT instance."""
     global _bmt
     if _bmt is None:
-        _bmt = Toolkit()
+        _bmt = make_toolkit()
     return _bmt
 
 
