@@ -277,6 +277,13 @@ def _otel_inject_headers(carrier: dict) -> None:
     """
 
 
+def _otel_record_baggage() -> None:
+    """No-op stub when OpenTelemetry is disabled.
+
+    Replaced below with a real implementation when ``settings.otel_enabled`` is True.
+    """
+
+
 if settings.otel_enabled:
     from opentelemetry import trace
     from opentelemetry.propagate import inject as _real_otel_inject
@@ -320,6 +327,22 @@ if settings.otel_enabled:
     # sync /query response carries no further trace hop, so no response-side
     # middleware is needed for Jaeger to join spans correctly.
     _otel_inject_headers = _real_otel_inject  # type: ignore[assignment]
+
+    from opentelemetry import baggage as _otel_baggage
+
+    def _real_otel_record_baggage() -> None:
+        """Attach all entries from the incoming W3C ``baggage`` context to the
+        current span as ``baggage.<key>`` attributes.
+        """
+        span = trace.get_current_span()
+        if not span.is_recording():
+            return
+        for key, value in _otel_baggage.get_all().items():
+            span.set_attribute(f"baggage.{key}", value)
+
+    # override the default empty _otel_record_baggage with this functional one when otel is enabled
+    _otel_record_baggage = _real_otel_record_baggage
+
     logger.info(
         "OpenTelemetry tracing enabled (service=%s).", settings.otel_service_name
     )
@@ -578,6 +601,7 @@ def sync_lookup(
     The body is taken as a raw dict and not run through Pydantic validation
     unless ``validate_responses`` is enabled -- see ``_request_dict``.
     """
+    _otel_record_baggage()
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
 
@@ -696,6 +720,7 @@ def async_query(
     The body is taken as a raw dict and not run through Pydantic validation
     unless ``validate_responses`` is enabled -- see ``_request_dict``.
     """
+    _otel_record_baggage()
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
     raw = _request_dict(query, AsyncTRAPIQuery)
