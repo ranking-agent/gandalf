@@ -549,6 +549,8 @@ class TestQualifierExtraction:
         "object_aspect_qualifier": "activity",
         "frequency_qualifier": "HP:0040283",
         "subject_form_or_variant_qualifier": "genetic_variant_form",
+        # Added in biolink 4.3.2 (the version tier 1 pins); must be a qualifier.
+        "disease_context_qualifier": "Orphanet:397590",
         "p_value": 0.03,
         "publications": ["PMID:11111111"],
     }
@@ -558,12 +560,29 @@ class TestQualifierExtraction:
         "object_aspect_qualifier",
         "frequency_qualifier",
         "subject_form_or_variant_qualifier",
+        "disease_context_qualifier",
     }
 
     def test_qualifier_set_is_model_derived(self):
         """The qualifier-field set should come from the Biolink Model via BMT."""
         fields = _get_qualifier_fields()
         assert self.EXPECTED_QUALIFIERS <= fields
+
+    def test_disease_context_qualifier_is_a_qualifier(self):
+        """disease_context_qualifier is a qualifier in biolink 4.3.2 (tier 1 parity).
+
+        It is NOT present in older biolink (e.g. 4.2.2, BMT's bare default), so
+        this guards against the toolkit silently using an unpinned version.
+        """
+        assert "disease_context_qualifier" in _get_qualifier_fields()
+        quals = _extract_qualifiers(self.EDGE)
+        by_type = {q["qualifier_type_id"]: q["qualifier_value"] for q in quals}
+        assert by_type.get("biolink:disease_context_qualifier") == "Orphanet:397590"
+        # And it must not also appear as an attribute.
+        attr_names = {
+            a["original_attribute_name"] for a in _extract_attributes(self.EDGE)
+        }
+        assert "disease_context_qualifier" not in attr_names
 
     def test_qualifiers_extracted_with_biolink_prefix(self):
         """All qualifier fields become TRAPI qualifiers with biolink-prefixed type ids."""
