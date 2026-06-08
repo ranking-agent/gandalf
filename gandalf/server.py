@@ -359,6 +359,8 @@ def init_otel() -> None:
     # middleware is needed for Jaeger to join spans correctly.
     _otel_inject_headers = _real_otel_inject  # type: ignore[assignment]
 
+    _pk_regex_match = re.compile(r"\A[0-9A-Za-z-]{36}\Z").match
+
     def _real_otel_record_baggage() -> None:
         """Attach all entries from the incoming W3C ``baggage`` context to the
         current span as ``baggage.<key>`` attributes.
@@ -366,8 +368,9 @@ def init_otel() -> None:
         span = trace.get_current_span()
         if not span.is_recording():
             return
-        for key, value in _otel_baggage.get_all().items():
-            span.set_attribute(f"baggage.{key}", value)
+        baggage_pk = _otel_baggage.get_baggage('pk')
+        if isinstance(baggage_pk, str) and _pk_regex_match(baggage_pk):
+            span.set_attribute(f"pk", baggage_pk)
 
     _otel_record_baggage = _real_otel_record_baggage
     _otel_initialized = True
