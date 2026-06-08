@@ -75,6 +75,9 @@ def otel_server(monkeypatch, graph, bmt):  # noqa: F811
 
     gandalf.server.GRAPH = graph
     gandalf.server.BMT = bmt
+    # init_otel() is deferred (post_fork / lifespan startup); the bare
+    # TestClient used below does not run lifespan, so initialize explicitly.
+    gandalf.server.init_otel()
 
     try:
         yield gandalf.server

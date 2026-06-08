@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import uuid
+import re
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -223,8 +224,11 @@ if not _SKIP_PRELOAD:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Worker lifecycle — handles heartbeat and shutdown cleanup."""
+    """Worker lifecycle — handles OTel init, heartbeat and shutdown cleanup."""
     logger.info("Worker started (PID=%d).", os.getpid())
+    # init otel here to avoid issues with multiple workers
+    # see comments under init_otel for more details
+    init_otel()
     heartbeat_stop = None
     if settings.automat_host:
         heartbeat_stop = start_heartbeat(settings)
@@ -278,13 +282,40 @@ def _otel_inject_headers(carrier: dict) -> None:
 
 
 def _otel_record_baggage() -> None:
-    """No-op stub when OpenTelemetry is disabled.
+    """No-op stub for when OpenTelemetry isn't enabled."""
 
-    Replaced below with a real implementation when ``settings.otel_enabled`` is True.
+
+# Populated by ``init_otel()`` once, in each worker process.  Left ``None`` /
+# ``False`` at import so that under ``gunicorn --preload`` the master (which
+# imports this module before forking) builds no OTel SDK objects.
+_otel_provider = None
+_otel_initialized = False
+
+
+def init_otel() -> None:
+    """Build the OpenTelemetry SDK for the current process.
+
+    Must run **once per worker, after any fork** -- never in a preloaded
+    gunicorn master.  With ``preload_app = True`` the application module is
+    imported in the master before workers are forked; constructing the SDK
+    there would tie the OTLP/gRPC exporter channel and the ``BatchSpanProcessor``
+    export thread to the master and leave them inherited in a broken state by
+    the children (gRPC channels are not fork-safe).  Deferring construction to
+    ``post_fork`` / worker startup gives each worker its own exporter, channel,
+    and export thread.
+
+    This function is idempotent and a no-op when ``settings.otel_enabled`` is False,
+    so it is called from both the gunicorn ``post_fork`` hook (production) and
+    the FastAPI lifespan startup (the uvicorn dev server, which has no gunicorn
+    hooks) to ensure it works either way.
     """
+    global _otel_provider, _otel_initialized
+    global _otel_inject_headers, _otel_record_baggage
 
+    if _otel_initialized or not settings.otel_enabled:
+        return
 
-if settings.otel_enabled:
+    from opentelemetry import baggage as _otel_baggage
     from opentelemetry import trace
     from opentelemetry.propagate import inject as _real_otel_inject
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -328,8 +359,6 @@ if settings.otel_enabled:
     # middleware is needed for Jaeger to join spans correctly.
     _otel_inject_headers = _real_otel_inject  # type: ignore[assignment]
 
-    from opentelemetry import baggage as _otel_baggage
-
     def _real_otel_record_baggage() -> None:
         """Attach all entries from the incoming W3C ``baggage`` context to the
         current span as ``baggage.<key>`` attributes.
@@ -340,11 +369,13 @@ if settings.otel_enabled:
         for key, value in _otel_baggage.get_all().items():
             span.set_attribute(f"baggage.{key}", value)
 
-    # override the default empty _otel_record_baggage with this functional one when otel is enabled
     _otel_record_baggage = _real_otel_record_baggage
+    _otel_initialized = True
 
     logger.info(
-        "OpenTelemetry tracing enabled (service=%s).", settings.otel_service_name
+        "OpenTelemetry tracing initialized in PID=%d (service=%s).",
+        os.getpid(),
+        settings.otel_service_name,
     )
 
 

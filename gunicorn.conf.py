@@ -1,6 +1,7 @@
 """Gunicorn configuration for GANDALF."""
 
 from gandalf.config import settings
+from gandalf.server import init_otel
 
 # Bind to all interfaces on port 6429
 bind = "0.0.0.0:6429"
@@ -33,6 +34,13 @@ accesslog = "-"
 # Forward all logs to stderr
 errorlog = "-"
 loglevel = settings.log_level.lower()
+
+
+# The OpenTelemetry SDK (OTLP/gRPC exporter channel + batch export thread)
+# must be (re)built post-fork per worker because gRPC channels are not fork-safe
+# so an exporter inherited from one master process won't work with multiple workers.
+def post_fork(server, worker):
+    init_otel()
 
 
 # child_exit runs in the master after waitpid() reaps the worker, so it fires
