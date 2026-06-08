@@ -14,6 +14,14 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     max_request_size_mb: int = 10
     rate_limit: int = 0
+
+    # HTTP body compression (responses) + decompression (requests), zstandard.
+    # The decompressed request size is capped at max_request_size_mb.
+    compression_enabled: bool = True
+    compress_response_enabled: bool = True
+    decompress_request_enabled: bool = True
+    compress_minimum_size: int = 500  # bytes; responses smaller than this are sent raw
+    compress_zstd_level: int = 4
     server_url: str = "http://localhost:6429"
     server_maturity: str = "development"
     server_location: str = "RENCI"
