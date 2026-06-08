@@ -1,7 +1,8 @@
 """Gunicorn configuration for GANDALF."""
 
 from gandalf.config import settings
-from gandalf.server import init_otel
+from gandalf.otel import init_otel
+from gandalf.server import APP
 
 # Bind to all interfaces on port 6429
 bind = "0.0.0.0:6429"
@@ -40,7 +41,7 @@ loglevel = settings.log_level.lower()
 # must be (re)built post-fork per worker because gRPC channels are not fork-safe
 # so an exporter inherited from one master process won't work with multiple workers.
 def post_fork(server, worker):
-    init_otel()
+    init_otel(APP)
 
 
 # child_exit runs in the master after waitpid() reaps the worker, so it fires

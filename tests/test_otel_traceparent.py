@@ -34,6 +34,8 @@ pytest.importorskip("opentelemetry.instrumentation.fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import gandalf.otel
+
 from tests.search_fixtures import graph  # noqa: F401, E402
 
 _QUERY_MESSAGE = {
@@ -57,6 +59,10 @@ _QUERY_MESSAGE = {
 _INCOMING_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 _INCOMING_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
 
+# A well-formed ``pk`` baggage value: 36 chars of [0-9A-Za-z-], matching the
+# regex guard in gandalf.otel (a UUID string qualifies).
+_VALID_PK = "0af76519-16cd-43dd-8448-eb211c80319c"
+
 
 @pytest.fixture
 def otel_server(monkeypatch, graph, bmt):  # noqa: F811
@@ -69,6 +75,11 @@ def otel_server(monkeypatch, graph, bmt):  # noqa: F811
     import gandalf.config
 
     importlib.reload(gandalf.config)
+    # Reload otel before server so the freshly-imported settings take effect
+    # and the module-level _initialized/_provider state is reset per test.
+    import gandalf.otel
+
+    importlib.reload(gandalf.otel)
     import gandalf.server
 
     importlib.reload(gandalf.server)
@@ -77,7 +88,7 @@ def otel_server(monkeypatch, graph, bmt):  # noqa: F811
     gandalf.server.BMT = bmt
     # init_otel() is deferred (post_fork / lifespan startup); the bare
     # TestClient used below does not run lifespan, so initialize explicitly.
-    gandalf.server.init_otel()
+    gandalf.otel.init_otel(gandalf.server.APP)
 
     try:
         yield gandalf.server
@@ -86,6 +97,7 @@ def otel_server(monkeypatch, graph, bmt):  # noqa: F811
         # later tests still see a fresh, unconfigured server module.
         monkeypatch.undo()
         importlib.reload(gandalf.config)
+        importlib.reload(gandalf.otel)
         importlib.reload(gandalf.server)
 
 
@@ -162,12 +174,13 @@ def test_async_callback_forwards_request_traceparent(otel_server, callback_serve
     assert _trace_id_of(cb["headers"]["traceparent"]) == _INCOMING_TRACE_ID
 
 
-def test_query_records_incoming_baggage_on_span(otel_server):
-    """``/query`` copies every incoming W3C ``baggage`` entry onto its span.
+def test_query_records_pk_baggage_on_span(otel_server):
+    """``/query`` records a well-formed incoming ``pk`` baggage value on its span.
 
     The composite propagator extracts the ``baggage`` header into the request
     context, but baggage is never attached to spans automatically -- Gandalf
-    does that explicitly so it is visible in the trace backend.
+    records the ``pk`` entry (when it matches the expected shape) as a ``pk``
+    span attribute so it is visible in the trace backend.
     """
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -175,56 +188,62 @@ def test_query_records_incoming_baggage_on_span(otel_server):
     )
 
     exporter = InMemorySpanExporter()
-    otel_server._otel_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    gandalf.otel._provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     client = TestClient(otel_server.APP)
     resp = client.post(
         "/query",
-        headers={"baggage": "team=ranking-agent,ars_pk=abc123"},
+        headers={"baggage": f"pk={_VALID_PK}"},
         json={"message": _QUERY_MESSAGE},
     )
     assert resp.status_code == 200, resp.text
 
-    # Merge attributes across all spans emitted for the request; the baggage
-    # attributes live on the FastAPI server span.
+    # Merge attributes across all spans emitted for the request; the pk
+    # attribute lives on the FastAPI server span.
     attrs: dict[str, Any] = {}
     for span in exporter.get_finished_spans():
         attrs.update(span.attributes or {})
 
-    assert attrs.get("baggage.team") == "ranking-agent"
-    assert attrs.get("baggage.ars_pk") == "abc123"
+    assert attrs.get("pk") == _VALID_PK
 
 
-def test_query_without_baggage_sets_no_baggage_attributes(otel_server):
-    """No incoming ``baggage`` header means no ``baggage.*`` span attributes."""
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},  # no baggage header at all
+        {"baggage": "pk=not-a-valid-pk"},  # present but malformed (not 36 chars)
+        {"baggage": "team=ranking-agent"},  # baggage present, but no pk entry
+    ],
+)
+def test_query_does_not_record_pk_when_absent_or_malformed(otel_server, headers):
+    """No ``pk`` attribute is set unless a well-formed ``pk`` baggage entry arrives."""
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
         InMemorySpanExporter,
     )
 
     exporter = InMemorySpanExporter()
-    otel_server._otel_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    gandalf.otel._provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     client = TestClient(otel_server.APP)
-    resp = client.post("/query", json={"message": _QUERY_MESSAGE})
+    resp = client.post("/query", headers=headers, json={"message": _QUERY_MESSAGE})
     assert resp.status_code == 200, resp.text
 
-    baggage_keys = [
-        key
+    pk_values = [
+        span.attributes["pk"]
         for span in exporter.get_finished_spans()
-        for key in (span.attributes or {})
-        if key.startswith("baggage.")
+        if "pk" in (span.attributes or {})
     ]
-    assert baggage_keys == []
+    assert pk_values == []
 
 
-def test_asyncquery_records_incoming_baggage_on_span(otel_server, callback_server):
-    """``/asyncquery`` records incoming baggage on its span and forwards it.
+def test_asyncquery_records_pk_baggage_on_span(otel_server, callback_server):
+    """``/asyncquery`` records the incoming ``pk`` on its span and forwards baggage.
 
-    The server span (the request that returns ``accepted``) gets the
-    ``baggage.*`` attributes, and because ``inject`` carries baggage out of
-    the request context, the eventual callback POST also keeps the ``baggage``
-    header so the chain stays linked.
+    The server span (the request that returns ``accepted``) gets the ``pk``
+    attribute, and because ``inject`` carries baggage out of the request
+    context, the eventual callback POST also keeps the ``baggage`` header so
+    the chain stays linked.
     """
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -232,13 +251,13 @@ def test_asyncquery_records_incoming_baggage_on_span(otel_server, callback_serve
     )
 
     exporter = InMemorySpanExporter()
-    otel_server._otel_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    gandalf.otel._provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     callback_url, received = callback_server
     client = TestClient(otel_server.APP)
     resp = client.post(
         "/asyncquery",
-        headers={"baggage": "team=ranking-agent,ars_pk=abc123"},
+        headers={"baggage": f"pk={_VALID_PK}"},
         json={"callback": callback_url, "message": _QUERY_MESSAGE},
     )
     assert resp.status_code == 200, resp.text
@@ -246,14 +265,12 @@ def test_asyncquery_records_incoming_baggage_on_span(otel_server, callback_serve
     attrs: dict[str, Any] = {}
     for span in exporter.get_finished_spans():
         attrs.update(span.attributes or {})
-    assert attrs.get("baggage.team") == "ranking-agent"
-    assert attrs.get("baggage.ars_pk") == "abc123"
+    assert attrs.get("pk") == _VALID_PK
 
     # Baggage also rides along to the callback via the injected headers.
     assert _wait_for(lambda: len(received) > 0), "callback never received the POST"
     cb_baggage = received[0]["headers"].get("baggage", "")
-    assert "team=ranking-agent" in cb_baggage
-    assert "ars_pk=abc123" in cb_baggage
+    assert f"pk={_VALID_PK}" in cb_baggage
 
 
 def test_async_callback_includes_traceparent_without_incoming(
