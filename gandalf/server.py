@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from gandalf import CSRGraph, annotate_response, enrich_knowledge_graph, lookup
+from gandalf import otel
 from gandalf.biolink import make_toolkit
 from gandalf.logging_config import configure_logging, request_id_var
 from gandalf.models import (
@@ -223,8 +224,11 @@ if not _SKIP_PRELOAD:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Worker lifecycle — handles heartbeat and shutdown cleanup."""
+    """Worker lifecycle — handles OTel init, heartbeat and shutdown cleanup."""
     logger.info("Worker started (PID=%d).", os.getpid())
+    # Initialize OTel here (per-worker, post-fork) rather than at import; see
+    # gandalf.otel.init_otel for why this must not run in a preloaded master.
+    otel.init_otel(app)
     heartbeat_stop = None
     if settings.automat_host:
         heartbeat_stop = start_heartbeat(settings)
@@ -261,68 +265,6 @@ APP.add_middleware(
 STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.exists():
     APP.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-# ---------------------------------------------------------------------------
-# OpenTelemetry / Jaeger tracing (Plater-compatible)
-# ---------------------------------------------------------------------------
-
-
-def _otel_inject_headers(carrier: dict) -> None:
-    """No-op stub when OpenTelemetry is disabled.
-
-    Replaced below with the real W3C TraceContext propagator when
-    ``settings.otel_enabled`` is True.  Callers always pass a dict and
-    forward whatever keys end up in it to outgoing requests / responses,
-    so the no-op simply leaves the carrier untouched.
-    """
-
-
-if settings.otel_enabled:
-    from opentelemetry import trace
-    from opentelemetry.propagate import inject as _real_otel_inject
-    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
-    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-
-    _otel_resource = Resource(attributes={SERVICE_NAME: settings.otel_service_name})
-
-    _otel_exporter: SpanExporter
-
-    if settings.otel_use_console_exporter:
-        from opentelemetry.sdk.trace.export import ConsoleSpanExporter
-
-        _otel_exporter = ConsoleSpanExporter()
-    else:
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-            OTLPSpanExporter,
-        )
-
-        _otel_exporter = OTLPSpanExporter(
-            endpoint=f"{settings.jaeger_host}:{settings.jaeger_port}",
-        )
-
-    _otel_provider = TracerProvider(resource=_otel_resource)
-    _otel_provider.add_span_processor(BatchSpanProcessor(_otel_exporter))
-    trace.set_tracer_provider(_otel_provider)
-    FastAPIInstrumentor.instrument_app(
-        APP,
-        tracer_provider=_otel_provider,
-        excluded_urls="docs,openapi.json",
-    )
-
-    # Exposed so ``/asyncquery`` can capture the live trace context and forward
-    # it as ``traceparent`` on the background callback POST.  Without this the
-    # callback goes out untraced (httpx is not auto-instrumented and the
-    # background threadpool does not inherit the request's contextvars), and
-    # the callback receiver would start a brand-new disconnected trace in
-    # Jaeger.  FastAPIInstrumentor already handles inbound extraction and the
-    # sync /query response carries no further trace hop, so no response-side
-    # middleware is needed for Jaeger to join spans correctly.
-    _otel_inject_headers = _real_otel_inject  # type: ignore[assignment]
-    logger.info(
-        "OpenTelemetry tracing enabled (service=%s).", settings.otel_service_name
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +520,7 @@ def sync_lookup(
     The body is taken as a raw dict and not run through Pydantic validation
     unless ``validate_responses`` is enabled -- see ``_request_dict``.
     """
+    otel.record_baggage()
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
 
@@ -696,6 +639,7 @@ def async_query(
     The body is taken as a raw dict and not run through Pydantic validation
     unless ``validate_responses`` is enabled -- see ``_request_dict``.
     """
+    otel.record_baggage()
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
     raw = _request_dict(query, AsyncTRAPIQuery)
@@ -711,7 +655,7 @@ def async_query(
     # Rehydration: skip lookup/workflow validation, only enrich the supplied
     # knowledge graph in the background and POST it to the callback.
     if raw.get("parameters", {}).get("rehydrate") is not None:
-        _otel_inject_headers(trace_headers)
+        otel.inject_headers(trace_headers)
         logger.info("Doing async rehydration for %s", callback)
         background_tasks.add_task(
             _async_lookup, callback, raw, trace_headers, bool(profile)
@@ -748,7 +692,7 @@ def async_query(
     # request span) so the background callback can propagate it to the
     # downstream service.  When OTel is disabled this is a no-op and the
     # carrier stays empty.
-    _otel_inject_headers(trace_headers)
+    otel.inject_headers(trace_headers)
 
     logger.info("Doing async lookup for %s", callback)
     background_tasks.add_task(
