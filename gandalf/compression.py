@@ -59,7 +59,7 @@ class ZstdCompressionMiddleware:
         *,
         minimum_size: int = 500,
         level: int = 4,
-        max_request_size_mb: int = 10,
+        max_request_size_mb: int = 1000,  # 1 GB
         decompress_requests: bool = True,
         compress_responses: bool = True,
     ) -> None:
