@@ -2,8 +2,9 @@
 
 Three-pass streaming loader that keeps peak memory at ~3-4GB for 38M edges:
 
-Pass 1: Stream JSONL to collect vocabularies (node IDs, predicates, edge count).
-Pass 2: Stream JSONL again, converting each edge to integer indices stored in
+Pass 1: Stream edge triples to collect vocabularies (node IDs, predicates,
+        edge count).
+Pass 2: Stream edges again, converting each to integer indices stored in
         pre-allocated numpy arrays. Simultaneously interns qualifier/source data
         into the EdgePropertyStoreBuilder and writes attributes to
         a temporary LMDB keyed by original line index.
@@ -11,26 +12,47 @@ Pass 3: Sort numpy arrays by (src, dst, pred) via np.lexsort. Rewrite the temp
         LMDB in CSR-sorted order to produce the final LMDB where key == CSR
         edge index (zero indirection at query time). Reorder qualifier/source
         dedup indices to match. Build CSR offset arrays.
+
+The build core (``_build_graph_from_source``) is agnostic to where records come
+from: it consumes an abstract ``GraphSource`` of *already-normalized* nodes and
+edges. Two thin wrappers select a source:
+
+  * ``build_graph_from_jsonl`` reads KGX jsonl and normalizes (``KGXJsonlSource``).
+  * ``build_graph_from_mongo`` reads pre-normalized documents (``MongoSource``).
+
+Normalization itself lives in ``gandalf.normalize``; record validation lives in
+``gandalf.sources.base``.
 """
 
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import msgpack
 import numpy as np
-import orjson
-from bmt.toolkit import Toolkit
 
-from gandalf.biolink import make_toolkit
-from gandalf.config import settings
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import (
     LMDBPropertyStore,
     _INITIAL_WRITE_MAP_SIZE,
     _encode_key,
     _put_with_resize,
+)
+from gandalf.sources import GraphSource, KGXJsonlSource
+
+# Re-exported for backward compatibility: these moved to ``gandalf.normalize``
+# but existing callers (and tests) still import them from ``gandalf.loader``.
+from gandalf.normalize import (  # noqa: F401
+    _CORE_FIELDS,
+    _CORE_NODE_FIELDS,
+    _FALLBACK_QUALIFIER_FIELDS,
+    _ensure_biolink_prefix,
+    _extract_attributes,
+    _extract_node_attributes,
+    _extract_qualifiers,
+    _extract_sources,
+    _get_bmt,
+    _get_qualifier_fields,
 )
 
 import logging
@@ -39,291 +61,30 @@ import lmdb
 logger = logging.getLogger(__name__)
 
 
-# Fields that are structural (not stored as properties)
-_CORE_FIELDS = {
-    "id",
-    "category",
-    "subject",
-    "object",
-    "predicate",
-    "sources",
-    "primary_knowledge_source",
-    "aggregator_knowledge_source",
-}
+def _build_graph_from_source(source: GraphSource) -> CSRGraph:
+    """Build a CSR graph from a :class:`GraphSource` using three-pass streaming.
 
-# Node fields that become top-level TRAPI Node properties (not attributes)
-_CORE_NODE_FIELDS = {"id", "name", "category"}
-
-# Fallback qualifier fields, used only if the Biolink Model cannot be loaded via
-# BMT at runtime. The authoritative set is derived from the model (see
-# ``_get_qualifier_fields``); this static list is just a safety net. It mirrors
-# the descendants of the abstract ``qualifier`` slot in the pinned Biolink
-# version (settings.biolink_version, currently 4.3.2).
-_FALLBACK_QUALIFIER_FIELDS = {
-    "anatomical_context_qualifier",
-    "aspect_qualifier",
-    "causal_mechanism_qualifier",
-    "context_qualifier",
-    "derivative_qualifier",
-    "direction_qualifier",
-    "disease_context_qualifier",
-    "form_or_variant_qualifier",
-    "frequency_qualifier",
-    "object_aspect_qualifier",
-    "object_context_qualifier",
-    "object_derivative_qualifier",
-    "object_direction_qualifier",
-    "object_form_or_variant_qualifier",
-    "object_part_qualifier",
-    "object_specialization_qualifier",
-    "onset_qualifier",
-    "part_qualifier",
-    "population_context_qualifier",
-    "qualified_predicate",
-    "response_context_qualifier",
-    "response_target_context_qualifier",
-    "severity_qualifier",
-    "sex_qualifier",
-    "specialization_qualifier",
-    "species_context_qualifier",
-    "stage_qualifier",
-    "statement_qualifier",
-    "subject_aspect_qualifier",
-    "subject_context_qualifier",
-    "subject_derivative_qualifier",
-    "subject_direction_qualifier",
-    "subject_form_or_variant_qualifier",
-    "subject_part_qualifier",
-    "subject_specialization_qualifier",
-    "temporal_context_qualifier",
-    "temporal_interval_qualifier",
-}
-
-# Module-level BMT instance and cached qualifier-field set (lazily initialized).
-_bmt: Optional[Toolkit] = None
-_qualifier_fields: Optional[set] = None
-
-
-def _get_bmt() -> Toolkit:
-    """Get or create the module-level BMT instance (pinned biolink version)."""
-    global _bmt
-    if _bmt is None:
-        _bmt = make_toolkit()
-    return _bmt
-
-
-def _get_qualifier_fields() -> set:
-    """Return the set of top-level edge field names that are Biolink qualifiers.
-
-    Derived from the Biolink Model: the snake_case names of every descendant of
-    the abstract ``qualifier`` slot (e.g. ``object_aspect_qualifier``,
-    ``frequency_qualifier``, ``qualified_predicate``). This keeps the loader in
-    sync with the model instead of relying on a hardcoded list. The result is
-    cached after the first build. If BMT or the model is unavailable, fall back
-    to ``_FALLBACK_QUALIFIER_FIELDS`` so loading never fails.
+    The source yields already-normalized, validated node and edge records (see
+    ``gandalf.sources.base`` for the contract). Peak memory: ~3-4GB for 38M
+    edges.
     """
-    global _qualifier_fields
-    if _qualifier_fields is None:
-        try:
-            descendants = _get_bmt().get_descendants("qualifier", formatted=True)
-            # ``formatted=True`` yields e.g. "biolink:object_aspect_qualifier";
-            # strip the prefix to match the snake_case top-level JSONL keys.
-            fields = {d.split(":", 1)[-1] for d in descendants}
-            fields.discard("qualifier")  # abstract root, never a real edge field
-            _qualifier_fields = fields or set(_FALLBACK_QUALIFIER_FIELDS)
-        except Exception:
-            logger.warning(
-                "Could not load Biolink qualifier slots from BMT; "
-                "using fallback qualifier set",
-                exc_info=True,
-            )
-            _qualifier_fields = set(_FALLBACK_QUALIFIER_FIELDS)
-    return _qualifier_fields
-
-
-def _extract_sources(data):
-    """Extract normalized source list from edge data.
-
-    Ensures every source has an ``upstream_resource_ids`` list (defaults to
-    ``[]``) and prepends an ``infores:gandalf`` aggregator_knowledge_source
-    whose upstream points to the top of the existing source chain (i.e. the
-    source(s) not referenced in any other source's upstream_resource_ids).
-    """
-    raw = data.get("sources", [])
-
-    if len(raw) == 0:
-        # this is most likely from an automat kgx
-        sources = [
-            {
-                "resource_id": data["primary_knowledge_source"],
-                "resource_role": "primary_knowledge_source",
-                "upstream_resource_ids": [],
-            }
-        ]
-
-        if (
-            "aggregator_knowledge_source" in data
-            and len(data["aggregator_knowledge_source"]) > 0
-        ):
-            data["aggregator_knowledge_source"].reverse()
-            previous_source = data["primary_knowledge_source"]
-            for aggregator_source in data["aggregator_knowledge_source"]:
-                sources.append(
-                    {
-                        "resource_id": aggregator_source,
-                        "resource_role": "aggregator_knowledge_source",
-                        "upstream_resource_ids": [previous_source],
-                    }
-                )
-                previous_source = aggregator_source
-    else:
-        # new translatorkg format
-
-        # Normalize: guarantee upstream_resource_ids on every source
-        sources = [
-            {
-                "resource_id": s["resource_id"],
-                "resource_role": s["resource_role"],
-                "upstream_resource_ids": s.get("upstream_resource_ids", []),
-            }
-            for s in raw
-        ]
-
-    # Find the top of the source chain: sources whose resource_id is NOT
-    # referenced in any other source's upstream_resource_ids.  These are the
-    # "leaf" providers that no one else aggregates from yet.
-    all_upstream = {uid for s in sources for uid in s["upstream_resource_ids"]}
-    top_ids = [
-        s["resource_id"] for s in sources if s["resource_id"] not in all_upstream
-    ]
-
-    # Prepend gandalf as aggregator_knowledge_source
-    gandalf_source = {
-        "resource_id": settings.infores,
-        "resource_role": "aggregator_knowledge_source",
-        "upstream_resource_ids": top_ids,
-    }
-
-    return [gandalf_source] + sources
-
-
-def _ensure_biolink_prefix(value):
-    """Ensure a CURIE-like value carries the ``biolink:`` prefix.
-
-    Mirrors retriever's ``biolink.ensure_prefix`` (tier 1): strip any existing
-    prefix, then prepend ``biolink:``. Used for ``qualified_predicate`` values,
-    which are Biolink predicate CURIEs.
-    """
-    local = value.split(":", 1)[1] if ":" in value else value
-    return f"biolink:{local}"
-
-
-def _extract_qualifiers(data):
-    """Extract qualifiers.
-
-    Format: top-level fields (object_aspect_qualifier, etc.). The set of
-    qualifier field names is derived from the Biolink Model via
-    ``_get_qualifier_fields``.
-
-    A TRAPI ``qualifier_value`` must be a scalar string. This matches the tier 1
-    (BioPack/retriever Elasticsearch) driver so the same edge produces identical
-    qualifiers across tiers: a non-string value is coerced to a JSON string via
-    ``orjson`` (yielding exactly one qualifier entry per type, not split), and
-    ``qualified_predicate`` values are normalized to carry the ``biolink:``
-    prefix.
-    """
-    qualifier_fields = _get_qualifier_fields()
-    qualifiers = []
-    for field in qualifier_fields:
-        if field in data:
-            value = data[field]
-            if not isinstance(value, str):
-                value = orjson.dumps(value).decode()
-            if field == "qualified_predicate":
-                value = _ensure_biolink_prefix(value)
-            qualifiers.append(
-                {
-                    "qualifier_type_id": f"biolink:{field}",
-                    "qualifier_value": value,
-                }
-            )
-
-    return qualifiers
-
-
-def _extract_attributes(data):
-    """Extract attributes (everything not in core/qualifier/source fields).
-
-    Publications are included as a TRAPI Attribute with
-    ``attribute_type_id`` of ``biolink:publications``.
-    """
-    qualifier_fields = _get_qualifier_fields()
-    attributes = []
-    for field, value in data.items():
-        if field in _CORE_FIELDS or field in qualifier_fields or field == "qualifiers":
-            continue
-        attributes.append(
-            {
-                "attribute_type_id": f"biolink:{field}",
-                "value": value,
-                "original_attribute_name": field,
-            }
-        )
-    return attributes
-
-
-def _extract_node_attributes(node_data):
-    """Extract node attributes as TRAPI Attribute objects.
-
-    Any field not in ``_CORE_NODE_FIELDS`` (id, name, category) is converted
-    to a TRAPI-compliant Attribute dict with ``attribute_type_id``, ``value``,
-    and ``original_attribute_name``.
-    """
-    attributes = []
-    for field, value in node_data.items():
-        if field in _CORE_NODE_FIELDS:
-            continue
-        attributes.append(
-            {
-                "attribute_type_id": "biolink:Attribute",
-                "value": value,
-                "original_attribute_name": field,
-            }
-        )
-    return attributes
-
-
-def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
-    """Build a CSR graph from JSONL files using three-pass streaming.
-
-    Pass 1: Collect vocabularies (node IDs, predicates, edge count).
-    Pass 2: Build numpy arrays + dedup store + temp LMDB.
-    Pass 3: Sort, rewrite LMDB in CSR order, build offsets.
-
-    Peak memory: ~3-4GB for 38M edges (down from 100GB+).
-    """
-    edge_jsonl_path = str(edge_jsonl_path)
-    node_jsonl_path = str(node_jsonl_path) if node_jsonl_path else None
-
     # =================================================================
     # Pass 1: Vocabulary collection
     # =================================================================
-    logger.info("Pass 1: Collecting vocabularies from %s...", edge_jsonl_path)
+    logger.info("Pass 1: Collecting vocabularies...")
 
     node_ids = set()
     predicates = set()
     edge_count = 0
 
-    with open(edge_jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            data = orjson.loads(line)
-            node_ids.add(data["subject"])
-            node_ids.add(data["object"])
-            predicates.add(data["predicate"])
-            edge_count += 1
+    for subject, object_, predicate in source.iter_edge_triples():
+        node_ids.add(subject)
+        node_ids.add(object_)
+        predicates.add(predicate)
+        edge_count += 1
 
-            if edge_count % 1_000_000 == 0:
-                logger.debug("  %s edges scanned...", f"{edge_count:,}")
+        if edge_count % 1_000_000 == 0:
+            logger.debug("  %s edges scanned...", f"{edge_count:,}")
 
     logger.info(
         "  Found %s unique nodes, %s predicates, %s edges",
@@ -338,22 +99,18 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     num_nodes = len(node_ids)
     del node_ids  # Free ~2GB immediately
 
-    # Load node properties
+    # Load node properties (records are already normalized + validated)
     node_properties = {}
-    if node_jsonl_path:
-        logger.debug("Reading node properties from %s...", node_jsonl_path)
-        with open(node_jsonl_path, "r", encoding="utf-8") as f:
-            for line in f:
-                node_data = orjson.loads(line)
-                node_id = node_data.get("id")
-                if node_id:
-                    idx = node_id_to_idx.get(node_id)
-                    if idx is not None:
-                        node_properties[idx] = {
-                            "name": node_data.get("name", None),
-                            "categories": node_data.get("category", []),
-                            "attributes": _extract_node_attributes(node_data),
-                        }
+    logger.debug("Reading node properties...")
+    for node_data in source.iter_nodes():
+        idx = node_id_to_idx.get(node_data["id"])
+        if idx is not None:
+            node_properties[idx] = {
+                "name": node_data.get("name", None),
+                "categories": node_data.get("categories", []),
+                "attributes": node_data.get("attributes", []),
+            }
+    if node_properties:
         logger.debug("  Loaded properties for %s nodes", f"{len(node_properties):,}")
 
     # =================================================================
@@ -368,7 +125,7 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     dst_indices = np.empty(edge_count, dtype=np.int32)
     pred_indices = np.empty(edge_count, dtype=np.int32)
 
-    # Edge IDs from the JSONL "id" field (indexed by original line order)
+    # Edge IDs from the normalized "id" field (indexed by original iteration order)
     edge_ids = [None] * edge_count
 
     # Incremental dedup builder for qualifiers + sources (hot path)
@@ -390,44 +147,38 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     txn = temp_env.begin(write=True)
     pending = []
     try:
-        with open(edge_jsonl_path, "r", encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                data = orjson.loads(line)
+        for i, edge in enumerate(source.iter_edges()):
+            # Fill numpy arrays
+            src_indices[i] = node_id_to_idx[edge["subject"]]
+            dst_indices[i] = node_id_to_idx[edge["object"]]
+            pred_indices[i] = predicate_to_idx[edge["predicate"]]
 
-                # Fill numpy arrays
-                src_indices[i] = node_id_to_idx[data["subject"]]
-                dst_indices[i] = node_id_to_idx[data["object"]]
-                pred_indices[i] = predicate_to_idx[data["predicate"]]
+            # Capture edge ID from the normalized record (if present)
+            edge_ids[i] = edge.get("id")
 
-                # Capture edge ID from JSONL (if present)
-                edge_ids[i] = data.get("id")
+            # Hot path: intern qualifiers + sources (already normalized)
+            prop_builder.add(
+                i, {"sources": edge["sources"], "qualifiers": edge["qualifiers"]}
+            )
 
-                # Extract properties
-                sources = _extract_sources(data)
-                qualifiers = _extract_qualifiers(data)
-                attributes = _extract_attributes(data)
+            # Cold path: write attributes to temp LMDB
+            # (publications are included in the attributes list)
+            detail = {
+                "attributes": edge["attributes"],
+            }
+            key = _encode_key(i)
+            val = msgpack.packb(detail, use_bin_type=True)
+            txn = _put_with_resize(temp_env, txn, key, val, pending)
 
-                # Hot path: intern qualifiers + sources
-                prop_builder.add(i, {"sources": sources, "qualifiers": qualifiers})
+            if (i + 1) % 50_000 == 0:
+                txn.commit()
+                pending.clear()
+                txn = temp_env.begin(write=True)
 
-                # Cold path: write attributes to temp LMDB
-                # (publications are now included in the attributes list)
-                detail = {
-                    "attributes": attributes,
-                }
-                key = _encode_key(i)
-                val = msgpack.packb(detail, use_bin_type=True)
-                txn = _put_with_resize(temp_env, txn, key, val, pending)
-
-                if (i + 1) % 50_000 == 0:
-                    txn.commit()
-                    pending.clear()
-                    txn = temp_env.begin(write=True)
-
-                if (i + 1) % 1_000_000 == 0:
-                    logger.debug(
-                        "  %s/%s edges processed...", f"{i + 1:,}", f"{edge_count:,}"
-                    )
+            if (i + 1) % 1_000_000 == 0:
+                logger.debug(
+                    "  %s/%s edges processed...", f"{i + 1:,}", f"{edge_count:,}"
+                )
 
         txn.commit()
     except BaseException:
@@ -587,3 +338,37 @@ def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path):
     run_enrichers(graph)
 
     return graph
+
+
+def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path) -> CSRGraph:
+    """Build a CSR graph from KGX jsonl files.
+
+    Reads ``edge_jsonl_path`` / ``node_jsonl_path`` and applies gandalf's
+    normalization, then builds the graph. ``node_jsonl_path`` may be falsy to
+    build from edge endpoints only.
+    """
+    source = KGXJsonlSource(edge_jsonl_path, node_jsonl_path)
+    return _build_graph_from_source(source)
+
+
+def build_graph_from_mongo(
+    *, mongo_uri: str, db: str, nodes_collection: str, edges_collection: str
+) -> CSRGraph:
+    """Build a CSR graph from already-normalized documents in MongoDB.
+
+    The documents must already be in gandalf's normalized form (see
+    ``gandalf.sources.base``); no normalization is applied. Requires ``pymongo``
+    (install the ``mongo`` extra).
+    """
+    from gandalf.sources.mongo import MongoSource
+
+    source = MongoSource(
+        uri=mongo_uri,
+        db=db,
+        nodes_collection=nodes_collection,
+        edges_collection=edges_collection,
+    )
+    try:
+        return _build_graph_from_source(source)
+    finally:
+        source.close()
