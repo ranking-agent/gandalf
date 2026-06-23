@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from gandalf.config import settings
 from gandalf.loader import _build_graph_from_source, build_graph_from_jsonl
 from gandalf.normalize import normalize_edge, normalize_node
 from gandalf.sources import KGXJsonlSource
@@ -47,7 +48,7 @@ def test_normalize_edge_shape():
     assert isinstance(edge["qualifiers"], list)
     assert isinstance(edge["attributes"], list)
     # gandalf aggregator is prepended
-    assert edge["sources"][0]["resource_id"] == "infores:gandalf"
+    assert edge["sources"][0]["resource_id"] == settings.infores
     # publications became an attribute
     assert any(a["original_attribute_name"] == "publications" for a in edge["attributes"])
     validate_normalized_edge(edge)
