@@ -34,6 +34,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from gandalf import CSRGraph, annotate_response, enrich_knowledge_graph, lookup
 from gandalf import otel
 from gandalf.biolink import make_toolkit
+from gandalf.compression import ZstdCompressionMiddleware
 from gandalf.logging_config import configure_logging, request_id_var
 from gandalf.models import (
     AsyncTRAPIQuery,
@@ -376,6 +377,22 @@ async def request_middleware(request: Request, call_next):
     return response
 
 
+# Zstandard compression/decompression. Added last so it is the outermost
+# middleware: on the way in it decompresses zstd request bodies (and rewrites
+# content-length, so request_middleware's size limit sees the decompressed
+# size); on the way out it compresses responses for clients that advertise
+# Accept-Encoding: zstd.
+if settings.compression_enabled:
+    APP.add_middleware(
+        ZstdCompressionMiddleware,
+        minimum_size=settings.compress_minimum_size,
+        level=settings.compress_zstd_level,
+        max_request_size_mb=settings.max_request_size_mb,
+        decompress_requests=settings.decompress_request_enabled,
+        compress_responses=settings.compress_response_enabled,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Global exception handler
 # ---------------------------------------------------------------------------
@@ -702,6 +719,18 @@ def async_query(
     return {"status": "accepted", "callback": callback}
 
 
-APP.openapi_schema = construct_open_api_schema(
-    APP,
-)
+def _custom_openapi() -> dict:
+    """Return the TRAPI-customised OpenAPI schema, building it once.
+
+    Override ``APP.openapi`` rather than assigning ``APP.openapi_schema``
+    directly: since FastAPI 0.138 the default ``openapi()`` regenerates the
+    schema whenever its cached routes-version marker is stale, which would
+    discard our injected request-body refs (see openapi._inject_request_schemas).
+    """
+    if APP.openapi_schema is None:
+        APP.openapi_schema = construct_open_api_schema(APP)
+    return APP.openapi_schema
+
+
+APP.openapi = _custom_openapi  # type: ignore[method-assign]
+_custom_openapi()  # build eagerly so import-time readers share one schema
