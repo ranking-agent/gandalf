@@ -5,8 +5,8 @@ import tempfile
 
 import pytest
 
-from gandalf.loader import (
-    build_graph_from_jsonl,
+from gandalf.loader import build_graph_from_jsonl
+from gandalf.normalize import (
     _extract_qualifiers,
     _extract_attributes,
     _get_qualifier_fields,

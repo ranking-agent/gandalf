@@ -40,21 +40,6 @@ from gandalf.lmdb_store import (
 )
 from gandalf.sources import GraphSource, KGXJsonlSource
 
-# Re-exported for backward compatibility: these moved to ``gandalf.normalize``
-# but existing callers (and tests) still import them from ``gandalf.loader``.
-from gandalf.normalize import (  # noqa: F401
-    _CORE_FIELDS,
-    _CORE_NODE_FIELDS,
-    _FALLBACK_QUALIFIER_FIELDS,
-    _ensure_biolink_prefix,
-    _extract_attributes,
-    _extract_node_attributes,
-    _extract_qualifiers,
-    _extract_sources,
-    _get_bmt,
-    _get_qualifier_fields,
-)
-
 import logging
 import lmdb
 
