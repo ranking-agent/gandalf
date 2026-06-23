@@ -12,10 +12,10 @@ logging.basicConfig(
 
 # Build graph from edges and nodes
 graph = build_graph_from_jsonl(
-    edge_jsonl_path="../automats/monarch-kg/edges.jsonl",
-    node_jsonl_path="../automats/monarch-kg/nodes.jsonl",
+    edge_jsonl_path="../translatorkg/edges.jsonl",
+    node_jsonl_path="../translatorkg/nodes.jsonl",
 )
 
 # Save for fast reloading
-graph.save_mmap("../automats/monarch-kg/gandalf_mmap")
+graph.save_mmap("../translatorkg/gandalf_mmap")
 print("Graph saved!")

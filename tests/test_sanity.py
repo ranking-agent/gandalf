@@ -12,6 +12,7 @@ import os
 
 import pytest
 
+from gandalf.config import settings
 from gandalf.loader import build_graph_from_jsonl
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -41,7 +42,7 @@ def _primary_source_id(sources):
 def _aggregator_source(sources):
     """Extract the gandalf aggregator entry from a sources list."""
     for s in sources:
-        if s["resource_id"] == "infores:gandalf":
+        if s["resource_id"] == settings.infores:
             return s
     return None
 

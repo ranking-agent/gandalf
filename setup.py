@@ -32,9 +32,13 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=requirements,
+    extras_require={
+        "mongo": ["pymongo>=4.0"],
+    },
     entry_points={
         "console_scripts": [
             "gandalf-build=scripts.build_graph:main",
+            "gandalf-build-mongo=scripts.build_graph_mongo:main",
             "gandalf-query=scripts.query_paths:main",
             "gandalf-diagnose=scripts.diagnose:main",
         ],

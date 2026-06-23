@@ -14,7 +14,8 @@ from gandalf.diagnostics import (
 )
 from gandalf.graph import CSRGraph, EdgePropertyStore, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import LMDBPropertyStore
-from gandalf.loader import build_graph_from_jsonl
+from gandalf.loader import build_graph_from_jsonl, build_graph_from_mongo
+from gandalf.normalize import normalize_edge, normalize_node
 from gandalf.query_planner import get_next_qedge
 from gandalf.search import (
     find_3hop_paths_filtered,
@@ -47,6 +48,10 @@ __all__ = [
     "annotate_response",
     # Loading
     "build_graph_from_jsonl",
+    "build_graph_from_mongo",
+    # Normalization
+    "normalize_edge",
+    "normalize_node",
     # Search
     "find_3hop_paths_filtered",
     "find_3hop_paths_with_properties",

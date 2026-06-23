@@ -5,8 +5,9 @@ import tempfile
 
 import pytest
 
-from gandalf.loader import (
-    build_graph_from_jsonl,
+from gandalf.config import settings
+from gandalf.loader import build_graph_from_jsonl
+from gandalf.normalize import (
     _extract_qualifiers,
     _extract_attributes,
     _get_qualifier_fields,
@@ -156,7 +157,7 @@ class TestEdgeProperties:
         assert len(sources) >= 2
 
         # First source should be gandalf as aggregator
-        assert sources[0]["resource_id"] == "infores:gandalf"
+        assert sources[0]["resource_id"] == settings.infores
         assert sources[0]["resource_role"] == "aggregator_knowledge_source"
         assert sources[0]["upstream_resource_ids"] == ["infores:drugcentral"]
 

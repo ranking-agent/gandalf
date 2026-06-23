@@ -42,9 +42,13 @@ server = [
     "uvicorn>=0.20.0",
     "zstandard>=0.22.0",
 ]
+mongo = [
+    "pymongo>=4.0",
+]
 
 [project.scripts]
 gandalf-build = "scripts.build_graph:main"
+gandalf-build-mongo = "scripts.build_graph_mongo:main"
 gandalf-query = "scripts.query_paths:main"
 gandalf-diagnose = "scripts.diagnose:main"
 

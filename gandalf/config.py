@@ -26,7 +26,8 @@ class Settings(BaseSettings):
     server_maturity: str = "development"
     server_location: str = "RENCI"
     # Infores identifiers
-    infores: str = "infores:gandalf"
+    # infores: str = "infores:gandalf"
+    infores: str = "infores:dogpark-tier0"
 
     # Biolink Model version to pin the BMT Toolkit to. Must match the version
     # used by the tier 1 driver (BioPack/retriever) so qualifier/predicate
@@ -42,7 +43,7 @@ class Settings(BaseSettings):
     plater_title: str = ""
 
     otel_enabled: bool = True
-    otel_service_name: str = "gandalf"
+    otel_service_name: str = "dogpark-tier0"
     otel_use_console_exporter: bool = False
     jaeger_host: str = "http://jaeger"
     jaeger_port: int = 4317
@@ -58,7 +59,7 @@ class Settings(BaseSettings):
 
     # Path reconstruction tunables (search/reconstruct.py)
     debug_paths_tsv: str = ""
-    large_result_threshold: int = 50000
+    large_result_threshold: int = 10000000
     max_path_limit: int = 0
 
     # Default service URL for the literature_cooccurrence annotator plugin.
