@@ -50,7 +50,9 @@ def test_normalize_edge_shape():
     # gandalf aggregator is prepended
     assert edge["sources"][0]["resource_id"] == settings.infores
     # publications became an attribute
-    assert any(a["original_attribute_name"] == "publications" for a in edge["attributes"])
+    assert any(
+        a["original_attribute_name"] == "publications" for a in edge["attributes"]
+    )
     validate_normalized_edge(edge)
 
 
@@ -82,7 +84,8 @@ def test_normalize_node_renames_category_to_categories():
     assert node["categories"] == ["biolink:Drug"]
     assert "category" not in node
     assert any(
-        a["original_attribute_name"] == "information_content" for a in node["attributes"]
+        a["original_attribute_name"] == "information_content"
+        for a in node["attributes"]
     )
     validate_normalized_node(node)
 
@@ -184,7 +187,10 @@ def test_validate_edge_source_missing_upstream():
 def test_validate_edge_qualifier_value_not_str():
     edge = _valid_edge()
     edge["qualifiers"] = [
-        {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": ["a", "b"]}
+        {
+            "qualifier_type_id": "biolink:object_aspect_qualifier",
+            "qualifier_value": ["a", "b"],
+        }
     ]
     with pytest.raises(SourceValidationError):
         validate_normalized_edge(edge)
@@ -292,7 +298,10 @@ def test_mongo_source_invalid_doc_raises():
     nodes, edges = _normalized_fixture_docs()
     # Corrupt one edge: list-valued qualifier_value
     edges[0]["qualifiers"] = [
-        {"qualifier_type_id": "biolink:object_aspect_qualifier", "qualifier_value": ["x"]}
+        {
+            "qualifier_type_id": "biolink:object_aspect_qualifier",
+            "qualifier_value": ["x"],
+        }
     ]
     source = MongoSource.from_collections(
         _FakeCollection(nodes), _FakeCollection(edges)

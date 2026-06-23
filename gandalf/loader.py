@@ -27,6 +27,7 @@ Normalization itself lives in ``gandalf.normalize``; record validation lives in
 import shutil
 import tempfile
 from pathlib import Path
+from typing import List, Tuple
 
 import msgpack
 import numpy as np
@@ -130,7 +131,7 @@ def _build_graph_from_source(source: GraphSource) -> CSRGraph:
     )
 
     txn = temp_env.begin(write=True)
-    pending = []
+    pending: List[Tuple[bytes, bytes]] = []
     try:
         for i, edge in enumerate(source.iter_edges()):
             # Fill numpy arrays

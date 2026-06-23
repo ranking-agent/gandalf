@@ -33,7 +33,9 @@ _EDGE_SORT_KEY = "_id"
 class MongoSource(GraphSource):
     """A :class:`GraphSource` backed by a MongoDB database of normalized docs."""
 
-    def __init__(self, *, uri: str, db: str, nodes_collection: str, edges_collection: str):
+    def __init__(
+        self, *, uri: str, db: str, nodes_collection: str, edges_collection: str
+    ):
         import pymongo  # local import: optional dependency (`pip install gandalf[mongo]`)
 
         self._client = pymongo.MongoClient(uri)

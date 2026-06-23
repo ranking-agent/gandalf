@@ -104,7 +104,9 @@ def validate_normalized_edge(edge: dict) -> None:
             raise SourceValidationError(
                 f"edge {edge_id!r}: each source must be a dict, got {source!r}"
             )
-        _require_str("edge", edge_id, "sources[].resource_id", source.get("resource_id"))
+        _require_str(
+            "edge", edge_id, "sources[].resource_id", source.get("resource_id")
+        )
         _require_str(
             "edge", edge_id, "sources[].resource_role", source.get("resource_role")
         )
@@ -120,7 +122,9 @@ def validate_normalized_edge(edge: dict) -> None:
                 f"edge {edge_id!r}: each qualifier must be a dict, got {qualifier!r}"
             )
         _require_str(
-            "edge", edge_id, "qualifiers[].qualifier_type_id",
+            "edge",
+            edge_id,
+            "qualifiers[].qualifier_type_id",
             qualifier.get("qualifier_type_id"),
         )
         # A TRAPI qualifier_value must be a scalar string; a list/dict here later
@@ -138,7 +142,9 @@ def validate_normalized_edge(edge: dict) -> None:
                 f"edge {edge_id!r}: each attribute must be a dict, got {attribute!r}"
             )
         _require_str(
-            "edge", edge_id, "attributes[].attribute_type_id",
+            "edge",
+            edge_id,
+            "attributes[].attribute_type_id",
             attribute.get("attribute_type_id"),
         )
         if "value" not in attribute:
@@ -179,6 +185,8 @@ def validate_normalized_node(node: dict) -> None:
                 f"node {node_id!r}: each attribute must be a dict, got {attribute!r}"
             )
         _require_str(
-            "node", node_id, "attributes[].attribute_type_id",
+            "node",
+            node_id,
+            "attributes[].attribute_type_id",
             attribute.get("attribute_type_id"),
         )

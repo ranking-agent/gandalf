@@ -39,20 +39,20 @@ Examples:
         """,
     )
 
+    parser.add_argument("--mongo-uri", required=True, help="MongoDB connection URI")
+
+    parser.add_argument("--db", required=True, help="MongoDB database name")
+
     parser.add_argument(
-        "--mongo-uri", required=True, help="MongoDB connection URI"
+        "--nodes-collection",
+        required=True,
+        help="Collection of normalized node documents",
     )
 
     parser.add_argument(
-        "--db", required=True, help="MongoDB database name"
-    )
-
-    parser.add_argument(
-        "--nodes-collection", required=True, help="Collection of normalized node documents"
-    )
-
-    parser.add_argument(
-        "--edges-collection", required=True, help="Collection of normalized edge documents"
+        "--edges-collection",
+        required=True,
+        help="Collection of normalized edge documents",
     )
 
     parser.add_argument(
