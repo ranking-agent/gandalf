@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mithrandir — Translator knowledge graph explorer</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- top bar + path filmstrip -->
+    <header class="topbar">
+      <div class="topbar-row">
+        <div class="brand">
+          <span class="mark"><span class="lit">◈</span> MITHRANDIR</span>
+          <span class="sub">translator graph explorer</span>
+        </div>
+        <span class="brand-spacer"></span>
+        <button class="btn-ghost" id="newStart">New start node</button>
+      </div>
+      <div class="path-wrap">
+        <div class="path" id="path"></div>
+        <div class="triple-frame" id="tripleFrame"></div>
+      </div>
+    </header>
+
+    <!-- stage with sliding panels -->
+    <main class="stage" id="stage">
+      <div class="track" id="track"></div>
+    </main>
+
+    <!-- bottom navigation -->
+    <nav class="controls">
+      <button class="nav-btn" id="prevBtn">‹ Back</button>
+      <span class="step-readout" id="stepReadout"></span>
+      <button class="nav-btn" id="nextBtn">Forward ›</button>
+    </nav>
+  </div>
+
+  <!-- start / pick-a-node overlay -->
+  <div class="overlay" id="overlay">
+    <div class="start-card">
+      <h1>Explore the <span class="lit">Translator</span> graph</h1>
+      <p class="lede">
+        Pick a starting node, then walk the knowledge graph one triple at a time —
+        group the neighbours by relationship, drill into a relationship, and step
+        into a connected node to keep going.
+      </p>
+
+      <div class="field-label">Search for a start node</div>
+      <div class="search-wrap">
+        <input class="curie-input" id="searchInput" placeholder="Search by name, or paste a CURIE — e.g. metformin"
+               autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="acList" />
+        <div class="ac-list" id="acList" role="listbox" hidden></div>
+      </div>
+      <div class="curie-error" id="curieError"></div>
+
+      <div class="field-label">Or start from a common example</div>
+      <div class="examples-grid" id="examples"></div>
+
+      <p class="reduce-note">
+        Neighbours are fetched live from <code>gandalf.renci.org</code> via the local proxy.
+        Lists are sorted by node degree (descending) once degrees load; very large
+        relationships are sampled — see the status line above each list.
+      </p>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
