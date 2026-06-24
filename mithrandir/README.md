@@ -16,7 +16,7 @@ click on any node in the filmstrip swipes you along the path.
 No dependencies — just Python 3.8+.
 
 ```bash
-cd gandalf-explorer
+cd mithrandir
 python3 server.py            # then open http://localhost:8000
 ```
 
