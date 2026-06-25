@@ -2,24 +2,28 @@
 """
 GANDALF Explorer — local backend.
 
-A tiny, dependency-free server (Python standard library only) that sits between
-the browser frontend and the GANDALF TRAPI knowledge-graph endpoint at RENCI.
+A small server that sits between the browser frontend and a **local GANDALF
+graph**. The knowledge-graph operations call the gandalf library directly,
+in-process (no TRAPI HTTP server in the loop); only the node-name search (SRI
+Name Resolver) and the Wikipedia info cards still go out over the network.
 
-Why a backend at all (instead of calling TRAPI straight from the browser)?
-  - Avoids CORS headaches when hitting a third-party API.
+Why a backend at all (instead of doing everything in the browser)?
+  - Loads the gandalf graph once and runs `lookup()` against it in-process.
   - Lets us fan out node-degree lookups concurrently and cache them.
   - Keeps the TRAPI request shaping in one place.
+  - Avoids CORS headaches when hitting the name resolver / Wikipedia.
 
 Run:
-    python3 server.py
+    GANDALF_GRAPH_PATH=/path/to/graph_mmap python3 server.py
 then open http://localhost:8000
 
 Configuration via environment variables (all optional):
-    GANDALF_BASE          base URL of the TRAPI server   (default https://gandalf.renci.org)
+    GANDALF_GRAPH_PATH    path to the mmap graph directory (default /data/graph)
     GANDALF_PORT          local port to serve on          (default 8000)
     GANDALF_SUBCLASS      "true"/"false" subclass infer    (default false — literal neighbours)
-    GANDALF_TIMEOUT       per-request timeout in seconds   (default 60)
+    GANDALF_TIMEOUT       per-request timeout in seconds   (default 60, name resolver / wiki)
     GANDALF_DEGREE_WORKERS  concurrent degree lookups      (default 8)
+    GANDALF_MOCK          serve synthetic data, no graph or network (default false)
 """
 
 import json
@@ -37,7 +41,9 @@ from threading import Lock
 # Config
 # ---------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
-GANDALF_BASE = os.environ.get("GANDALF_BASE", "https://gandalf.renci.org").rstrip("/")
+# Path to the local gandalf mmap graph directory. Same env var the gandalf
+# server uses, so a graph built for the server works here unchanged.
+GRAPH_PATH = os.environ.get("GANDALF_GRAPH_PATH", "/data/graph")
 NAME_RESOLVER = os.environ.get(
     "GANDALF_NAME_RESOLVER", "https://name-resolution-sri.renci.org"
 ).rstrip("/")
@@ -48,14 +54,29 @@ DEGREE_WORKERS = int(os.environ.get("GANDALF_DEGREE_WORKERS", "8"))
 # Force IPv4: urllib doesn't do "Happy Eyeballs", so a broken IPv6 route makes
 # the TLS handshake hang until timeout even though the browser (which races v4
 # and v6) connects fine. Forcing IPv4 is the usual fix; set GANDALF_IPV4=false
-# if you're on an IPv6-only network.
+# if you're on an IPv6-only network. Only affects the name resolver / Wikipedia
+# (the graph itself is now local).
 FORCE_IPV4 = os.environ.get("GANDALF_IPV4", "true").lower() in ("1", "true", "yes")
-# Offline demo mode: serve synthetic data instead of calling RENCI. Handy for
-# trying the UI when the live endpoint is unreachable. Run: GANDALF_MOCK=1 python3 server.py
+# Offline demo mode: serve synthetic data instead of loading a graph or calling
+# out. Handy for trying the UI with no graph. Run: GANDALF_MOCK=1 python3 server.py
 MOCK = os.environ.get("GANDALF_MOCK", "false").lower() in ("1", "true", "yes")
 WIKI_UA = os.environ.get(
     "GANDALF_WIKI_UA", "Mithrandir-Graph-Explorer/1.0 (local research prototype)"
 )
+
+# Local gandalf graph + Biolink toolkit, loaded once at startup (skipped in mock
+# mode). The graph and BMT are reused across every request; `lookup()` would
+# otherwise rebuild the toolkit on each call.
+GRAPH = None
+BMT = None
+if not MOCK:
+    from gandalf import CSRGraph, lookup
+    from gandalf.biolink import make_toolkit
+
+    print(f"Loading gandalf graph from {GRAPH_PATH} ...", file=sys.stderr)
+    GRAPH = CSRGraph.load_mmap(GRAPH_PATH)
+    BMT = make_toolkit()
+    print("Graph and Biolink toolkit loaded.", file=sys.stderr)
 
 if FORCE_IPV4:
     _orig_getaddrinfo = socket.getaddrinfo
@@ -154,21 +175,21 @@ def mock_search(q):
 # Outbound helpers
 # ---------------------------------------------------------------------------
 def _post_trapi(query):
-    """POST a TRAPI message to GANDALF /query and return the parsed JSON."""
-    url = f"{GANDALF_BASE}/query"
-    data = json.dumps(query).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    """Run a TRAPI query against the local gandalf graph and return the result.
+
+    Calls gandalf's `lookup()` in-process — the same entry point the gandalf
+    server's `/query` endpoint uses — so the returned dict has the same shape
+    (`message.knowledge_graph`, etc.).
+    """
+    return lookup(GRAPH, query, bmt=BMT, subclass=SUBCLASS)
 
 
 def _get_degree(curie):
-    """GET /node_degree/{curie}; cached. Returns int degree or None on failure."""
+    """Total degree (in + out) of a node; cached. Returns int or None if unknown.
+
+    Computed directly from the graph's CSR offset arrays — the same arithmetic
+    the gandalf server's `/node_degree/{curie}` endpoint performs.
+    """
     with _degree_lock:
         if curie in _degree_cache:
             return _degree_cache[curie]
@@ -177,12 +198,14 @@ def _get_degree(curie):
         with _degree_lock:
             _degree_cache[curie] = d
         return d
-    url = f"{GANDALF_BASE}/node_degree/{urllib.parse.quote(curie, safe='')}"
     try:
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        degree = int(body.get("degree")) if body.get("degree") is not None else None
+        node_idx = GRAPH.get_node_idx(curie)
+        if node_idx is None:
+            degree = None
+        else:
+            out_deg = int(GRAPH.fwd_offsets[node_idx + 1] - GRAPH.fwd_offsets[node_idx])
+            in_deg = int(GRAPH.rev_offsets[node_idx + 1] - GRAPH.rev_offsets[node_idx])
+            degree = out_deg + in_deg
     except Exception:
         degree = None
     with _degree_lock:
@@ -484,7 +507,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/config":
             self._send_json(
-                {"base": GANDALF_BASE, "subclass": SUBCLASS, "timeout": TIMEOUT}
+                {"graph_path": GRAPH_PATH, "subclass": SUBCLASS, "timeout": TIMEOUT}
             )
             return
 
@@ -534,12 +557,13 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Mithrandir running at  http://localhost:{PORT}")
-    print(f"  proxying TRAPI -> {GANDALF_BASE}")
+    if not MOCK:
+        print(f"  gandalf graph  -> {GRAPH_PATH} (in-process)")
     print(f"  name search    -> {NAME_RESOLVER}")
     print(f"  subclass inference: {SUBCLASS}")
     print(f"  force IPv4: {FORCE_IPV4}")
     if MOCK:
-        print("  *** MOCK MODE — serving synthetic data, no network calls ***")
+        print("  *** MOCK MODE — serving synthetic data, no graph or network ***")
     print("  press Ctrl+C to stop")
     try:
         httpd.serve_forever()
