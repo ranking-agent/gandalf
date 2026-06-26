@@ -180,8 +180,13 @@ def _post_trapi(query):
     Calls gandalf's `lookup()` in-process — the same entry point the gandalf
     server's `/query` endpoint uses — so the returned dict has the same shape
     (`message.knowledge_graph`, etc.).
+
+    Uses `dehydrated=True`: this GUI only reads node `name`/`categories` and edge
+    `predicate`/`subject`/`object`, so skipping edge attribute enrichment (sources,
+    qualifiers, attributes) makes the one-hop lookup quicker without losing anything
+    we render.
     """
-    return lookup(GRAPH, query, bmt=BMT, subclass=SUBCLASS)
+    return lookup(GRAPH, query, bmt=BMT, subclass=SUBCLASS, dehydrated=True)
 
 
 def _get_degree(curie):
