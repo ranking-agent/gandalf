@@ -131,7 +131,7 @@ def _extract_sources(data):
     """Extract normalized source list from edge data.
 
     Ensures every source has an ``upstream_resource_ids`` list (defaults to
-    ``[]``) and prepends an ``infores:gandalf`` aggregator_knowledge_source
+    ``[]``) and prepends an infores aggregator_knowledge_source
     whose upstream points to the top of the existing source chain (i.e. the
     source(s) not referenced in any other source's upstream_resource_ids).
 
@@ -186,7 +186,7 @@ def _extract_sources(data):
         s["resource_id"] for s in sources if s["resource_id"] not in all_upstream
     ]
 
-    # Prepend gandalf as aggregator_knowledge_source
+    # Prepend infores as aggregator_knowledge_source
     gandalf_source = {
         "resource_id": settings.infores,
         "resource_role": "aggregator_knowledge_source",
