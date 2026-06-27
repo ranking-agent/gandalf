@@ -71,6 +71,47 @@ def test_normalize_edge_is_pure():
     assert first == second
 
 
+def test_normalize_edge_preserves_source_record_urls():
+    """source_record_urls on a translatorkg source must survive normalization."""
+    urls = ["https://example.org/record/1", "https://example.org/record/2"]
+    raw = {
+        "id": "e1",
+        "subject": "CHEBI:1",
+        "predicate": "biolink:treats",
+        "object": "MONDO:1",
+        "sources": [
+            {
+                "resource_role": "primary_knowledge_source",
+                "resource_id": "infores:x",
+                "source_record_urls": urls,
+            }
+        ],
+    }
+    edge = normalize_edge(raw)
+    primary = next(s for s in edge["sources"] if s["resource_id"] == "infores:x")
+    assert primary["source_record_urls"] == urls
+    # The synthetic gandalf aggregator does not invent record URLs.
+    aggregator = edge["sources"][0]
+    assert aggregator["resource_id"] == settings.infores
+    assert "source_record_urls" not in aggregator
+    validate_normalized_edge(edge)
+
+
+def test_normalize_edge_omits_absent_source_record_urls():
+    """Sources without source_record_urls stay free of the key."""
+    raw = {
+        "id": "e1",
+        "subject": "CHEBI:1",
+        "predicate": "biolink:treats",
+        "object": "MONDO:1",
+        "sources": [
+            {"resource_role": "primary_knowledge_source", "resource_id": "infores:x"}
+        ],
+    }
+    edge = normalize_edge(raw)
+    assert all("source_record_urls" not in s for s in edge["sources"])
+
+
 def test_normalize_node_renames_category_to_categories():
     raw = {
         "id": "CHEBI:1",
@@ -180,6 +221,19 @@ def test_validate_edge_sources_not_list():
 def test_validate_edge_source_missing_upstream():
     edge = _valid_edge()
     edge["sources"][0].pop("upstream_resource_ids")
+    with pytest.raises(SourceValidationError):
+        validate_normalized_edge(edge)
+
+
+def test_validate_edge_source_record_urls_list_ok():
+    edge = _valid_edge()
+    edge["sources"][0]["source_record_urls"] = ["https://example.org/r/1"]
+    validate_normalized_edge(edge)
+
+
+def test_validate_edge_source_record_urls_not_list():
+    edge = _valid_edge()
+    edge["sources"][0]["source_record_urls"] = "https://example.org/r/1"
     with pytest.raises(SourceValidationError):
         validate_normalized_edge(edge)
 
