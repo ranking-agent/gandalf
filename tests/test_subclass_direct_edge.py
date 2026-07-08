@@ -15,6 +15,7 @@ Test graph relationships used:
 
 from tests.search_fixtures import graph  # noqa: F401
 
+from gandalf.config import settings
 from gandalf.search import lookup
 
 
@@ -252,6 +253,68 @@ class TestSubclassCompositeStillCreatedWhenNoDirectEdge:
             assert "MONDO:0005015" in endpoints, (
                 f"Inferred edge {eid} missing MONDO:0005015: "
                 f"{edge['subject']} -> {edge['object']}"
+            )
+
+    def test_inferred_edge_primary_source_is_obie(self, graph, bmt):
+        """Subclass-inferred composite edges must credit infores:obie.
+
+        The logical entailment comes from ontology-based subclass inference,
+        not from Gandalf's own graph, so the primary_knowledge_source is
+        infores:obie and Gandalf appears only as the aggregator that returned
+        it (upstream of the obie primary).
+        """
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["HP:0001943"]},
+                        "n1": {"ids": ["MONDO:0005015"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:related_to"],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
+
+        inferred = _get_inferred_edges(response)
+        assert len(inferred) > 0, "Expected at least one inferred composite edge"
+
+        for eid, edge in inferred.items():
+            sources = edge["sources"]
+
+            primary = [
+                s for s in sources if s["resource_role"] == "primary_knowledge_source"
+            ]
+            assert len(primary) == 1, (
+                f"Inferred edge {eid} must have exactly one "
+                f"primary_knowledge_source, found {len(primary)}"
+            )
+            assert primary[0]["resource_id"] == settings.subclass_inference_infores, (
+                f"Inferred edge {eid} primary source should be "
+                f"{settings.subclass_inference_infores}, got "
+                f"{primary[0]['resource_id']}"
+            )
+
+            # Gandalf itself must remain in the provenance as an aggregator
+            # sitting on top of the obie primary source.
+            aggregator = next(
+                (s for s in sources if s["resource_id"] == settings.infores), None
+            )
+            assert aggregator is not None, (
+                f"Inferred edge {eid} should record {settings.infores} as an "
+                "aggregator_knowledge_source"
+            )
+            assert aggregator["resource_role"] == "aggregator_knowledge_source"
+            assert (
+                settings.subclass_inference_infores
+                in aggregator["upstream_resource_ids"]
             )
 
     def test_subclass_of_edge_present_when_no_direct(self, graph, bmt):

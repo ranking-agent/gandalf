@@ -848,8 +848,18 @@ def _build_response(
                                 "sources": [
                                     {
                                         "resource_id": settings.infores,
+                                        "resource_role": "aggregator_knowledge_source",
+                                        "upstream_resource_ids": [
+                                            settings.subclass_inference_infores
+                                        ],
+                                    },
+                                    {
+                                        "resource_id": (
+                                            settings.subclass_inference_infores
+                                        ),
                                         "resource_role": "primary_knowledge_source",
-                                    }
+                                        "upstream_resource_ids": [],
+                                    },
                                 ],
                             }
                             response["message"]["knowledge_graph"]["edges"][
