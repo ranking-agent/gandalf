@@ -168,15 +168,18 @@ def _extract_sources(data):
     else:
         # new translatorkg format
 
-        # Normalize: guarantee upstream_resource_ids on every source
-        sources = [
-            {
+        # Normalize: guarantee upstream_resource_ids on every source and
+        # preserve source_record_urls when present (TRAPI optional/nullable).
+        sources = []
+        for s in raw:
+            src = {
                 "resource_id": s["resource_id"],
                 "resource_role": s["resource_role"],
                 "upstream_resource_ids": s.get("upstream_resource_ids", []),
             }
-            for s in raw
-        ]
+            if s.get("source_record_urls"):
+                src["source_record_urls"] = s["source_record_urls"]
+            sources.append(src)
 
     # Find the top of the source chain: sources whose resource_id is NOT
     # referenced in any other source's upstream_resource_ids.  These are the

@@ -16,7 +16,8 @@ NormalizedEdge::
     predicate:  str   (required, non-empty)
     id:         str | None
     sources:    list[ {resource_id:str, resource_role:str,
-                        upstream_resource_ids:list[str]} ]
+                        upstream_resource_ids:list[str],
+                        source_record_urls:list[str]  # optional} ]
     qualifiers: list[ {qualifier_type_id:str, qualifier_value:str} ]
     attributes: list[ {attribute_type_id:str, value:Any,
                         original_attribute_name:str} ]
@@ -114,6 +115,15 @@ def validate_normalized_edge(edge: dict) -> None:
             raise SourceValidationError(
                 f"edge {edge_id!r}: source {source.get('resource_id')!r} must have an "
                 f"'upstream_resource_ids' list, got {source.get('upstream_resource_ids')!r}"
+            )
+        # source_record_urls is optional (TRAPI nullable); when present it must
+        # be a list.
+        source_record_urls = source.get("source_record_urls")
+        if source_record_urls is not None and not isinstance(source_record_urls, list):
+            raise SourceValidationError(
+                f"edge {edge_id!r}: source {source.get('resource_id')!r} "
+                f"'source_record_urls' must be a list or absent, got "
+                f"{source_record_urls!r}"
             )
 
     for qualifier in edge["qualifiers"]:
