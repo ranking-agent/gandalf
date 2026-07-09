@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     # infores: str = "infores:gandalf"
     infores: str = "infores:dogpark-tier0"
 
+    # Infores credited as the primary knowledge source for edges that Gandalf
+    # infers through subclass (ontology-based) reasoning -- the composite
+    # edges emitted with knowledge_level=logical_entailment and a support
+    # graph. These entailments come from the ontology-based inference engine
+    # (OBIE), not from Gandalf's own graph, so they are attributed to
+    # infores:obie with Gandalf recorded as the aggregator that returned them.
+    subclass_inference_infores: str = "infores:obie"
+
     # Biolink Model version to pin the BMT Toolkit to. Must match the version
     # used by the tier 1 driver (BioPack/retriever) so qualifier/predicate
     # classification is identical across tiers. Empty uses BMT's built-in
