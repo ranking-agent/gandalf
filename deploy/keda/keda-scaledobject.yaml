@@ -1,0 +1,44 @@
+# KEDA autoscaling policy for the Gandalf worker tier.
+#
+# Requires KEDA installed in the cluster (https://keda.sh). KEDA ships its own
+# metrics adapter, so this needs NO Prometheus and NO custom metrics server —
+# the redis-streams scaler queries Redis directly for consumer-group lag.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: gandalf-worker
+spec:
+  scaleTargetRef:
+    name: gandalf-worker # the Deployment above
+  minReplicaCount: 1 # keep >=1 warm so there is no cold-start on the first job.
+  #                    Raise for headroom against bursts (see cold-start note).
+  maxReplicaCount: 8 # bounded by graph RAM × replicas — do not set blindly.
+  pollingInterval: 15 # seconds between lag checks
+  cooldownPeriod: 300 # wait this long after the last active trigger before
+  #                     scaling back to minReplicaCount — avoids thrashing given
+  #                     the slow cold start.
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          # React fast on the way up; scale-out latency is dominated by graph
+          # load, so start new pods as early as possible.
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 4
+              periodSeconds: 30
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis:6379
+        stream: gandalf:asyncquery # must match GANDALF_QUEUE_STREAM
+        consumerGroup: gandalf-workers # must match GANDALF_QUEUE_GROUP
+        # Scale so each worker targets ~5 backlogged jobs. With 20 jobs waiting,
+        # KEDA drives toward 4 workers. Tune to your per-job latency.
+        lagCount: "5"
+        # Below this lag KEDA lets the Deployment scale to zero-activation
+        # (here, down to minReplicaCount). Keep it low so a trickle still runs.
+        activationLagCount: "1"

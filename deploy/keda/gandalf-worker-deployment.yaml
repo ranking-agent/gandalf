@@ -1,0 +1,66 @@
+# Gandalf async-query worker Deployment — the tier KEDA autoscales.
+#
+# Same image as the API; the only difference is the command
+# (`python -m gandalf.worker`) and that KEDA drives its replica count. Each
+# worker loads its own copy of the graph, so treat memory requests/limits the
+# same way you would for the API pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gandalf-worker
+  labels:
+    app: gandalf-worker
+spec:
+  # replicas is managed by the KEDA ScaledObject below — KEDA owns this field
+  # once the ScaledObject is applied. The value here is only the pre-KEDA seed.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gandalf-worker
+  template:
+    metadata:
+      labels:
+        app: gandalf-worker
+    spec:
+      # Give in-flight jobs time to finish on scale-down. The worker handles
+      # SIGTERM by draining its current batch before exiting; anything still
+      # un-acked at the deadline is reclaimed by a surviving worker.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: gandalf-worker
+          image: ghcr.io/ranking-agent/gandalf:latest # match your API image
+          command: ["python", "-m", "gandalf.worker"]
+          env:
+            - name: GANDALF_QUEUE_ENABLED
+              value: "true"
+            - name: GANDALF_REDIS_URL
+              value: "redis://redis:6379/0"
+            - name: GANDALF_GRAPH_PATH
+              value: "/data/graph"
+            - name: GANDALF_LOG_FORMAT
+              value: "json"
+          volumeMounts:
+            - name: graph
+              mountPath: /data/graph
+              readOnly: true
+          resources:
+            requests:
+              # Size to the graph footprint. A worker is CPU-bound while running
+              # a lookup, so give it close to a full core (or more).
+              cpu: "1"
+              memory: "8Gi"
+            limits:
+              memory: "10Gi"
+          # Liveness only — a worker has no inbound HTTP. Readiness is
+          # irrelevant here since nothing routes traffic to it.
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import redis,os;redis.Redis.from_url(os.environ['GANDALF_REDIS_URL']).ping()"]
+            initialDelaySeconds: 60 # allow graph load before first probe
+            periodSeconds: 30
+      volumes:
+        - name: graph
+          # However you deliver the graph to API pods — RWX PVC, hostPath,
+          # init-container download, or baked into the image — do the same here.
+          persistentVolumeClaim:
+            claimName: gandalf-graph

@@ -15,7 +15,7 @@ A high-performance Python library and [Translator](https://ncats.nih.gov/transla
 - **Batch property enrichment** — enrich only final paths, not intermediate results
 - **Diagnostic tools** to understand path counts and explosion
 - **TRAPI 1.5 compatible** REST API with Plater-compatible endpoints
-- **Async query support** with callback URLs
+- **Async query support** with callback URLs, optionally backed by a durable [Redis queue for KEDA autoscaling](docs/autoscaling.md)
 - **Dehydrated mode** for lightweight responses that skip edge and node attribute enrichment
 - **OpenTelemetry tracing** with Jaeger integration
 

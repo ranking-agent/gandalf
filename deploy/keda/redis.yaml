@@ -1,0 +1,51 @@
+# Single-instance Redis for the async-query queue (PROTOTYPE ONLY).
+#
+# This is intentionally minimal: no persistence, no replication, no auth. It is
+# enough to demonstrate the queue + KEDA wiring. For production use a managed
+# Redis or an HA chart (e.g. bitnami/redis) and point GANDALF_REDIS_URL at it.
+#
+# Data durability note: with the queue, an un-acked job survives an API/worker
+# restart because it lives in Redis — but only as durably as *this* Redis. A
+# Redis that loses its dataset loses the backlog. Enable AOF/replication in a
+# real deployment if you need the queue to survive a Redis failure.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+          # noeviction: never silently drop queued jobs under memory pressure;
+          # XADD fails loudly instead, which the API surfaces as a 5xx.
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              memory: "640Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379

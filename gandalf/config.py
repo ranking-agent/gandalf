@@ -74,6 +74,35 @@ class Settings(BaseSettings):
     # Empty disables the plugin unless a request supplies its own service_url.
     cooccurrence_service_url: str = ""
 
+    # ---------------------------------------------------------------------------
+    # Redis-backed async queue (durable /asyncquery + KEDA autoscaling)
+    # ---------------------------------------------------------------------------
+    # When enabled, /asyncquery pushes jobs onto a Redis Stream instead of
+    # running them as in-process FastAPI BackgroundTasks. A separate pool of
+    # ``python -m gandalf.worker`` consumers drains the stream, and KEDA's
+    # redis-streams scaler scales that pool on the consumer-group lag. This
+    # makes queued queries durable (they survive an API-pod restart) and gives
+    # a real backlog signal to autoscale on -- no Prometheus required.
+    queue_enabled: bool = False
+    redis_url: str = ""  # e.g. "redis://redis:6379/0"; required when enabled
+    queue_stream: str = "gandalf:asyncquery"
+    queue_group: str = "gandalf-workers"
+    # Consumer name within the group. Empty -> derived from hostname+pid so
+    # each worker process is a distinct consumer (needed for correct pending
+    # tracking and reclaim). Set explicitly only for debugging.
+    queue_consumer: str = ""
+    # Approximate cap on retained stream entries (XADD MAXLEN ~). Acked jobs
+    # are XDEL'd immediately; this only bounds growth if jobs are never acked.
+    queue_max_len: int = 100_000
+    # Blocking read timeout (ms) for a single XREADGROUP call.
+    queue_block_ms: int = 5_000
+    # How many jobs a worker claims per read.
+    queue_batch: int = 1
+    # A pending (delivered-but-unacked) entry idle this long is assumed to
+    # belong to a crashed worker and is reclaimed by a live one. Set safely
+    # above your longest expected lookup time.
+    queue_reclaim_idle_ms: int = 600_000
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="gandalf_",

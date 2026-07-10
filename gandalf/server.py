@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-import httpx
 import orjson
 import psutil
 from bmt.toolkit import Toolkit
@@ -48,6 +47,7 @@ from gandalf.models import (
 )
 from gandalf.config import settings
 from gandalf.heartbeat import start_heartbeat
+from gandalf.jobs import execute_job
 
 _validate = settings.validate_responses
 from gandalf.openapi import construct_open_api_schema
@@ -582,64 +582,77 @@ def sync_lookup(
 # ---------------------------------------------------------------------------
 
 
+# Lazily-built handle to the durable Redis queue. Kept module-level so a single
+# connection pool is reused across requests; only constructed when the queue is
+# enabled so non-queue deployments never import redis.
+_QUEUE = None
+
+
+def _get_queue():
+    global _QUEUE
+    if _QUEUE is None:
+        from gandalf.queue import queue_from_settings
+
+        _QUEUE = queue_from_settings(settings)
+        _QUEUE.ensure_group()
+    return _QUEUE
+
+
 def _async_lookup(
     callback_url: str,
     query: dict,
     trace_headers: Optional[dict] = None,
     profile: bool = False,
 ):
-    """Execute lookup and POST results to callback URL.
+    """Execute lookup and POST results to the callback URL (in-process path).
 
-    ``trace_headers`` carries the W3C trace context (``traceparent`` /
-    ``tracestate``) captured from the original ``/asyncquery`` request so the
-    callback POST stays linked to the originating trace.  The background task
-    runs in a worker thread that does not inherit the request's contextvars,
-    so the headers must be passed explicitly.  ``profile`` arrives from the
-    request's URL query parameter (it is no longer a body field).
+    Used when the Redis queue is disabled: the work runs as a FastAPI
+    ``BackgroundTask`` in this process. ``trace_headers`` carries the W3C trace
+    context (``traceparent`` / ``tracestate``) captured from the original
+    ``/asyncquery`` request so the callback POST stays linked to the originating
+    trace; the background task runs in a worker thread that does not inherit the
+    request's contextvars, so the headers must be passed explicitly. The actual
+    lookup+callback logic lives in :func:`gandalf.jobs.execute_job`, shared with
+    the standalone queue worker so behaviour is identical on both paths.
     """
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
-    params = query.get("parameters", {})
+    job = {
+        "callback": callback_url,
+        "query": query,
+        "trace_headers": trace_headers or {},
+        "profile": profile,
+    }
+    execute_job(job, GRAPH, BMT)
 
-    # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
-    if params.get("rehydrate") is not None:
-        enrich_knowledge_graph(query, GRAPH)
-        response = {"message": query["message"]}
-    else:
-        subclass = params.get("subclass", True)
-        subclass_depth = params.get("subclass_depth", 1)
-        log_level = query.pop("log_level", None)
-        dehydrated = params.get("dehydrated")
-        filter_config = params.get("filter_config")
-        annotator_config = params.get("annotator_config") or {}
-        response = lookup(
-            GRAPH,
-            query,
-            bmt=BMT,
-            subclass=subclass,
-            subclass_depth=subclass_depth,
-            filter_config=filter_config,
-            log_level=log_level,
-            dehydrated=dehydrated,
-            profile=profile,
-        )
-        if annotator_config:
-            annotate_response(response, GRAPH, annotator_config)
 
-    try:
-        # Serialize with orjson rather than httpx's stdlib-json ``json=`` path,
-        # which is markedly slower for large result sets.
-        body = orjson.dumps(
-            response, default=_orjson_default, option=orjson.OPT_SERIALIZE_NUMPY
-        )
-        headers = dict(trace_headers or {})
-        headers["Content-Type"] = "application/json"
-        with httpx.Client(timeout=httpx.Timeout(timeout=600.0)) as client:
-            res = client.post(callback_url, content=body, headers=headers)
-            res.raise_for_status()
-            logger.info("Posted to %s with code %s", callback_url, res.status_code)
-    except Exception:
-        logger.exception("Callback to %s failed", callback_url)
+def _dispatch_async(
+    background_tasks: BackgroundTasks,
+    callback: str,
+    raw: dict,
+    trace_headers: dict,
+    profile: bool,
+) -> dict:
+    """Route an async job to Redis (durable) or an in-process background task.
+
+    When ``queue_enabled`` the job is appended to the Redis Stream and a
+    standalone worker will run it -- so it survives an API-pod restart and
+    contributes to the backlog signal KEDA autoscales on. Otherwise it falls
+    back to the original in-process ``BackgroundTask`` behaviour.
+    """
+    if settings.queue_enabled:
+        job = {
+            "callback": callback,
+            "query": raw,
+            "trace_headers": trace_headers,
+            "profile": profile,
+        }
+        entry_id = _get_queue().enqueue(job)
+        logger.info("Enqueued async job %s for %s", entry_id, callback)
+        return {"status": "accepted", "callback": callback, "job_id": entry_id}
+
+    background_tasks.add_task(_async_lookup, callback, raw, trace_headers, profile)
+    return {"status": "accepted", "callback": callback}
 
 
 @APP.post("/asyncquery")
@@ -674,10 +687,9 @@ def async_query(
     if raw.get("parameters", {}).get("rehydrate") is not None:
         otel.inject_headers(trace_headers)
         logger.info("Doing async rehydration for %s", callback)
-        background_tasks.add_task(
-            _async_lookup, callback, raw, trace_headers, bool(profile)
+        return _dispatch_async(
+            background_tasks, callback, raw, trace_headers, bool(profile)
         )
-        return {"status": "accepted", "callback": callback}
 
     # parse requested workflow (already a list of dicts in raw form)
     workflow_dicts = raw.get("workflow") or [{"id": "lookup", "parameters": None}]
@@ -712,11 +724,24 @@ def async_query(
     otel.inject_headers(trace_headers)
 
     logger.info("Doing async lookup for %s", callback)
-    background_tasks.add_task(
-        _async_lookup, callback, raw, trace_headers, bool(profile)
+    return _dispatch_async(
+        background_tasks, callback, raw, trace_headers, bool(profile)
     )
 
-    return {"status": "accepted", "callback": callback}
+
+@APP.get("/queue_status", include_in_schema=False)
+def queue_status():
+    """Report Redis-queue depth/pending for debugging and dashboards.
+
+    Not required for autoscaling -- KEDA's redis-streams scaler reads the
+    stream directly -- but handy for confirming the backlog signal by hand.
+    """
+    if not settings.queue_enabled:
+        return {"queue_enabled": False}
+    try:
+        return {"queue_enabled": True, **_get_queue().stats()}
+    except Exception as exc:
+        raise HTTPException(503, f"Queue unavailable: {exc}")
 
 
 def _custom_openapi() -> dict:
