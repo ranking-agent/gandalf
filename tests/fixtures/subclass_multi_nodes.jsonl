@@ -1,0 +1,5 @@
+{"id": "MONDO:0011122", "name": "Umbrella Disease", "category": ["biolink:Disease"], "equivalent_identifiers": ["MONDO:0011122"], "information_content": 60.0}
+{"id": "MONDO:0022222", "name": "Child Disease A", "category": ["biolink:Disease"], "equivalent_identifiers": ["MONDO:0022222"], "information_content": 80.0}
+{"id": "MONDO:0033333", "name": "Child Disease B", "category": ["biolink:Disease"], "equivalent_identifiers": ["MONDO:0033333"], "information_content": 81.0}
+{"id": "MONDO:0044444", "name": "Target Disease", "category": ["biolink:Disease"], "equivalent_identifiers": ["MONDO:0044444"], "information_content": 70.0}
+{"id": "CHEBI:9999", "name": "Test Drug", "category": ["biolink:SmallMolecule", "biolink:Drug"], "equivalent_identifiers": ["CHEBI:9999"], "information_content": 85.0}
