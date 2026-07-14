@@ -176,7 +176,15 @@ class TestSubclassHandling:
         assert results[0]["node_bindings"]["n1"][0]["id"] == "MONDO:0005015"
 
     def test_subclass_auxiliary_graphs_present(self, graph, bmt):
-        """Results from subclass expansion should include auxiliary_graphs."""
+        """Results from subclass expansion should include auxiliary_graphs.
+
+        Regression test for BioPack-team/retriever#192: a Tier 0 (Gandalf)
+        query for a drug treating a parent disease must surface the subclass
+        support graph for the child-disease evidence, exactly as Tier 1 does.
+        Metformin treats Type 2 Diabetes (a child of Diabetes Mellitus), so the
+        response must contain at least one auxiliary graph even though a direct
+        Metformin --treats--> Diabetes Mellitus edge also exists.
+        """
         query = {
             "message": {
                 "query_graph": {
@@ -198,17 +206,17 @@ class TestSubclassHandling:
         response = lookup(graph, query, bmt=bmt, subclass=True, subclass_depth=1)
         aux_graphs = response["message"]["auxiliary_graphs"]
 
-        # auxiliary_graphs should exist in the response
+        # auxiliary_graphs should exist and be populated from the subclass path.
         assert isinstance(aux_graphs, dict)
+        assert len(aux_graphs) > 0, (
+            "Expected subclass support graphs to be present for the child "
+            "disease evidence (regression for retriever#192)"
+        )
 
-        # If there were subclass expansions that found edges via subclass hops,
-        # there should be auxiliary graphs with edge lists
-        if aux_graphs:
-            for ag_id, ag in aux_graphs.items():
-                assert "edges" in ag
-                assert (
-                    len(ag["edges"]) >= 2
-                )  # At least the real edge + the subclass edge
+        # Each auxiliary graph holds at least the real edge + the subclass edge.
+        for ag_id, ag in aux_graphs.items():
+            assert "edges" in ag
+            assert len(ag["edges"]) >= 2
 
     def test_subclass_inferred_edges_have_logical_entailment(self, graph, bmt):
         """Inferred composite edges should have knowledge_level=logical_entailment."""
@@ -243,14 +251,16 @@ class TestSubclassHandling:
             )
         ]
 
-        # There should be at least one inferred edge (from subclass expansion)
-        if inferred_edges:
-            for edge in inferred_edges:
-                attr_map = {
-                    a["attribute_type_id"]: a["value"] for a in edge["attributes"]
-                }
-                assert attr_map["biolink:knowledge_level"] == "logical_entailment"
-                assert attr_map["biolink:agent_type"] == "automated_agent"
+        # There should be at least one inferred edge (from subclass expansion),
+        # coexisting with the direct Metformin --treats--> Diabetes Mellitus edge.
+        assert len(inferred_edges) > 0, (
+            "Expected at least one subclass-inferred edge (regression for "
+            "retriever#192)"
+        )
+        for edge in inferred_edges:
+            attr_map = {a["attribute_type_id"]: a["value"] for a in edge["attributes"]}
+            assert attr_map["biolink:knowledge_level"] == "logical_entailment"
+            assert attr_map["biolink:agent_type"] == "automated_agent"
 
     def test_subclass_node_binding_uses_superclass_id(self, graph, bmt):
         """When a result comes via subclass, node binding should reference the queried (superclass) ID."""
