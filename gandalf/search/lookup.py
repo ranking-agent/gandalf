@@ -419,6 +419,22 @@ def _lookup_inner(
     return response
 
 
+def _append_edge_binding(bindings: list, edge_kg_id: str) -> None:
+    """Append an edge binding for ``edge_kg_id`` unless one is already present.
+
+    A single QEdge binding must never reference the same knowledge-graph edge
+    twice.  Deduping on append keeps that invariant regardless of how the edge
+    id was derived (real edge, composite inferred edge, or uuid fallback).
+
+    Args:
+        bindings: The edge-binding list for one QEdge (mutated in place).
+        edge_kg_id: The knowledge-graph edge id to bind.
+    """
+    if any(b["id"] == edge_kg_id for b in bindings):
+        return
+    bindings.append({"id": edge_kg_id, "attributes": []})
+
+
 def _build_response(
     graph,
     response,
@@ -774,9 +790,27 @@ def _build_response(
                     superclass_node_overrides = {}
 
                     for which_end, sc_edge_id, sc_qnode_id in attached:
+                        # The endpoint of THIS base edge that carries the subclass
+                        # expansion, in query direction (never stored direction,
+                        # which is swapped for inverse edges).
+                        base_child = edge.get(
+                            "_query_subject"
+                            if which_end == "subject"
+                            else "_query_object"
+                        )
+
                         sc_edges = edge_bindings_by_qedge.get(sc_edge_id, [])
                         for sc_edge in sc_edges:
                             if sc_edge["subject"] == sc_edge["object"]:
+                                continue
+                            # Attach only the subclass edge belonging to this
+                            # derivation: its child (the subclass qedge subject,
+                            # in query direction) must be the base edge's expanded
+                            # endpoint.  Otherwise every sibling subclass edge in
+                            # the group would be attached to every base edge,
+                            # cross-contaminating support graphs and collapsing
+                            # distinct inferred edges into one.
+                            if sc_edge.get("_query_subject") != base_child:
                                 continue
                             sc_kg_id = sc_edge.get("_edge_id") or str(uuid.uuid4())[:8]
                             response["message"]["knowledge_graph"]["edges"][
@@ -866,16 +900,19 @@ def _build_response(
                                 composite_edge_id
                             ] = inferred_edge
 
-                        result["analyses"][0]["edge_bindings"][edge_id].append(
-                            {"id": composite_edge_id, "attributes": []}
+                        _append_edge_binding(
+                            result["analyses"][0]["edge_bindings"][edge_id],
+                            composite_edge_id,
                         )
                     else:
-                        result["analyses"][0]["edge_bindings"][edge_id].append(
-                            {"id": edge_kg_id, "attributes": []}
+                        _append_edge_binding(
+                            result["analyses"][0]["edge_bindings"][edge_id],
+                            edge_kg_id,
                         )
                 else:
-                    result["analyses"][0]["edge_bindings"][edge_id].append(
-                        {"id": edge_kg_id, "attributes": []}
+                    _append_edge_binding(
+                        result["analyses"][0]["edge_bindings"][edge_id],
+                        edge_kg_id,
                     )
 
         response["message"]["results"].append(result)

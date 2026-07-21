@@ -1,8 +1,46 @@
 """Tests for subclass reasoning feature."""
 
+import os
+
+import pytest
+
 from tests.search_fixtures import graph  # noqa: F401
 
+from gandalf.loader import build_graph_from_jsonl
 from gandalf.search import lookup
+
+_FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+
+
+@pytest.fixture
+def multi_child_graph():
+    """Graph with one superclass that has two children sharing a phenotype.
+
+    - MONDO:0011122 (Umbrella Disease) is the superclass D
+    - MONDO:0044444 (Target Disease) is the shared object nA
+    - MONDO:0022222 (Child A) --subclass_of--> D, --has_phenotype--> nA
+    - MONDO:0033333 (Child B) --subclass_of--> D, --has_phenotype--> nA
+    - CHEBI:9999 --treats--> nA
+
+    There is deliberately no direct ``D --has_phenotype--> nA`` edge, so
+    subclass inference (not direct-edge priority) drives the result.
+    """
+    return build_graph_from_jsonl(
+        os.path.join(_FIXTURES_DIR, "subclass_multi_edges.jsonl"),
+        os.path.join(_FIXTURES_DIR, "subclass_multi_nodes.jsonl"),
+    )
+
+
+def _inferred_edges(response):
+    """Return KG edges carrying a biolink:support_graphs attribute (inferred)."""
+    return {
+        eid: edge
+        for eid, edge in response["message"]["knowledge_graph"]["edges"].items()
+        if any(
+            a.get("attribute_type_id") == "biolink:support_graphs"
+            for a in edge.get("attributes", [])
+        )
+    }
 
 
 class TestSubclassHandling:
@@ -375,3 +413,162 @@ class TestSubclassHandling:
         response = lookup(graph, query, bmt=bmt)
         assert "auxiliary_graphs" in response["message"]
         assert isinstance(response["message"]["auxiliary_graphs"], dict)
+
+
+class TestSubclassMultipleChildrenDistinctDerivations:
+    """Regression tests for issue #39.
+
+    When a pinned superclass has two children that each support the same
+    inferred edge (same subject/predicate/object), each child forms a distinct
+    derivation.  Hydration must keep the two inferred edges distinct, give each
+    its own support graph containing exactly that child's underlying edges, and
+    must not reference the same KG edge twice in one QEdge binding or drop a
+    derivation.  The bug attached every sibling's ``subclass_of`` edge to every
+    base edge, collapsing the derivations in the hydrated (``dehydrated:false``)
+    response.
+    """
+
+    C1 = "MONDO:0022222"
+    C2 = "MONDO:0033333"
+    D = "MONDO:0011122"
+    NA = "MONDO:0044444"
+
+    def _assert_two_distinct_derivations(self, response, base_qedge_id):
+        kg_edges = response["message"]["knowledge_graph"]["edges"]
+        aux_graphs = response["message"]["auxiliary_graphs"]
+
+        # Exactly one result: both children collapse into one node-binding group
+        # under the superclass D.
+        results = response["message"]["results"]
+        assert len(results) == 1
+
+        # Two distinct inferred composite edges (one per child derivation).
+        inferred = _inferred_edges(response)
+        assert (
+            len(inferred) == 2
+        ), f"expected 2 inferred edges, got {len(inferred)}: {list(inferred)}"
+
+        # Two auxiliary graphs, each holding exactly its own [phenotype, subclass]
+        # pair -- no cross-contamination with the sibling's subclass_of edge.
+        aux_ids_from_inferred = set()
+        child_subjects = set()
+        for edge in inferred.values():
+            sg = next(
+                a["value"]
+                for a in edge["attributes"]
+                if a["attribute_type_id"] == "biolink:support_graphs"
+            )
+            assert len(sg) == 1
+            aux_ids_from_inferred.add(sg[0])
+
+        assert len(aux_ids_from_inferred) == 2, "inferred edges share a support graph"
+        assert len(aux_graphs) == 2
+
+        for aux_id in aux_ids_from_inferred:
+            member_ids = aux_graphs[aux_id]["edges"]
+            assert len(member_ids) == 2, (
+                f"aux graph {aux_id} should contain exactly the phenotype edge "
+                f"and its subclass edge, got {member_ids}"
+            )
+            members = [kg_edges[mid] for mid in member_ids]
+            preds = {m["predicate"] for m in members}
+            assert preds == {"biolink:has_phenotype", "biolink:subclass_of"}
+
+            pheno = next(
+                m for m in members if m["predicate"] == "biolink:has_phenotype"
+            )
+            sub = next(m for m in members if m["predicate"] == "biolink:subclass_of")
+            # Both underlying edges must belong to the SAME child.
+            assert pheno["subject"] == sub["subject"], (
+                f"support graph {aux_id} mixes children: "
+                f"{pheno['subject']} vs {sub['subject']}"
+            )
+            assert sub["object"] == self.D
+            child_subjects.add(pheno["subject"])
+
+        # Both children are represented -- neither derivation dropped.
+        assert child_subjects == {self.C1, self.C2}
+
+        # The QEdge binding references two distinct inferred edges, no duplicates.
+        bindings = results[0]["analyses"][0]["edge_bindings"][base_qedge_id]
+        ids = [b["id"] for b in bindings]
+        assert len(ids) == 2
+        assert len(set(ids)) == 2, f"duplicate edge binding ids: {ids}"
+        assert set(ids) == set(inferred)
+
+    @pytest.mark.parametrize("dehydrated", [False, True])
+    def test_one_hop_two_children_stay_distinct(
+        self, multi_child_graph, bmt, dehydrated
+    ):
+        """Single-edge query: D --has_phenotype--> nA with subclass expansion."""
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": [self.D]},
+                        "n1": {"ids": [self.NA]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:has_phenotype"],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(
+            multi_child_graph,
+            query,
+            bmt=bmt,
+            subclass=True,
+            subclass_depth=1,
+            dehydrated=dehydrated,
+        )
+        self._assert_two_distinct_derivations(response, "e0")
+
+    @pytest.mark.parametrize("dehydrated", [False, True])
+    def test_two_hop_two_children_stay_distinct(
+        self, multi_child_graph, bmt, dehydrated
+    ):
+        """Two-hop query mirroring issue #39: SN --treats--> nA, D --has_phenotype--> nA.
+
+        The subclass-expanded ``has_phenotype`` edge is the second hop; both
+        children must still yield distinct, correctly-scoped inferred edges in
+        both dehydrated modes.
+        """
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "SN": {"ids": ["CHEBI:9999"]},
+                        "nA": {"ids": [self.NA]},
+                        "ON": {"ids": [self.D]},
+                    },
+                    "edges": {
+                        "eA": {
+                            "subject": "SN",
+                            "object": "nA",
+                            "predicates": ["biolink:treats"],
+                        },
+                        "eB": {
+                            "subject": "ON",
+                            "object": "nA",
+                            "predicates": ["biolink:has_phenotype"],
+                        },
+                    },
+                },
+            },
+        }
+
+        response = lookup(
+            multi_child_graph,
+            query,
+            bmt=bmt,
+            subclass=True,
+            subclass_depth=1,
+            dehydrated=dehydrated,
+        )
+        self._assert_two_distinct_derivations(response, "eB")
