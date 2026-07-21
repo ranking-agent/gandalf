@@ -66,14 +66,15 @@ class TestSubclassInverseEdgeDirection:
     edge is found via inverse lookup combined with subclass expansion."""
 
     def test_inverse_edge_with_subclass_on_subject(self, graph, bmt):
-        """Inverse edge + subclass on subject: direct edge takes priority.
+        """Inverse edge + subclass on subject: composite endpoints stay correct.
 
         Query: n0 (disease, pinned MONDO:0005015) -> n1 (chemical, pinned CHEBI:6801)
         predicate: related_to (wildcard, matches all predicates in both directions)
 
         A direct edge exists (CHEBI:6801 --treats--> MONDO:0005015, found via
-        inverse), so subclass-expanded edges through MONDO:0005148 are dropped
-        and no inferred composite edges should be present.
+        inverse) and coexists with subclass-expanded edges through MONDO:0005148.
+        The inferred composite edges must connect the originally-queried nodes
+        (MONDO:0005015 <-> CHEBI:6801), not a mispaired or self-referential pair.
         """
         query = {
             "message": {
@@ -97,11 +98,18 @@ class TestSubclassInverseEdgeDirection:
         results = response["message"]["results"]
         assert len(results) >= 1
 
-        # Direct edge exists, so no inferred composite edges should be present
+        # Direct edge and subclass inference coexist: inferred composites are
+        # present and connect the queried nodes (endpoints as a set).
         inferred = _get_inferred_edges(response)
         assert (
-            len(inferred) == 0
-        ), "Expected no inferred edges when a direct edge exists between queried nodes"
+            len(inferred) > 0
+        ), "Expected inferred edges from subclass expansion alongside the direct edge"
+        for eid, edge in inferred.items():
+            endpoints = {edge["subject"], edge["object"]}
+            assert endpoints == {"MONDO:0005015", "CHEBI:6801"}, (
+                f"Inferred edge {eid} should connect the queried nodes, got "
+                f"{edge['subject']} -> {edge['object']}"
+            )
 
         _assert_all_results_connected(response)
 

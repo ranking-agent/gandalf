@@ -755,32 +755,14 @@ def _build_response(
 
             attached = qedge_attached_subclass.get(edge_id, [])
 
-            # When a direct edge already connects the originally-queried
-            # (superclass) nodes, drop subclass-expanded edges so that
-            # superfluous subclass_of edges and child nodes do not
-            # appear in the result.
-            if attached:
-                sc_ids = {}
-                for which_end, _, sc_qnid in attached:
-                    if sc_qnid in qnode_to_col:
-                        sc_col_idx = qnode_to_col[sc_qnid]
-                        sc_nidx = int(pa_nodes[first_idx, sc_col_idx])
-                        sc_ids[which_end] = node_id_cache[sc_nidx]
-
-                direct_edges = []
-                for e in edges:
-                    is_direct = all(
-                        e.get("_query_subject" if end == "subject" else "_query_object")
-                        == sc_id
-                        for end, sc_id in sc_ids.items()
-                    )
-                    if is_direct:
-                        direct_edges.append(e)
-
-                if direct_edges:
-                    edges = direct_edges
-                    attached = []
-
+            # A direct edge between the originally-queried (superclass) nodes and
+            # a subclass-expanded edge through a child node can both appear in the
+            # same group.  Each edge is handled on its own merits below: an edge
+            # whose endpoint is the superclass itself yields a plain binding,
+            # while an edge through a child yields an inferred composite edge with
+            # a subclass support graph.  Both are emitted (matching Tier 1),
+            # rather than dropping the subclass inference when a direct edge is
+            # present.
             for edge in edges:
                 edge_kg_id = edge.pop("_edge_id", None) or str(uuid.uuid4())[:8]
                 response["message"]["knowledge_graph"]["edges"][edge_kg_id] = edge
