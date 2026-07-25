@@ -43,20 +43,51 @@ therefore counted once per orientation -- which is what a query would return.
 
 Everything is counted exactly -- no sampling, no sketches.  A synthetic 8M-edge,
 2M-node graph with 20 predicates censuses in ~11s (stored) / ~17s (query) in
-~1 GB of RAM, so a 38M-edge Translator graph is a couple of minutes and a few
-GB, dominated by the node-store scan.
+~1 GB of RAM; adding the qualifier and source facets below takes it to ~56s and
+~1.4 GB on a deliberately dense worst case where every triple carries every
+signature.  A 38M-edge Translator graph is therefore minutes, not hours, and
+``--skip-annotations`` buys back most of it when only the predicate census is
+wanted.
+
+Qualifiers and provenance
+-------------------------
+
+Every triple is also broken down by the qualifiers and the primary knowledge
+source on its edges, because a mechanism template stands or falls on those.
+"Drug affects gene" matches the drug that helps and the drug that harms
+identically; "drug decreases the activity of a gene whose expression the disease
+increases" does not.  Three things make that breakdown query-granular:
+
+* the **signature** table counts whole conjunctions, since a TRAPI
+  ``qualifier_set`` ANDs its members -- 40% of edges carrying a direction and
+  60% carrying an aspect says nothing about how many carry both;
+* **qualifier values roll up their enum hierarchy** (``expression`` ->
+  ``abundance`` -> ``activity_or_abundance``), mirroring ``QualifierExpander``,
+  which expands a queried value down to its descendants;
+* both are counted at **every ancestor predicate**, not just leaf ones, because
+  a template asks for ``biolink:affects`` plus a qualifier, not for
+  ``biolink:ameliorates_condition``.
+
+All of it is read from the interned hot-path pools (two int32 arrays and a small
+pickle), so it costs a fraction of the node scan.  Knowledge level and
+publications live in the cold-path LMDB and are deliberately not read.
 
 Outputs (tab-separated with a header row, written to ``--out``):
 
 ===========================  ==================================================
 ``manifest.json``            run provenance, graph totals, unmapped terms
-``biolink_closure.json``     ancestor chains for every observed term
+``biolink_closure.json``     ancestor chains for every observed term, including
+                             qualifier values
 ``census_leaf.tsv``          one row per occurring triple (leaf predicate)
 ``census_rollup.tsv``        one row per (subj_cat, ancestor_pred, obj_cat)
 ``census_wide.tsv``          leaf rows + the rollup as a JSON column
 ``predicate_summary.tsv``    per-predicate totals, own vs. whole subtree
 ``category_summary.tsv``     per-category node/edge counts (leaf categories)
 ``category_rollup.tsv``      per-ancestor-category totals + member breakdown
+``qualifier_signatures.tsv`` per triple, each whole qualifier conjunction
+``qualifier_values.tsv``     per triple, each qualifier value and value ancestor
+``qualifier_summary.tsv``    graph-wide totals per qualifier value
+``source_census.tsv``        per triple, each primary knowledge source
 ``census_pinned_*.tsv``      the same census with categories collapsed to
                              ``--pin-category`` values (optional)
 ===========================  ==================================================
@@ -146,6 +177,25 @@ class BiolinkClosure:
     category_depths: dict[str, int]
     unmapped_predicates: tuple[str, ...]
     unmapped_categories: tuple[str, ...]
+    # (qualifier_type_id, qualifier_value) -> reflexive ancestor values, most
+    # specific first.  Values live in Biolink enums rather than the class or
+    # slot hierarchy, except ``biolink:qualified_predicate`` whose values are
+    # predicate CURIEs -- which is exactly how QualifierExpander treats them.
+    qualifier_ancestors: dict[tuple[str, str], tuple[str, ...]] = field(
+        default_factory=dict
+    )
+    # qualifier_type_id -> the enum its values are drawn from ("" if unknown)
+    qualifier_enums: dict[str, str] = field(default_factory=dict)
+    unmapped_qualifier_values: tuple[tuple[str, str], ...] = ()
+
+    def qualifier_value_ancestors(self, type_id: str, value: str) -> tuple[str, ...]:
+        """Reflexive ancestor values for one qualifier assertion.
+
+        A qedge asking for ``activity_or_abundance`` matches edges qualified
+        with ``activity``, so rolling an edge's value up to its ancestors is
+        what makes the qualifier census query-granular.
+        """
+        return self.qualifier_ancestors.get((type_id, value), (value,))
 
     def predicate_depth(self, predicate: str) -> int:
         """``is_a`` distance from the predicate root (-1 if not in the model)."""
@@ -188,8 +238,21 @@ class BiolinkClosure:
                 }
                 for category, chain in sorted(self.category_ancestors.items())
             },
+            "qualifiers": {
+                f"{type_id} = {value}": {
+                    "qualifier_type_id": type_id,
+                    "qualifier_value": value,
+                    "enum": self.qualifier_enums.get(type_id, ""),
+                    "ancestor_values": list(chain),
+                }
+                for (type_id, value), chain in sorted(self.qualifier_ancestors.items())
+            },
             "unmapped_predicates": list(self.unmapped_predicates),
             "unmapped_categories": list(self.unmapped_categories),
+            "unmapped_qualifier_values": [
+                {"qualifier_type_id": type_id, "qualifier_value": value}
+                for type_id, value in self.unmapped_qualifier_values
+            ],
         }
 
 
@@ -233,12 +296,16 @@ def _make_toolkit(version: Optional[str], schema: Optional[str]):
 def build_closure_map(
     predicates: Sequence[str],
     categories: Sequence[str],
+    qualifiers: Sequence[tuple[str, str]] = (),
     *,
     version: Optional[str] = None,
     schema: Optional[str] = None,
     include_mixins: bool = True,
 ) -> BiolinkClosure:
-    """Look up the full ancestor chain of every observed predicate and category.
+    """Look up the full ancestor chain of every observed term.
+
+    Covers all three vocabularies a template draws on: predicates, categories,
+    and ``(qualifier_type_id, qualifier_value)`` assertions.
 
     Terms the model does not know (typos, retired predicates, non-Biolink
     categories) keep a single-element chain and are reported in ``unmapped_*``
@@ -302,12 +369,32 @@ def build_closure_map(
             if ancestor not in category_ancestors:
                 add_category(ancestor)
 
+    enums_by_type: dict[str, set[str]] = {}
+    qualifier_ancestors: dict[tuple[str, str], tuple[str, ...]] = {}
+    unmapped_qualifier_values: list[tuple[str, str]] = []
+    for type_id, value in sorted(set(qualifiers)):
+        enum_names = _qualifier_enums(toolkit, type_id, value)
+        enums_by_type.setdefault(type_id, set()).update(enum_names)
+        value_chain = _qualifier_value_ancestors(
+            toolkit, type_id, value, enum_names, predicate_ancestors
+        )
+        if value_chain is None:
+            unmapped_qualifier_values.append((type_id, value))
+            value_chain = (value,)
+        qualifier_ancestors[(type_id, value)] = value_chain
+    qualifier_enums = {
+        type_id: "|".join(sorted(names)) for type_id, names in enums_by_type.items()
+    }
+
     logger.info(
-        "  closure: %d predicates (%d unmapped), %d categories (%d unmapped)",
+        "  closure: %d predicates (%d unmapped), %d categories (%d unmapped), "
+        "%d qualifier values (%d unmapped)",
         len(predicate_ancestors),
         len(unmapped_predicates),
         len(category_ancestors),
         len(unmapped_categories),
+        len(qualifier_ancestors),
+        len(unmapped_qualifier_values),
     )
     return BiolinkClosure(
         version=resolved_version,
@@ -319,6 +406,9 @@ def build_closure_map(
         category_depths=category_depths,
         unmapped_predicates=tuple(sorted(set(unmapped_predicates))),
         unmapped_categories=tuple(sorted(set(unmapped_categories))),
+        qualifier_ancestors=qualifier_ancestors,
+        qualifier_enums=qualifier_enums,
+        unmapped_qualifier_values=tuple(sorted(set(unmapped_qualifier_values))),
     )
 
 
@@ -366,6 +456,73 @@ def _predicate_metadata(toolkit, predicate: str) -> dict:
         "inverse": model_inverse if toolkit.has_inverse(predicate) else None,
         "model_inverse": model_inverse,
     }
+
+
+QUALIFIED_PREDICATE = "biolink:qualified_predicate"
+
+
+def _qualifier_enums(toolkit, type_id: str, value: str) -> list[str]:
+    """Enums that admit *value* for this qualifier type.
+
+    The slot's own ``range`` is the fast path, but the interesting qualifier
+    slots are abstract and declare no range -- ``object_aspect_qualifier`` gets
+    its range from per-predicate ``slot_usage`` -- so the fallback scans all 26
+    enums for the value.  That is exactly what ``QualifierExpander`` does at
+    query time, and it is cheap here: a graph has hundreds of distinct
+    ``(type, value)`` pairs, not millions.
+    """
+    if type_id == QUALIFIED_PREDICATE:
+        return []
+    element = toolkit.get_element(type_id)
+    range_name = getattr(element, "range", None) if element is not None else None
+    all_enums = toolkit.view.all_enums()
+    if (
+        range_name
+        and range_name in all_enums
+        and toolkit.is_permissible_value_of_enum(enum_name=range_name, value=value)
+    ):
+        return [str(range_name)]
+    return [
+        str(enum_name)
+        for enum_name in all_enums
+        if toolkit.is_permissible_value_of_enum(enum_name=enum_name, value=value)
+    ]
+
+
+def _qualifier_value_ancestors(
+    toolkit,
+    type_id: str,
+    value: str,
+    enum_names: Sequence[str],
+    predicate_ancestors: dict[str, tuple[str, ...]],
+) -> Optional[tuple[str, ...]]:
+    """Reflexive ancestor chain for a qualifier value, most specific first.
+
+    ``qualified_predicate`` values are predicate CURIEs and climb the predicate
+    hierarchy; everything else climbs its enum's permissible-value hierarchy
+    (``expression`` -> ``abundance`` -> ``activity_or_abundance``).  When a
+    value appears in several enums the chains are unioned, matching
+    ``QualifierExpander``, which searches every enum.  Returns ``None`` when the
+    model cannot place the value at all.
+    """
+    if type_id == QUALIFIED_PREDICATE:
+        return predicate_ancestors.get(value) or _ancestors(
+            toolkit, value, include_mixins=True
+        )
+
+    if not enum_names:
+        return None
+    ordered: list[str] = []
+    for enum_name in enum_names:
+        ordered.extend(
+            str(ancestor)
+            for ancestor in toolkit.get_permissible_value_ancestors(
+                permissible_value=value, enum_name=enum_name
+            )
+            or ()
+        )
+    ordered = [ancestor for ancestor in dict.fromkeys(ordered) if ancestor != value]
+    return (value, *ordered)
 
 
 def _model_inverse(toolkit, predicate: str) -> Optional[str]:
@@ -418,10 +575,80 @@ class GraphArrays:
     source: str
     multi_category_nodes: int = 0
     dangling_endpoints: int = 0
+    # Per-edge annotations, aligned with the edge arrays.  ``qualifier_codes``
+    # indexes ``qualifier_signatures`` (the full conjunction of qualifiers on an
+    # edge, which is what a TRAPI qualifier_set matches); ``source_codes``
+    # indexes ``primary_sources``.  Both are None when the graph does not carry
+    # them or the census was told to skip them.
+    qualifier_codes: Optional[np.ndarray] = None
+    qualifier_signatures: list[tuple[tuple[str, str], ...]] = field(
+        default_factory=list
+    )
+    source_codes: Optional[np.ndarray] = None
+    primary_sources: list[str] = field(default_factory=list)
 
     @property
     def num_edges(self) -> int:
         return int(self.subjects.shape[0])
+
+    @property
+    def qualifier_pairs(self) -> list[tuple[str, str]]:
+        """Every distinct ``(qualifier_type_id, qualifier_value)`` observed."""
+        return sorted(
+            {pair for signature in self.qualifier_signatures for pair in signature}
+        )
+
+
+class _SignatureInterner:
+    """Interns a tuple-valued per-edge annotation to a small integer code."""
+
+    def __init__(self) -> None:
+        self.values: list = []
+        self._index: dict = {}
+
+    def intern(self, value):
+        code = self._index.get(value)
+        if code is None:
+            code = len(self.values)
+            self._index[value] = code
+            self.values.append(value)
+        return code
+
+
+def qualifier_signature(qualifiers) -> tuple[tuple[str, str], ...]:
+    """Normalize an edge's qualifier list into a sorted, hashable signature.
+
+    >>> qualifier_signature([
+    ...     {"qualifier_type_id": "biolink:object_direction_qualifier",
+    ...      "qualifier_value": "decreased"},
+    ...     {"qualifier_type_id": "biolink:object_aspect_qualifier",
+    ...      "qualifier_value": "activity"}])
+    (('biolink:object_aspect_qualifier', 'activity'), ('biolink:object_direction_qualifier', 'decreased'))
+    """
+    if not qualifiers:
+        return ()
+    pairs = []
+    for qualifier in qualifiers:
+        type_id = qualifier.get("qualifier_type_id")
+        value = qualifier.get("qualifier_value")
+        if type_id and value is not None:
+            pairs.append((str(type_id), str(value)))
+    return tuple(sorted(set(pairs)))
+
+
+def primary_source(sources) -> str:
+    """The ``primary_knowledge_source`` resource_id for an edge.
+
+    Falls back to the first source when no entry carries the primary role, and
+    to ``""`` when the edge has no sources at all -- both are worth seeing in
+    the census rather than silently bucketing as unknown.
+    """
+    if not sources:
+        return ""
+    for source in sources:
+        if source.get("resource_role") == "primary_knowledge_source":
+            return str(source.get("resource_id") or "")
+    return str(sources[0].get("resource_id") or "")
 
 
 class _CategoryComboInterner:
@@ -512,7 +739,9 @@ def _resolve_primary_categories(
     return combo_to_code, categories
 
 
-ClosureBuilder = Callable[[Sequence[str], Sequence[str]], BiolinkClosure]
+ClosureBuilder = Callable[
+    [Sequence[str], Sequence[str], Sequence[tuple[str, str]]], BiolinkClosure
+]
 
 
 def node_categories(record: dict) -> list[str]:
@@ -537,12 +766,23 @@ def node_categories(record: dict) -> list[str]:
 
 
 def load_from_mmap(
-    graph_dir: Path, closure_builder: ClosureBuilder, policy: str
+    graph_dir: Path,
+    closure_builder: ClosureBuilder,
+    policy: str,
+    annotations: bool = True,
 ) -> tuple[GraphArrays, BiolinkClosure]:
     """Read a saved Gandalf mmap graph directory.
 
     Reads only what the census needs: the forward CSR arrays, the predicate
-    vocabulary from ``metadata.pkl`` and node categories from the node store.
+    vocabulary from ``metadata.pkl``, node categories from the node store, and
+    -- when *annotations* is set -- the interned qualifier and source pools.
+
+    Those pools are the cheap half of the graph: ``edge_quals_idx.npy`` and
+    ``edge_sources_idx.npy`` are int32 arrays reordered by the same permutation
+    as the forward CSR (``loader.py`` calls ``prop_builder.reorder(sort_order)``),
+    so position *i* in them is the same edge as position *i* in
+    ``fwd_targets.npy``.  Knowledge level and publications live in the cold-path
+    LMDB instead and would cost a full scan, so they are deliberately not read.
     """
     metadata_path = graph_dir / "metadata.pkl"
     if not metadata_path.exists():
@@ -590,7 +830,17 @@ def load_from_mmap(
                 multi_category_nodes += 1
             node_combo_codes[int(node_idx)] = interner.intern(categories)
 
-    closure = closure_builder(predicates, sorted(interner.vocabulary))
+    qualifier_codes, qualifier_signatures, source_codes, primary_sources = (
+        _read_edge_annotations(graph_dir, len(objects))
+        if annotations
+        else (None, [], None, [])
+    )
+
+    closure = closure_builder(
+        predicates,
+        sorted(interner.vocabulary),
+        sorted({pair for sig in qualifier_signatures for pair in sig}),
+    )
     combo_to_code, categories = _resolve_primary_categories(interner, closure, policy)
 
     arrays = GraphArrays(
@@ -603,8 +853,79 @@ def load_from_mmap(
         num_nodes=num_nodes,
         source=str(graph_dir),
         multi_category_nodes=multi_category_nodes,
+        qualifier_codes=qualifier_codes,
+        qualifier_signatures=qualifier_signatures,
+        source_codes=source_codes,
+        primary_sources=primary_sources,
     )
     return arrays, closure
+
+
+def _read_edge_annotations(
+    graph_dir: Path, num_edges: int
+) -> tuple[Optional[np.ndarray], list, Optional[np.ndarray], list]:
+    """Read the interned qualifier and source pools for every edge.
+
+    Returns ``(qualifier_codes, qualifier_signatures, source_codes,
+    primary_sources)``.  The stored pools are re-interned rather than used
+    directly: two pool entries can normalize to the same signature (qualifier
+    order differs, or two source chains share a primary), and the census wants
+    one code per distinct *meaning*.
+    """
+    pools_path = graph_dir / "edge_property_pools.pkl"
+    quals_idx_path = graph_dir / "edge_quals_idx.npy"
+    sources_idx_path = graph_dir / "edge_sources_idx.npy"
+    if not (
+        pools_path.exists() and quals_idx_path.exists() and sources_idx_path.exists()
+    ):
+        logger.warning(
+            "  No edge property pools in %s; skipping qualifier/source census",
+            graph_dir,
+        )
+        return None, [], None, []
+
+    logger.info("  Reading qualifier and source pools")
+    with open(pools_path, "rb") as handle:
+        pools = pickle.load(handle)
+
+    qualifier_interner = _SignatureInterner()
+    quals_pool_map = np.array(
+        [
+            qualifier_interner.intern(qualifier_signature(entry))
+            for entry in pools["quals_pool"]
+        ],
+        dtype=np.int32,
+    )
+    source_interner = _SignatureInterner()
+    sources_pool_map = np.array(
+        [
+            source_interner.intern(primary_source(entry))
+            for entry in pools["sources_pool"]
+        ],
+        dtype=np.int32,
+    )
+
+    quals_idx = np.load(quals_idx_path, mmap_mode="r")
+    sources_idx = np.load(sources_idx_path, mmap_mode="r")
+    if len(quals_idx) != num_edges or len(sources_idx) != num_edges:
+        raise ValueError(
+            f"edge property index length ({len(quals_idx)}, {len(sources_idx)}) "
+            f"does not match edge count ({num_edges}); graph directory is inconsistent"
+        )
+
+    qualifier_codes = quals_pool_map[np.asarray(quals_idx)]
+    source_codes = sources_pool_map[np.asarray(sources_idx)]
+    logger.info(
+        "    %s distinct qualifier signatures, %s distinct primary sources",
+        f"{len(qualifier_interner.values):,}",
+        f"{len(source_interner.values):,}",
+    )
+    return (
+        qualifier_codes,
+        qualifier_interner.values,
+        source_codes,
+        source_interner.values,
+    )
 
 
 def _open_maybe_gzip(path: Path):
@@ -634,11 +955,47 @@ def _iter_json_lines(path: Path) -> Iterator[dict]:
                 yield loads(line)
 
 
+def edge_qualifier_signature(edge: dict) -> tuple[tuple[str, str], ...]:
+    """Qualifier signature for a KGX edge record, normalized or raw.
+
+    ``gandalf.normalize._extract_qualifiers`` lifts raw KGX's top-level
+    ``object_aspect_qualifier``-style fields into a TRAPI ``qualifiers`` list
+    and prefixes the type with ``biolink:``.  A raw dump has not been through
+    that yet, so recognize both spellings -- otherwise the census reports zero
+    qualifier coverage on exactly the input where you most want to check it.
+
+    >>> edge_qualifier_signature(
+    ...     {"object_aspect_qualifier": "activity", "qualified_predicate": "causes"})
+    (('biolink:object_aspect_qualifier', 'activity'), ('biolink:qualified_predicate', 'biolink:causes'))
+    """
+    if edge.get("qualifiers"):
+        return qualifier_signature(edge["qualifiers"])
+    pairs = []
+    for key, value in edge.items():
+        if value is None or not (
+            key.endswith("_qualifier") or key == "qualified_predicate"
+        ):
+            continue
+        text = value if isinstance(value, str) else json.dumps(value)
+        if key == "qualified_predicate" and not text.startswith("biolink:"):
+            text = f"biolink:{text}"
+        pairs.append((f"biolink:{key}", text))
+    return tuple(sorted(set(pairs)))
+
+
+def edge_primary_source(edge: dict) -> str:
+    """Primary knowledge source for a KGX edge record, normalized or raw."""
+    if edge.get("sources"):
+        return primary_source(edge["sources"])
+    return str(edge.get("primary_knowledge_source") or "")
+
+
 def load_from_jsonl(
     edges_path: Path,
     nodes_path: Optional[Path],
     closure_builder: ClosureBuilder,
     policy: str,
+    annotations: bool = True,
 ) -> tuple[GraphArrays, BiolinkClosure]:
     """Read KGX ``nodes.jsonl`` / ``edges.jsonl`` without building a graph.
 
@@ -646,6 +1003,9 @@ def load_from_jsonl(
     absent from the node file get ``biolink:NamedThing`` and are counted, so a
     dangling-endpoint problem shows up in the manifest instead of quietly
     inflating the NamedThing rows.
+
+    Qualifiers and sources are read per record when *annotations* is set, from
+    either the normalized form or raw KGX's top-level fields.
     """
     interner = _CategoryComboInterner()
     default_combo = interner.intern([DEFAULT_CATEGORY])
@@ -673,6 +1033,10 @@ def load_from_jsonl(
     subjects = array.array("i")
     objects = array.array("i")
     predicate_codes = array.array("i")
+    qualifier_codes = array.array("i")
+    source_codes = array.array("i")
+    qualifier_interner = _SignatureInterner()
+    source_interner = _SignatureInterner()
     dangling_endpoints = 0
 
     def node_index(node_id: str) -> int:
@@ -696,6 +1060,11 @@ def load_from_jsonl(
         subjects.append(node_index(edge["subject"]))
         objects.append(node_index(edge["object"]))
         predicate_codes.append(predicate_code)
+        if annotations:
+            qualifier_codes.append(
+                qualifier_interner.intern(edge_qualifier_signature(edge))
+            )
+            source_codes.append(source_interner.intern(edge_primary_source(edge)))
         if count % 5_000_000 == 0:
             logger.info("  %s edges read", f"{count:,}")
 
@@ -706,7 +1075,11 @@ def load_from_jsonl(
             DEFAULT_CATEGORY,
         )
 
-    closure = closure_builder(predicates, sorted(interner.vocabulary))
+    closure = closure_builder(
+        predicates,
+        sorted(interner.vocabulary),
+        sorted({pair for sig in qualifier_interner.values for pair in sig}),
+    )
     combo_to_code, categories = _resolve_primary_categories(interner, closure, policy)
 
     arrays = GraphArrays(
@@ -722,6 +1095,14 @@ def load_from_jsonl(
         source=str(edges_path),
         multi_category_nodes=multi_category_nodes,
         dangling_endpoints=dangling_endpoints,
+        qualifier_codes=(
+            np.frombuffer(qualifier_codes, dtype=np.int32) if annotations else None
+        ),
+        qualifier_signatures=qualifier_interner.values,
+        source_codes=(
+            np.frombuffer(source_codes, dtype=np.int32) if annotations else None
+        ),
+        primary_sources=source_interner.values,
     )
     logger.info(
         "  %s nodes, %s edges", f"{arrays.num_nodes:,}", f"{arrays.num_edges:,}"
@@ -758,12 +1139,19 @@ def group_stats(
         empty = np.empty(0, dtype=np.int64)
         return empty, empty.copy(), empty.copy(), empty.copy()
 
-    unique_keys, edge_counts = np.unique(keys, return_counts=True)
+    # Dense codes rather than the raw keys: a facet key such as
+    # (triple, qualifier combo) is already a product of three vocabularies, and
+    # packing *that* against a node index would overflow int64 on a large graph.
+    # Densifying first bounds the key by the number of groups actually present.
+    unique_keys, dense, edge_counts = np.unique(
+        keys, return_inverse=True, return_counts=True
+    )
+    dense = dense.astype(np.int64, copy=False).reshape(-1)
     return (
         unique_keys,
         edge_counts.astype(np.int64),
-        _distinct_per_key(keys, subjects),
-        _distinct_per_key(keys, objects),
+        _distinct_per_key(dense, subjects),
+        _distinct_per_key(dense, objects),
     )
 
 
@@ -808,6 +1196,172 @@ class CensusTables:
     inverse_sources: dict[str, list[str]] = field(default_factory=dict)
     total_edges: int = 0
     semantics: str = "stored"
+    # facet name -> rows, one per (triple, facet value) that occurs
+    facet_rows: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+
+@dataclass
+class Facet:
+    """A per-edge annotation censused alongside every triple.
+
+    ``codes`` indexes ``labels``.  When ``rows`` is None the facet is 1:1 with
+    edges (an edge has exactly one qualifier signature, one primary source).
+    When ``rows`` is given, the facet is one-to-many and ``rows[i]`` is the edge
+    that row *i* belongs to -- that is how a single edge contributes to a row
+    for each of its qualifiers, and for each ancestor of each qualifier value.
+    """
+
+    name: str
+    labels: list[str]
+    codes: np.ndarray
+    rows: Optional[np.ndarray] = None
+    columns: dict[str, list[Any]] = field(default_factory=dict)
+
+    def row_columns(self, code: int) -> dict[str, Any]:
+        """Extra output columns describing one facet value."""
+        return {name: values[code] for name, values in self.columns.items()}
+
+
+def render_signature(signature: Sequence[tuple[str, str]]) -> str:
+    """Render a qualifier signature the way a qualifier_set reads.
+
+    >>> render_signature((("biolink:object_aspect_qualifier", "activity"),))
+    'biolink:object_aspect_qualifier=activity'
+    >>> render_signature(())
+    '(unqualified)'
+    """
+    if not signature:
+        return "(unqualified)"
+    return "|".join(f"{type_id}={value}" for type_id, value in signature)
+
+
+def build_facets(arrays: GraphArrays, closure: BiolinkClosure) -> list[Facet]:
+    """Build the per-edge facets the census reports alongside each triple.
+
+    Three of them:
+
+    ``qualifier_signature``
+        The whole conjunction of qualifiers on an edge.  This is the one that
+        answers "can I write this template", because a TRAPI ``qualifier_set``
+        ANDs its members -- knowing that 40% of edges carry a direction and 60%
+        carry an aspect says nothing about how many carry *both*.
+
+    ``qualifier``
+        One row per ``(qualifier_type_id, qualifier_value)``, expanded to the
+        value's ancestors as well, since ``QualifierExpander`` expands a queried
+        value *down* to its descendants: an edge qualified ``expression`` is
+        matched by a qedge asking for ``abundance``.  Rows are therefore
+        query-granular, and an edge can appear under several of them.
+
+    ``primary_source``
+        Provenance, for pricing quality constraints inside a template.
+    """
+    facets: list[Facet] = []
+
+    if arrays.qualifier_codes is not None and arrays.qualifier_signatures:
+        facets.append(
+            Facet(
+                name="qualifier_signature",
+                labels=[
+                    render_signature(signature)
+                    for signature in arrays.qualifier_signatures
+                ],
+                codes=arrays.qualifier_codes,
+                columns={
+                    "n_qualifiers": [
+                        len(signature) for signature in arrays.qualifier_signatures
+                    ],
+                },
+            )
+        )
+        facets.append(_qualifier_value_facet(arrays, closure))
+
+    if arrays.source_codes is not None and arrays.primary_sources:
+        facets.append(
+            Facet(
+                name="primary_source",
+                labels=[source or "(none)" for source in arrays.primary_sources],
+                codes=arrays.source_codes,
+            )
+        )
+
+    return facets
+
+
+def _qualifier_value_facet(arrays: GraphArrays, closure: BiolinkClosure) -> Facet:
+    """Expand each edge into one row per qualifier value *and value ancestor*.
+
+    Only called when the graph carries qualifiers, so ``qualifier_codes`` is set.
+    """
+    assert arrays.qualifier_codes is not None
+    labels: list[str] = []
+    label_index: dict[tuple[str, str], int] = {}
+    type_ids: list[str] = []
+    values: list[str] = []
+    is_leaf: list[int] = []
+
+    def label_code(type_id: str, value: str, leaf: bool) -> int:
+        key = (type_id, value)
+        code = label_index.get(key)
+        if code is None:
+            code = len(labels)
+            label_index[key] = code
+            labels.append(f"{type_id}={value}")
+            type_ids.append(type_id)
+            values.append(value)
+            is_leaf.append(int(leaf))
+        elif leaf:
+            is_leaf[code] = 1
+        return code
+
+    # signature code -> the label codes every edge with that signature emits
+    signature_labels: list[np.ndarray] = []
+    for signature in arrays.qualifier_signatures:
+        emitted: set[int] = set()
+        for type_id, value in signature:
+            for depth, ancestor in enumerate(
+                closure.qualifier_value_ancestors(type_id, value)
+            ):
+                emitted.add(label_code(type_id, ancestor, depth == 0))
+        signature_labels.append(np.array(sorted(emitted), dtype=np.int32))
+
+    # Expand signature by signature rather than edge by edge: there are
+    # thousands of distinct signatures but tens of millions of edges, so this
+    # is a few thousand vectorized repeats instead of a per-edge Python loop.
+    edge_codes = arrays.qualifier_codes
+    order = np.argsort(edge_codes, kind="stable")
+    grouped = edge_codes[order]
+    starts = (
+        np.flatnonzero(np.concatenate(([True], grouped[1:] != grouped[:-1])))
+        if grouped.size
+        else np.empty(0, dtype=np.int64)
+    )
+    ends = np.concatenate((starts[1:], [grouped.size])) if starts.size else starts
+
+    row_chunks: list[np.ndarray] = []
+    code_chunks: list[np.ndarray] = []
+    for start, end in zip(starts, ends):
+        labels_for_signature = signature_labels[int(grouped[start])]
+        if labels_for_signature.size == 0:
+            continue
+        edges = order[start:end].astype(np.int32, copy=False)
+        row_chunks.append(np.repeat(edges, labels_for_signature.size))
+        code_chunks.append(np.tile(labels_for_signature, edges.size))
+
+    rows = np.concatenate(row_chunks) if row_chunks else np.empty(0, dtype=np.int32)
+    codes = np.concatenate(code_chunks) if code_chunks else np.empty(0, dtype=np.int32)
+
+    return Facet(
+        name="qualifier",
+        labels=labels,
+        codes=codes,
+        rows=rows,
+        columns={
+            "qualifier_type_id": type_ids,
+            "qualifier_value": values,
+            "is_leaf_value": is_leaf,
+        },
+    )
 
 
 def match_sets(
@@ -874,12 +1428,17 @@ def run_census(
     category_codes: np.ndarray,
     categories: list[str],
     semantics: str = "stored",
+    facets: Sequence[Facet] = (),
 ) -> CensusTables:
     """Census one labelling of the graph: leaf triples plus the predicate rollup.
 
     *category_codes* maps node index -> index into *categories*; passing a
     relabelled array (see :func:`relabel_to_pins`) re-runs the whole census at a
     different node granularity without re-reading the graph.
+
+    Each facet in *facets* is counted for every triple in the rollup, not just
+    for leaf triples -- a template asks for ``biolink:affects`` with a direction
+    qualifier, so qualifier coverage has to be known at ancestor granularity too.
     """
     subject_categories = category_codes[arrays.subjects].astype(np.int64)
     object_categories = category_codes[arrays.objects].astype(np.int64)
@@ -940,6 +1499,7 @@ def run_census(
     rollup_index: dict[tuple[str, str, str], TripleCounts] = {}
     forward_sources: dict[str, list[str]] = {}
     inverse_sources: dict[str, list[str]] = {}
+    facet_rows: dict[str, list[dict[str, Any]]] = {facet.name: [] for facet in facets}
 
     for ancestor in ancestors:
         forward, inverse = match_sets(ancestor, observed, closure, semantics)
@@ -955,6 +1515,7 @@ def run_census(
         keys = [pair_keys[forward_mask]]
         subjects = [arrays.subjects[forward_mask]]
         objects = [arrays.objects[forward_mask]]
+        inverse_mask = None
 
         if inverse:
             selector = np.zeros(num_predicates, dtype=bool)
@@ -1006,6 +1567,23 @@ def run_census(
                 }
             )
 
+        for facet in facets:
+            facet_rows[facet.name].extend(
+                _facet_rows_for_predicate(
+                    facet,
+                    ancestor,
+                    forward_mask,
+                    inverse_mask,
+                    pair_keys,
+                    swapped_pair_keys,
+                    arrays,
+                    categories,
+                    rollup_index,
+                )
+            )
+
+    for rows in facet_rows.values():
+        rows.sort(key=lambda row: -row["edge_count"])
     rollup_rows.sort(key=lambda row: -row["edge_count"])
     return CensusTables(
         leaf_rows=sorted(leaf_rows, key=lambda row: -row.edge_count),
@@ -1015,7 +1593,88 @@ def run_census(
         inverse_sources=inverse_sources,
         total_edges=total_edges,
         semantics=semantics,
+        facet_rows=facet_rows,
     )
+
+
+def _facet_rows_for_predicate(
+    facet: Facet,
+    predicate: str,
+    forward_mask: np.ndarray,
+    inverse_mask: Optional[np.ndarray],
+    pair_keys: np.ndarray,
+    swapped_pair_keys: np.ndarray,
+    arrays: GraphArrays,
+    categories: list[str],
+    rollup_index: dict[tuple[str, str, str], TripleCounts],
+) -> list[dict[str, Any]]:
+    """Count one facet's values within every triple matched by *predicate*."""
+    num_categories = len(categories)
+    num_labels = max(len(facet.labels), 1)
+
+    keys: list[np.ndarray] = []
+    codes: list[np.ndarray] = []
+    subjects: list[np.ndarray] = []
+    objects: list[np.ndarray] = []
+
+    for mask, key_source, subject_source, object_source in (
+        (forward_mask, pair_keys, arrays.subjects, arrays.objects),
+        (inverse_mask, swapped_pair_keys, arrays.objects, arrays.subjects),
+    ):
+        if mask is None:
+            continue
+        if facet.rows is None:
+            keys.append(key_source[mask])
+            codes.append(facet.codes[mask])
+            subjects.append(subject_source[mask])
+            objects.append(object_source[mask])
+        else:
+            selected = mask[facet.rows]
+            edges = facet.rows[selected]
+            keys.append(key_source[edges])
+            codes.append(facet.codes[selected])
+            subjects.append(subject_source[edges])
+            objects.append(object_source[edges])
+
+    if not keys:
+        return []
+    pair_key = np.concatenate(keys)
+    if pair_key.size == 0:
+        return []
+
+    unique_keys, edge_counts, distinct_subjects, distinct_objects = group_stats(
+        pair_key * num_labels + np.concatenate(codes),
+        np.concatenate(subjects),
+        np.concatenate(objects),
+    )
+
+    rows: list[dict[str, Any]] = []
+    for key, edges, subs, objs in zip(
+        unique_keys, edge_counts, distinct_subjects, distinct_objects
+    ):
+        code = int(key) % num_labels
+        pair = int(key) // num_labels
+        subject_category = categories[pair // num_categories]
+        object_category = categories[pair % num_categories]
+        triple = rollup_index.get((subject_category, predicate, object_category))
+        triple_edges = triple.edge_count if triple else 0
+        rows.append(
+            {
+                "subject_category": subject_category,
+                "predicate": predicate,
+                "object_category": object_category,
+                facet.name: facet.labels[code],
+                **facet.row_columns(code),
+                "edge_count": int(edges),
+                "distinct_subjects": int(subs),
+                "distinct_objects": int(objs),
+                "triple_edge_count": triple_edges,
+                "share_of_triple": (
+                    round(int(edges) / triple_edges, 6) if triple_edges else 0.0
+                ),
+            }
+        )
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -1286,6 +1945,65 @@ LEAF_FIELDS = [
     "distinct_objects",
 ]
 
+# Per-triple annotation columns appended to the leaf and wide tables when the
+# graph carries qualifiers and sources.
+ANNOTATION_FIELDS = [
+    "qualified_edges",
+    "qualified_share",
+    "n_qualifier_signatures",
+    "top_qualifier_signature",
+    "top_qualifier_signature_share",
+    "n_primary_sources",
+    "top_primary_source",
+    "top_primary_source_share",
+]
+
+FACET_FIELDS = {
+    "qualifier_signature": [
+        "subject_category",
+        "predicate",
+        "object_category",
+        "qualifier_signature",
+        "n_qualifiers",
+        "edge_count",
+        "distinct_subjects",
+        "distinct_objects",
+        "triple_edge_count",
+        "share_of_triple",
+    ],
+    "qualifier": [
+        "subject_category",
+        "predicate",
+        "object_category",
+        "qualifier",
+        "qualifier_type_id",
+        "qualifier_value",
+        "is_leaf_value",
+        "edge_count",
+        "distinct_subjects",
+        "distinct_objects",
+        "triple_edge_count",
+        "share_of_triple",
+    ],
+    "primary_source": [
+        "subject_category",
+        "predicate",
+        "object_category",
+        "primary_source",
+        "edge_count",
+        "distinct_subjects",
+        "distinct_objects",
+        "triple_edge_count",
+        "share_of_triple",
+    ],
+}
+
+FACET_FILES = {
+    "qualifier_signature": "qualifier_signatures.tsv",
+    "qualifier": "qualifier_values.tsv",
+    "primary_source": "source_census.tsv",
+}
+
 ROLLUP_FIELDS = LEAF_FIELDS + [
     "predicate_depth",
     "occurs_as_leaf",
@@ -1308,6 +2026,159 @@ WIDE_FIELDS = LEAF_FIELDS + [
 ]
 
 
+def qualified_edge_total(arrays: GraphArrays) -> int:
+    """How many edges carry at least one qualifier."""
+    if arrays.qualifier_codes is None or not arrays.qualifier_signatures:
+        return 0
+    unqualified = np.array(
+        [not signature for signature in arrays.qualifier_signatures], dtype=bool
+    )
+    return int(np.count_nonzero(~unqualified[arrays.qualifier_codes]))
+
+
+def summarize_annotations(
+    census: CensusTables,
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Condense the facet rows into per-triple columns for the leaf/wide tables.
+
+    Keeps the headline numbers a template author checks first -- what fraction
+    of a triple's edges carry any qualifier at all, how concentrated the
+    qualifier signatures are, and whether one source supplies everything.
+    """
+    signature_rows = census.facet_rows.get("qualifier_signature") or []
+    source_rows = census.facet_rows.get("primary_source") or []
+    if not signature_rows and not source_rows:
+        return {}
+
+    summary: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    for row in signature_rows:
+        key = (row["subject_category"], row["predicate"], row["object_category"])
+        entry = summary.setdefault(
+            key,
+            {
+                "qualified_edges": 0,
+                "qualified_share": 0.0,
+                "n_qualifier_signatures": 0,
+                "top_qualifier_signature": "",
+                "top_qualifier_signature_share": 0.0,
+                "n_primary_sources": 0,
+                "top_primary_source": "",
+                "top_primary_source_share": 0.0,
+            },
+        )
+        if row["n_qualifiers"] == 0:
+            continue
+        entry["qualified_edges"] += row["edge_count"]
+        entry["n_qualifier_signatures"] += 1
+        if row["share_of_triple"] > entry["top_qualifier_signature_share"]:
+            entry["top_qualifier_signature"] = row["qualifier_signature"]
+            entry["top_qualifier_signature_share"] = row["share_of_triple"]
+
+    for row in source_rows:
+        key = (row["subject_category"], row["predicate"], row["object_category"])
+        entry = summary.setdefault(
+            key,
+            {
+                "qualified_edges": 0,
+                "qualified_share": 0.0,
+                "n_qualifier_signatures": 0,
+                "top_qualifier_signature": "",
+                "top_qualifier_signature_share": 0.0,
+                "n_primary_sources": 0,
+                "top_primary_source": "",
+                "top_primary_source_share": 0.0,
+            },
+        )
+        entry["n_primary_sources"] += 1
+        if row["share_of_triple"] > entry["top_primary_source_share"]:
+            entry["top_primary_source"] = row["primary_source"]
+            entry["top_primary_source_share"] = row["share_of_triple"]
+
+    for key, entry in summary.items():
+        triple = census.rollup_index.get(key)
+        if triple and triple.edge_count:
+            entry["qualified_share"] = round(
+                entry["qualified_edges"] / triple.edge_count, 6
+            )
+    return summary
+
+
+def build_qualifier_summary(
+    arrays: GraphArrays,
+    facets: Sequence[Facet],
+    closure: BiolinkClosure,
+    category_codes: np.ndarray,
+    categories: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Graph-wide view of every qualifier assertion that occurs.
+
+    Answers "does this graph even have direction qualifiers, and on what" before
+    you write a template that depends on them.
+
+    Counted from the per-edge facet rather than by summing the census tables:
+    an ancestor predicate can also be a leaf predicate (``treats`` is both a
+    parent of ``ameliorates_condition`` and a label in its own right), so
+    adding up per-triple rows would count the same edge under both.
+    """
+    facet = next((f for f in facets if f.name == "qualifier"), None)
+    if facet is None or facet.rows is None or facet.codes.size == 0:
+        return []
+
+    num_labels = max(len(facet.labels), 1)
+    num_categories = len(categories)
+    num_predicates = len(arrays.predicates)
+    total_edges = arrays.num_edges
+
+    leaf_keys = (
+        category_codes[arrays.subjects].astype(np.int64) * num_categories
+        + category_codes[arrays.objects]
+    ) * num_predicates + arrays.predicate_codes
+
+    codes = facet.codes.astype(np.int64)
+    edges_per_label = np.bincount(codes, minlength=num_labels)
+    triples_per_label = np.bincount(
+        np.unique(leaf_keys[facet.rows] * num_labels + codes) % num_labels,
+        minlength=num_labels,
+    )
+    predicates_per_label = np.bincount(
+        np.unique(
+            arrays.predicate_codes[facet.rows].astype(np.int64) * num_labels + codes
+        )
+        % num_labels,
+        minlength=num_labels,
+    )
+
+    rows = [
+        {
+            "qualifier_type_id": facet.columns["qualifier_type_id"][code],
+            "qualifier_value": facet.columns["qualifier_value"][code],
+            "enum": closure.qualifier_enums.get(
+                facet.columns["qualifier_type_id"][code], ""
+            ),
+            "is_leaf_value": facet.columns["is_leaf_value"][code],
+            "ancestor_values": "|".join(
+                closure.qualifier_value_ancestors(
+                    facet.columns["qualifier_type_id"][code],
+                    facet.columns["qualifier_value"][code],
+                )
+            ),
+            "edge_count": int(edges_per_label[code]),
+            "share_of_graph": (
+                round(int(edges_per_label[code]) / total_edges, 8)
+                if total_edges
+                else 0.0
+            ),
+            "n_triples": int(triples_per_label[code]),
+            "n_predicates": int(predicates_per_label[code]),
+        }
+        for code in range(num_labels)
+        if edges_per_label[code]
+    ]
+    rows.sort(key=lambda row: (row["qualifier_type_id"], -row["edge_count"]))
+    return rows
+
+
 def write_tsv(path: Path, rows: Sequence[dict], fieldnames: Sequence[str]) -> None:
     """Write *rows* as a tab-separated file with a header."""
     with open(path, "w", encoding="utf-8", newline="") as handle:
@@ -1322,7 +2193,10 @@ def write_tsv(path: Path, rows: Sequence[dict], fieldnames: Sequence[str]) -> No
 def write_census_tables(
     out_dir: Path, census: CensusTables, closure: BiolinkClosure, prefix: str = "census"
 ) -> None:
-    """Write the leaf, rollup and wide tables for one labelling."""
+    """Write the leaf, rollup, wide and facet tables for one labelling."""
+    annotations = summarize_annotations(census)
+    extra_fields = ANNOTATION_FIELDS if annotations else []
+
     write_tsv(
         out_dir / f"{prefix}_leaf.tsv",
         [
@@ -1333,21 +2207,41 @@ def write_census_tables(
                 "edge_count": row.edge_count,
                 "distinct_subjects": row.distinct_subjects,
                 "distinct_objects": row.distinct_objects,
+                **annotations.get(
+                    (row.subject_category, row.predicate, row.object_category), {}
+                ),
             }
             for row in census.leaf_rows
         ],
-        LEAF_FIELDS,
+        LEAF_FIELDS + extra_fields,
     )
     write_tsv(out_dir / f"{prefix}_rollup.tsv", census.rollup_rows, ROLLUP_FIELDS)
-    write_tsv(
-        out_dir / f"{prefix}_wide.tsv", build_wide_rows(census, closure), WIDE_FIELDS
-    )
+
+    wide_rows = build_wide_rows(census, closure)
+    for row in wide_rows:
+        row.update(
+            annotations.get(
+                (row["subject_category"], row["predicate"], row["object_category"]), {}
+            )
+        )
+    write_tsv(out_dir / f"{prefix}_wide.tsv", wide_rows, WIDE_FIELDS + extra_fields)
+
+    for name, rows in census.facet_rows.items():
+        if not rows:
+            continue
+        filename = FACET_FILES.get(name, f"{name}.tsv")
+        write_tsv(
+            out_dir / (filename if prefix == "census" else f"{prefix}_{filename}"),
+            rows,
+            FACET_FIELDS.get(name, list(rows[0])),
+        )
 
 
 def print_summary(
     census: CensusTables,
     predicate_summary: Sequence[dict],
     category_rollup: Sequence[dict],
+    qualifier_summary: Sequence[dict],
     top: int,
 ) -> None:
     """Print the headline numbers the census exists to answer."""
@@ -1398,6 +2292,32 @@ def print_summary(
             f"{category_row['largest_member']} at "
             f"{category_row['largest_member_share']:.0%})"
         )
+
+    if qualifier_summary:
+        qualified = sum(
+            row["edge_count"] for row in qualifier_summary if row["is_leaf_value"]
+        )
+        print(
+            f"\nQualifier coverage: {qualified:,} qualifier assertions over "
+            f"{total:,} edges, {len({row['qualifier_type_id'] for row in qualifier_summary})} "
+            "qualifier types"
+        )
+        print(f"Top {top} qualifier values by edge count:")
+        for qualifier_row in sorted(
+            qualifier_summary, key=lambda row: -row["edge_count"]
+        )[:top]:
+            leaf = "" if qualifier_row["is_leaf_value"] else " (rollup)"
+            print(
+                f"  {qualifier_row['edge_count']:>12,}  "
+                f"{qualifier_row['qualifier_type_id']}="
+                f"{qualifier_row['qualifier_value']}{leaf} "
+                f"across {qualifier_row['n_triples']:,} triples"
+            )
+    else:
+        print(
+            "\nNo qualifiers found: every mechanism template that depends on "
+            "direction or aspect is unavailable on this graph."
+        )
     print()
 
 
@@ -1441,6 +2361,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Exclude mixin parents from ancestor chains "
         "(default: include them, matching BMT's query-time expansion)",
+    )
+    parser.add_argument(
+        "--skip-annotations",
+        action="store_true",
+        help="Skip the qualifier and source census (they are read from the "
+        "interned edge pools and are cheap, so this is rarely worth it)",
     )
     parser.add_argument(
         "--match-semantics",
@@ -1496,22 +2422,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     started = time.perf_counter()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    def closure_builder(predicates, categories):
+    def closure_builder(predicates, categories, qualifiers=()):
         return build_closure_map(
             predicates,
             categories,
+            qualifiers,
             version=args.biolink_version,
             schema=args.biolink_schema,
             include_mixins=not args.no_mixins,
         )
 
+    annotations = not args.skip_annotations
     if args.graph:
         arrays, closure = load_from_mmap(
-            args.graph, closure_builder, args.category_policy
+            args.graph, closure_builder, args.category_policy, annotations
         )
     else:
         arrays, closure = load_from_jsonl(
-            args.edges, args.nodes, closure_builder, args.category_policy
+            args.edges, args.nodes, closure_builder, args.category_policy, annotations
         )
 
     closure_path = args.out / "biolink_closure.json"
@@ -1519,14 +2447,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json.dump(closure.to_json(), handle, indent=2, sort_keys=True)
     logger.info("  wrote %s", closure_path)
 
+    facets = build_facets(arrays, closure)
     census = run_census(
         arrays,
         closure,
         arrays.node_category_codes,
         arrays.categories,
         semantics=args.match_semantics,
+        facets=facets,
     )
     write_census_tables(args.out, census, closure)
+
+    qualifier_summary = build_qualifier_summary(
+        arrays, facets, closure, arrays.node_category_codes, arrays.categories
+    )
+    if qualifier_summary:
+        write_tsv(
+            args.out / "qualifier_summary.tsv",
+            qualifier_summary,
+            list(qualifier_summary[0]),
+        )
 
     predicate_summary = build_predicate_summary(census, closure, arrays.num_edges)
     write_tsv(
@@ -1565,6 +2505,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             pinned_codes,
             pinned_categories,
             semantics=args.match_semantics,
+            facets=facets,
         )
         write_census_tables(args.out, pinned_census, closure, prefix="census_pinned")
 
@@ -1592,6 +2533,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "dangling_endpoints": arrays.dangling_endpoints,
         "occurring_triples": len(census.leaf_rows),
         "rollup_rows": len(census.rollup_rows),
+        "annotations": annotations,
+        "qualifier_signatures": len(arrays.qualifier_signatures),
+        "qualified_edges": qualified_edge_total(arrays),
+        "qualifier_types": sorted({type_id for type_id, _ in arrays.qualifier_pairs}),
+        "primary_sources": len(arrays.primary_sources),
+        "unmapped_qualifier_values": [
+            {"qualifier_type_id": type_id, "qualifier_value": value}
+            for type_id, value in closure.unmapped_qualifier_values
+        ],
         "edges_on_non_canonical_predicates": non_canonical_edges,
         "unmapped_predicates": list(closure.unmapped_predicates),
         "unmapped_categories": list(closure.unmapped_categories),
@@ -1605,7 +2555,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json.dump(manifest, handle, indent=2)
     logger.info("  wrote %s", manifest_path)
 
-    print_summary(census, predicate_summary, category_rollup, args.top)
+    print_summary(
+        census, predicate_summary, category_rollup, qualifier_summary, args.top
+    )
     if non_canonical_edges:
         offenders = sorted(
             {

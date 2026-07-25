@@ -14,6 +14,14 @@ from scripts.metagraph_census import (
     BiolinkClosure,
     CensusTables,
     GraphArrays,
+    build_facets,
+    build_qualifier_summary,
+    edge_qualifier_signature,
+    primary_source,
+    qualified_edge_total,
+    qualifier_signature,
+    render_signature,
+    summarize_annotations,
     _ancestors,
     _model_inverse,
     _predicate_metadata,
@@ -55,6 +63,28 @@ CATEGORY_ANCESTORS = {
     ),
     "biolink:Food": ("biolink:Food", "biolink:ChemicalEntity", "biolink:NamedThing"),
     "biolink:Disease": ("biolink:Disease", "biolink:NamedThing"),
+}
+
+# expression is_a abundance is_a activity_or_abundance, as in Biolink 4.3.2
+QUALIFIER_ANCESTORS = {
+    ("biolink:object_aspect_qualifier", "activity"): (
+        "activity",
+        "activity_or_abundance",
+    ),
+    ("biolink:object_aspect_qualifier", "abundance"): (
+        "abundance",
+        "activity_or_abundance",
+    ),
+    ("biolink:object_aspect_qualifier", "expression"): (
+        "expression",
+        "abundance",
+        "activity_or_abundance",
+    ),
+    ("biolink:object_aspect_qualifier", "activity_or_abundance"): (
+        "activity_or_abundance",
+    ),
+    ("biolink:object_direction_qualifier", "decreased"): ("decreased",),
+    ("biolink:object_direction_qualifier", "increased"): ("increased",),
 }
 
 PREDICATE_META = {
@@ -102,6 +132,11 @@ def closure():
         },
         unmapped_predicates=(),
         unmapped_categories=(),
+        qualifier_ancestors=QUALIFIER_ANCESTORS,
+        qualifier_enums={
+            "biolink:object_aspect_qualifier": "AspectEnum",
+            "biolink:object_direction_qualifier": "DirectionQualifierEnum",
+        },
     )
 
 
@@ -552,3 +587,337 @@ def test_census_tables_dataclass_defaults():
 
     assert census.semantics == "stored"
     assert census.forward_sources == {}
+
+
+# ---------------------------------------------------------------------------
+# Qualifier and source facets
+# ---------------------------------------------------------------------------
+
+
+DECREASES_ACTIVITY = (
+    ("biolink:object_aspect_qualifier", "activity"),
+    ("biolink:object_direction_qualifier", "decreased"),
+)
+INCREASES_EXPRESSION = (
+    ("biolink:object_aspect_qualifier", "expression"),
+    ("biolink:object_direction_qualifier", "increased"),
+)
+
+
+@pytest.fixture
+def qualified_arrays(arrays):
+    """The same six edges, with qualifiers and sources on some of them.
+
+    * edge 0 (Drug -ameliorates_condition-> Disease): decreases activity
+    * edge 1 (Drug -ameliorates_condition-> Disease): increases expression
+    * edge 2 (Drug -ameliorates_condition-> Disease): decreases activity
+    * edges 3-5: unqualified
+    """
+    signatures = [(), DECREASES_ACTIVITY, INCREASES_EXPRESSION]
+    arrays.qualifier_signatures = signatures
+    arrays.qualifier_codes = np.array([1, 2, 1, 0, 0, 0], dtype=np.int32)
+    arrays.primary_sources = ["infores:ctd", "infores:semmeddb"]
+    arrays.source_codes = np.array([0, 0, 0, 1, 1, 1], dtype=np.int32)
+    return arrays
+
+
+def test_qualifier_signature_normalizes_order_and_drops_partials():
+    assert qualifier_signature(
+        [
+            {"qualifier_type_id": "b", "qualifier_value": "2"},
+            {"qualifier_type_id": "a", "qualifier_value": "1"},
+            {"qualifier_type_id": "c"},
+        ]
+    ) == (("a", "1"), ("b", "2"))
+    assert qualifier_signature([]) == ()
+
+
+def test_edge_qualifier_signature_reads_raw_kgx_and_normalized():
+    raw = {
+        "object_aspect_qualifier": "activity",
+        "object_direction_qualifier": "decreased",
+        "predicate": "biolink:affects",
+    }
+    normalized = {
+        "qualifiers": [
+            {
+                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                "qualifier_value": "activity",
+            },
+            {
+                "qualifier_type_id": "biolink:object_direction_qualifier",
+                "qualifier_value": "decreased",
+            },
+        ]
+    }
+
+    assert edge_qualifier_signature(raw) == DECREASES_ACTIVITY
+    assert edge_qualifier_signature(normalized) == DECREASES_ACTIVITY
+    assert edge_qualifier_signature({"predicate": "biolink:affects"}) == ()
+
+
+def test_edge_qualifier_signature_prefixes_qualified_predicate():
+    assert edge_qualifier_signature({"qualified_predicate": "causes"}) == (
+        ("biolink:qualified_predicate", "biolink:causes"),
+    )
+
+
+@pytest.mark.parametrize(
+    "sources,expected",
+    [
+        (
+            [
+                {
+                    "resource_id": "infores:agg",
+                    "resource_role": "aggregator_knowledge_source",
+                },
+                {
+                    "resource_id": "infores:ctd",
+                    "resource_role": "primary_knowledge_source",
+                },
+            ],
+            "infores:ctd",
+        ),
+        (
+            [
+                {
+                    "resource_id": "infores:only",
+                    "resource_role": "aggregator_knowledge_source",
+                }
+            ],
+            "infores:only",
+        ),
+        ([], ""),
+    ],
+)
+def test_primary_source(sources, expected):
+    assert primary_source(sources) == expected
+
+
+def test_render_signature_round_trips_a_conjunction():
+    assert render_signature(DECREASES_ACTIVITY) == (
+        "biolink:object_aspect_qualifier=activity|"
+        "biolink:object_direction_qualifier=decreased"
+    )
+
+
+def test_qualified_edge_total_counts_edges_not_assertions(qualified_arrays):
+    assert qualified_edge_total(qualified_arrays) == 3
+    assert qualified_edge_total(arrays_without_qualifiers()) == 0
+
+
+def arrays_without_qualifiers():
+    return GraphArrays(
+        subjects=np.array([0], dtype=np.int32),
+        objects=np.array([0], dtype=np.int32),
+        predicate_codes=np.array([0], dtype=np.int32),
+        predicates=["biolink:affects"],
+        node_category_codes=np.array([0], dtype=np.int32),
+        categories=["biolink:Drug"],
+        num_nodes=1,
+        source="synthetic",
+    )
+
+
+def test_signature_facet_counts_conjunctions_not_marginals(qualified_arrays, closure):
+    facets = build_facets(qualified_arrays, closure)
+    census = run_census(
+        qualified_arrays,
+        closure,
+        qualified_arrays.node_category_codes,
+        qualified_arrays.categories,
+        facets=facets,
+    )
+
+    rows = {
+        (
+            row["subject_category"],
+            row["predicate"],
+            row["object_category"],
+            row["qualifier_signature"],
+        ): row
+        for row in census.facet_rows["qualifier_signature"]
+    }
+    key = (
+        "biolink:Drug",
+        "biolink:ameliorates_condition",
+        "biolink:Disease",
+        render_signature(DECREASES_ACTIVITY),
+    )
+    assert rows[key]["edge_count"] == 2
+    assert rows[key]["n_qualifiers"] == 2
+    assert rows[key]["share_of_triple"] == pytest.approx(2 / 3)
+    # The triple's third edge carries the other signature.
+    other = rows[
+        (
+            "biolink:Drug",
+            "biolink:ameliorates_condition",
+            "biolink:Disease",
+            render_signature(INCREASES_EXPRESSION),
+        )
+    ]
+    assert other["edge_count"] == 1
+
+
+def test_qualifier_values_roll_up_through_the_enum(qualified_arrays, closure):
+    facets = build_facets(qualified_arrays, closure)
+    census = run_census(
+        qualified_arrays,
+        closure,
+        qualified_arrays.node_category_codes,
+        qualified_arrays.categories,
+        facets=facets,
+    )
+
+    rows = {
+        (row["predicate"], row["qualifier"]): row
+        for row in census.facet_rows["qualifier"]
+        if row["subject_category"] == "biolink:Drug"
+        and row["object_category"] == "biolink:Disease"
+    }
+    leaf = rows[
+        ("biolink:ameliorates_condition", "biolink:object_aspect_qualifier=activity")
+    ]
+    assert leaf["edge_count"] == 2
+    assert leaf["is_leaf_value"] == 1
+
+    # expression rolls into abundance, and both into activity_or_abundance,
+    # so a qedge asking for activity_or_abundance matches all three edges.
+    rolled = rows[
+        (
+            "biolink:ameliorates_condition",
+            "biolink:object_aspect_qualifier=activity_or_abundance",
+        )
+    ]
+    assert rolled["edge_count"] == 3
+    assert rolled["is_leaf_value"] == 0
+
+    abundance = rows[
+        ("biolink:ameliorates_condition", "biolink:object_aspect_qualifier=abundance")
+    ]
+    assert abundance["edge_count"] == 1
+    assert abundance["is_leaf_value"] == 0
+
+
+def test_qualifier_facet_counted_at_ancestor_predicates_too(qualified_arrays, closure):
+    facets = build_facets(qualified_arrays, closure)
+    census = run_census(
+        qualified_arrays,
+        closure,
+        qualified_arrays.node_category_codes,
+        qualified_arrays.categories,
+        facets=facets,
+    )
+
+    # A template asks for affects + a direction, so coverage has to be known
+    # at the ancestor, not just at the leaf predicate.
+    rows = {
+        (row["predicate"], row["qualifier"]): row
+        for row in census.facet_rows["qualifier"]
+        if row["subject_category"] == "biolink:Drug"
+    }
+    assert (
+        rows[("biolink:affects", "biolink:object_direction_qualifier=decreased")][
+            "edge_count"
+        ]
+        == 2
+    )
+    assert (
+        rows[("biolink:treats", "biolink:object_direction_qualifier=increased")][
+            "edge_count"
+        ]
+        == 1
+    )
+
+
+def test_source_facet_splits_a_triple_by_provenance(qualified_arrays, closure):
+    facets = build_facets(qualified_arrays, closure)
+    census = run_census(
+        qualified_arrays,
+        closure,
+        qualified_arrays.node_category_codes,
+        qualified_arrays.categories,
+        facets=facets,
+    )
+
+    rows = {
+        (
+            row["subject_category"],
+            row["predicate"],
+            row["object_category"],
+            row["primary_source"],
+        ): row
+        for row in census.facet_rows["primary_source"]
+    }
+    drug_disease = ("biolink:Drug", "biolink:ameliorates_condition", "biolink:Disease")
+    assert rows[(*drug_disease, "infores:ctd")]["edge_count"] == 3
+    # Rolled up to related_to the same triple also picks up the treats edge,
+    # which came from a different source.
+    rolled = ("biolink:Drug", "biolink:related_to", "biolink:Disease")
+    assert rows[(*rolled, "infores:ctd")]["edge_count"] == 3
+    assert rows[(*rolled, "infores:semmeddb")]["edge_count"] == 1
+
+
+def test_annotation_summary_columns(qualified_arrays, closure):
+    facets = build_facets(qualified_arrays, closure)
+    census = run_census(
+        qualified_arrays,
+        closure,
+        qualified_arrays.node_category_codes,
+        qualified_arrays.categories,
+        facets=facets,
+    )
+
+    summary = summarize_annotations(census)
+    entry = summary[
+        ("biolink:Drug", "biolink:ameliorates_condition", "biolink:Disease")
+    ]
+    assert entry["qualified_edges"] == 3
+    assert entry["qualified_share"] == pytest.approx(1.0)
+    assert entry["n_qualifier_signatures"] == 2
+    assert entry["top_primary_source"] == "infores:ctd"
+    assert entry["top_primary_source_share"] == pytest.approx(1.0)
+
+
+def test_qualifier_summary_counts_each_edge_once_per_value(qualified_arrays, closure):
+    facets = build_facets(qualified_arrays, closure)
+    census = run_census(
+        qualified_arrays,
+        closure,
+        qualified_arrays.node_category_codes,
+        qualified_arrays.categories,
+        facets=facets,
+    )
+
+    rows = {
+        (row["qualifier_type_id"], row["qualifier_value"]): row
+        for row in build_qualifier_summary(
+            qualified_arrays,
+            facets,
+            closure,
+            qualified_arrays.node_category_codes,
+            qualified_arrays.categories,
+        )
+    }
+    assert rows[("biolink:object_aspect_qualifier", "activity")]["edge_count"] == 2
+    assert (
+        rows[("biolink:object_aspect_qualifier", "activity_or_abundance")]["edge_count"]
+        == 3
+    )
+    assert rows[("biolink:object_direction_qualifier", "decreased")]["n_triples"] == 1
+    assert rows[("biolink:object_aspect_qualifier", "activity")]["is_leaf_value"] == 1
+
+
+def test_facets_absent_when_graph_has_no_annotations(arrays, closure):
+    assert build_facets(arrays, closure) == []
+
+    census = run_census(arrays, closure, arrays.node_category_codes, arrays.categories)
+
+    assert census.facet_rows == {}
+    assert summarize_annotations(census) == {}
+    assert (
+        build_qualifier_summary(
+            arrays, [], closure, arrays.node_category_codes, arrays.categories
+        )
+        == []
+    )
