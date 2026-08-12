@@ -131,32 +131,59 @@ def _mock_neighbors(prefix, n, cat_mix):
     for k in range(n):
         cat_name = cat_mix[k % len(cat_mix)]
         nid = f"MOCK:{prefix}-{k:04d}"
-        out.append({
-            "id": nid,
-            "name": f"{cat_name} {prefix} {k:03d}",
-            "categories": [_MOCK_CATS[cat_name]],
-        })
+        out.append(
+            {
+                "id": nid,
+                "name": f"{cat_name} {prefix} {k:03d}",
+                "categories": [_MOCK_CATS[cat_name]],
+            }
+        )
     return out
 
 
 def mock_expand(curie):
     groups = [
-        {"key": "out|biolink:affects", "predicate": "biolink:affects", "direction": "out",
-         "neighbors": _mock_neighbors("aff", 64, ["Gene", "Protein"])},
-        {"key": "out|biolink:related_to", "predicate": "biolink:related_to", "direction": "out",
-         "neighbors": _mock_neighbors("rel", 320, ["Chemical", "Disease", "Gene"])},
-        {"key": "out|biolink:treats", "predicate": "biolink:treats", "direction": "out",
-         "neighbors": _mock_neighbors("trt", 11, ["Disease"])},
-        {"key": "in|biolink:has_participant", "predicate": "biolink:has_participant", "direction": "in",
-         "neighbors": _mock_neighbors("par", 18, ["Pathway", "Protein"])},
-        {"key": "in|biolink:has_phenotype", "predicate": "biolink:has_phenotype", "direction": "in",
-         "neighbors": _mock_neighbors("phe", 7, ["Phenotype"])},
+        {
+            "key": "out|biolink:affects",
+            "predicate": "biolink:affects",
+            "direction": "out",
+            "neighbors": _mock_neighbors("aff", 64, ["Gene", "Protein"]),
+        },
+        {
+            "key": "out|biolink:related_to",
+            "predicate": "biolink:related_to",
+            "direction": "out",
+            "neighbors": _mock_neighbors("rel", 320, ["Chemical", "Disease", "Gene"]),
+        },
+        {
+            "key": "out|biolink:treats",
+            "predicate": "biolink:treats",
+            "direction": "out",
+            "neighbors": _mock_neighbors("trt", 11, ["Disease"]),
+        },
+        {
+            "key": "in|biolink:has_participant",
+            "predicate": "biolink:has_participant",
+            "direction": "in",
+            "neighbors": _mock_neighbors("par", 18, ["Pathway", "Protein"]),
+        },
+        {
+            "key": "in|biolink:has_phenotype",
+            "predicate": "biolink:has_phenotype",
+            "direction": "in",
+            "neighbors": _mock_neighbors("phe", 7, ["Phenotype"]),
+        },
     ]
     for g in groups:
         g["count"] = len(g["neighbors"])
     groups.sort(key=lambda g: g["count"], reverse=True)
-    return {"curie": curie, "name": f"Mock node {curie}",
-            "categories": ["biolink:ChemicalEntity"], "groups": groups, "errors": []}
+    return {
+        "curie": curie,
+        "name": f"Mock node {curie}",
+        "categories": ["biolink:ChemicalEntity"],
+        "groups": groups,
+        "errors": [],
+    }
 
 
 def mock_search(q):
@@ -366,7 +393,9 @@ def search_names(q, limit=10):
                 continue
             syns = item.get("synonyms") or []
             label = item.get("label") or (syns[0] if syns else curie)
-            out.append({"curie": curie, "label": label, "types": item.get("types") or []})
+            out.append(
+                {"curie": curie, "label": label, "types": item.get("types") or []}
+            )
     elif isinstance(data, dict):
         # older shape: {curie: [synonyms...]}
         for curie, syns in data.items():
@@ -390,11 +419,14 @@ def wiki_summary(name):
 
     if MOCK:
         result = {
-            "found": True, "title": name, "description": "synthetic entry",
+            "found": True,
+            "title": name,
+            "description": "synthetic entry",
             "extract": f"This is a synthetic Wikipedia-style summary for “{name}”, "
-                       f"shown in offline mock mode so the card layout can be tested "
-                       f"without network access.",
-            "url": "https://en.wikipedia.org/", "type": "standard",
+            f"shown in offline mock mode so the card layout can be tested "
+            f"without network access.",
+            "url": "https://en.wikipedia.org/",
+            "type": "standard",
         }
         with _wiki_lock:
             _wiki_cache[name] = result
@@ -405,12 +437,23 @@ def wiki_summary(name):
     try:
         # 1) find the best-matching article title
         sp = urllib.parse.urlencode(
-            {"action": "query", "list": "search", "srsearch": name,
-             "srlimit": "1", "format": "json"}
+            {
+                "action": "query",
+                "list": "search",
+                "srsearch": name,
+                "srlimit": "1",
+                "format": "json",
+            }
         )
-        req = urllib.request.Request(f"https://en.wikipedia.org/w/api.php?{sp}", headers=headers)
+        req = urllib.request.Request(
+            f"https://en.wikipedia.org/w/api.php?{sp}", headers=headers
+        )
         with urllib.request.urlopen(req, timeout=min(TIMEOUT, 15)) as resp:
-            hits = json.loads(resp.read().decode("utf-8")).get("query", {}).get("search", [])
+            hits = (
+                json.loads(resp.read().decode("utf-8"))
+                .get("query", {})
+                .get("search", [])
+            )
         if not hits:
             result = {"found": False}
         else:
@@ -420,8 +463,9 @@ def wiki_summary(name):
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=min(TIMEOUT, 15)) as resp:
                 s = json.loads(resp.read().decode("utf-8"))
-            page = (((s.get("content_urls") or {}).get("desktop") or {}).get("page")
-                    or f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title)}")
+            page = ((s.get("content_urls") or {}).get("desktop") or {}).get(
+                "page"
+            ) or f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title)}"
             result = {
                 "found": True,
                 "title": s.get("title") or title,
