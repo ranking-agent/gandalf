@@ -10,7 +10,7 @@ from gandalf.search.node_filters import register_node_filter
 def _get_information_content(graph, node_idx):
     attrs = graph.get_node_property(node_idx, "attributes", [])
     for attr in attrs:
-        if attr.get("original_attribute_name") == "information_content":
+        if attr.get("attribute_type_id") == "biolink:information_content":
             return attr.get("value")
     return None
 
