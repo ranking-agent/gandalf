@@ -279,7 +279,6 @@ def _extract_node_attributes(node_data):
             {
                 "attribute_type_id": f"biolink:{field}",
                 "value": value,
-                "original_attribute_name": field,
             }
         )
     return attributes
