@@ -51,7 +51,7 @@ def test_normalize_edge_shape():
     assert edge["sources"][0]["resource_id"] == settings.infores
     # publications became an attribute
     assert any(
-        a["original_attribute_name"] == "publications" for a in edge["attributes"]
+        a["attribute_type_id"] == "biolink:publications" for a in edge["attributes"]
     )
     validate_normalized_edge(edge)
 
@@ -125,7 +125,7 @@ def test_normalize_node_renames_category_to_categories():
     assert node["categories"] == ["biolink:Drug"]
     assert "category" not in node
     assert any(
-        a["original_attribute_name"] == "information_content"
+        a["attribute_type_id"] == "biolink:information_content"
         for a in node["attributes"]
     )
     validate_normalized_node(node)

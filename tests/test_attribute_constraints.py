@@ -468,7 +468,7 @@ class TestNodeConstraintsIntegration:
                             "categories": ["biolink:Gene"],
                             "constraints": [
                                 {
-                                    "id": "information_content",
+                                    "id": "biolink:information_content",
                                     "name": "information content",
                                     "operator": ">",
                                     "value": 90,
@@ -509,7 +509,7 @@ class TestNodeConstraintsIntegration:
                             "categories": ["biolink:Gene"],
                             "constraints": [
                                 {
-                                    "id": "information_content",
+                                    "id": "biolink:information_content",
                                     "name": "information content",
                                     "operator": "<",
                                     "value": 85,
@@ -548,7 +548,7 @@ class TestNodeConstraintsIntegration:
                             "categories": ["biolink:Gene"],
                             "constraints": [
                                 {
-                                    "id": "information_content",
+                                    "id": "biolink:information_content",
                                     "name": "IC",
                                     "operator": ">",
                                     "value": 90,
@@ -620,13 +620,13 @@ class TestNodeConstraintsIntegration:
                             "categories": ["biolink:Gene"],
                             "constraints": [
                                 {
-                                    "id": "information_content",
+                                    "id": "biolink:information_content",
                                     "name": "IC",
                                     "operator": ">",
                                     "value": 85,
                                 },
                                 {
-                                    "id": "information_content",
+                                    "id": "biolink:information_content",
                                     "name": "IC",
                                     "operator": "<",
                                     "value": 93,
@@ -663,7 +663,7 @@ class TestNodeConstraintsIntegration:
                             "categories": ["biolink:Gene"],
                             "constraints": [
                                 {
-                                    "id": "information_content",
+                                    "id": "biolink:information_content",
                                     "name": "IC",
                                     "operator": ">",
                                     "value": 999,
@@ -917,7 +917,7 @@ class TestEdgeAttributeConstraintsIntegration:
                             "categories": ["biolink:Gene"],
                             "constraints": [
                                 {
-                                    "id": "information_content",
+                                    "id": "biolink:information_content",
                                     "name": "IC",
                                     "operator": ">",
                                     "value": 90,
@@ -1042,7 +1042,7 @@ class TestEdgeAttributeConstraintsIntegration:
         pubs = [
             a
             for a in treats_edges[0].get("attributes", [])
-            if a.get("original_attribute_name") == "publications"
+            if a.get("attribute_type_id") == "biolink:publications"
         ]
         assert len(pubs) == 1
         assert "PMID:55555555" in pubs[0]["value"]
@@ -1352,7 +1352,7 @@ class TestNumericEdgeConstraints:
                             "categories": ["biolink:Gene"],
                             "constraints": [
                                 {
-                                    "id": "information_content",
+                                    "id": "biolink:information_content",
                                     "name": "IC",
                                     "operator": ">",
                                     "value": 90,

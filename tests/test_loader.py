@@ -102,11 +102,11 @@ class TestNodeProperties:
         ic_attrs = [
             a
             for a in attributes
-            if a["original_attribute_name"] == "information_content"
+            if a["attribute_type_id"] == "biolink:information_content"
         ]
         assert len(ic_attrs) == 1
         assert ic_attrs[0]["value"] == pytest.approx(78.2)
-        assert ic_attrs[0]["original_attribute_name"] == "information_content"
+        assert ic_attrs[0]["attribute_type_id"] == "biolink:information_content"
 
     def test_node_attributes_contain_equivalent_identifiers(self, graph):
         """Should store equivalent_identifiers as a TRAPI attribute."""
@@ -115,11 +115,11 @@ class TestNodeProperties:
         eq_attrs = [
             a
             for a in attributes
-            if a["original_attribute_name"] == "equivalent_identifiers"
+            if a["attribute_type_id"] == "biolink:equivalent_identifiers"
         ]
         assert len(eq_attrs) == 1
         assert "DRUGBANK:DB00331" in eq_attrs[0]["value"]
-        assert eq_attrs[0]["original_attribute_name"] == "equivalent_identifiers"
+        assert eq_attrs[0]["attribute_type_id"] == "biolink:equivalent_identifiers"
 
     def test_node_id_not_in_properties(self, graph):
         """Node id should be omitted from properties (it's the key in the KG)."""
@@ -128,7 +128,7 @@ class TestNodeProperties:
         assert "id" not in props
         # Also should not appear in attributes
         attributes = props.get("attributes", [])
-        id_attrs = [a for a in attributes if a["original_attribute_name"] == "id"]
+        id_attrs = [a for a in attributes if a["attribute_type_id"] == "id"]
         assert len(id_attrs) == 0
 
 
@@ -186,7 +186,7 @@ class TestEdgeProperties:
         ]
         assert len(pub_attrs) == 1
         assert "PMID:23456789" in pub_attrs[0]["value"]
-        assert pub_attrs[0]["original_attribute_name"] == "publications"
+        assert pub_attrs[0]["attribute_type_id"] == "biolink:publications"
 
 
 class TestGraphStructure:
@@ -580,9 +580,7 @@ class TestQualifierExtraction:
         by_type = {q["qualifier_type_id"]: q["qualifier_value"] for q in quals}
         assert by_type.get("biolink:disease_context_qualifier") == "Orphanet:397590"
         # And it must not also appear as an attribute.
-        attr_names = {
-            a["original_attribute_name"] for a in _extract_attributes(self.EDGE)
-        }
+        attr_names = {a["attribute_type_id"] for a in _extract_attributes(self.EDGE)}
         assert "disease_context_qualifier" not in attr_names
 
     def test_qualifiers_extracted_with_biolink_prefix(self):
@@ -633,15 +631,15 @@ class TestQualifierExtraction:
     def test_qualifiers_not_in_attributes(self):
         """Qualifier fields must NOT leak into edge attributes."""
         attributes = _extract_attributes(self.EDGE)
-        attr_names = {a["original_attribute_name"] for a in attributes}
+        attr_names = {a["attribute_type_id"] for a in attributes}
         assert self.EXPECTED_QUALIFIERS.isdisjoint(attr_names)
 
     def test_non_qualifier_fields_remain_attributes(self):
         """Genuine attribute fields should still be extracted as attributes."""
         attributes = _extract_attributes(self.EDGE)
-        attr_names = {a["original_attribute_name"] for a in attributes}
-        assert "p_value" in attr_names
-        assert "publications" in attr_names
+        attr_names = {a["attribute_type_id"] for a in attributes}
+        assert "biolink:p_value" in attr_names
+        assert "biolink:publications" in attr_names
 
 
 class TestMetaKgListValuedQualifier:
