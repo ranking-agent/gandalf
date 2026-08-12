@@ -580,9 +580,7 @@ class TestQualifierExtraction:
         by_type = {q["qualifier_type_id"]: q["qualifier_value"] for q in quals}
         assert by_type.get("biolink:disease_context_qualifier") == "Orphanet:397590"
         # And it must not also appear as an attribute.
-        attr_names = {
-            a["attribute_type_id"] for a in _extract_attributes(self.EDGE)
-        }
+        attr_names = {a["attribute_type_id"] for a in _extract_attributes(self.EDGE)}
         assert "disease_context_qualifier" not in attr_names
 
     def test_qualifiers_extracted_with_biolink_prefix(self):
