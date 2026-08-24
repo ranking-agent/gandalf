@@ -35,7 +35,11 @@ class SetInterpretation(str, Enum):
 class LogEntry(BaseModel):
     """A single TRAPI log entry conforming to the Translator Reasoner API spec."""
 
-    timestamp: str = Field(..., description="ISO 8601 timestamp (UTC with 'Z' tag)")
+    timestamp: str = Field(
+        ...,
+        description="ISO 8601 timestamp, UTC with millisecond precision and an "
+        "explicit offset (e.g. 2026-08-24T19:42:44.661+00:00)",
+    )
     level: Optional[str] = Field(None, description="Log severity level")
     code: Optional[str] = Field(None, description="Standardized short code")
     message: str = Field(..., description="Human-readable log message")

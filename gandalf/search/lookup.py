@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from collections import defaultdict
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 from gandalf.biolink import make_toolkit
 from gandalf.config import settings
-from gandalf.logging_config import TRAPILogCollector
+from gandalf.logging_config import TRAPILogCollector, make_query_logger
 from gandalf.profiler import (
     NullProfiler,
     Profiler,
@@ -73,17 +73,23 @@ def lookup(
     t_start = time.perf_counter()
 
     # Collect TRAPI-spec log entries during query execution.
-    # Temporarily adjust the logger level if requested so that the collector
-    # captures entries at the desired verbosity.
-    log_collector = TRAPILogCollector()
-    gandalf_logger = logging.getLogger("gandalf")
-    prev_level = gandalf_logger.level
+    #
+    # The collector is attached to a logger owned by this query, not to the
+    # shared "gandalf" logger.  Queries run concurrently in the worker's thread
+    # pool, and a handler on the shared logger receives records from *every*
+    # in-flight query -- so one caller's TRAPI logs would contain another's.
+    # For the same reason the verbosity is set on this logger rather than on
+    # the shared one, whose level is global state that concurrent queries would
+    # race to save and restore.  Records still propagate to "gandalf" for
+    # stderr output.
+    query_logger = make_query_logger(uuid.uuid4().hex[:8])
     if log_level is not None:
-        gandalf_logger.setLevel(log_level)
-    gandalf_logger.addHandler(log_collector)
+        query_logger.setLevel(log_level)
+    log_collector = TRAPILogCollector()
+    query_logger.addHandler(log_collector)
 
     # Start GC monitoring to track collection events
-    gc_monitor = GCMonitor()
+    gc_monitor = GCMonitor(logger=query_logger)
     gc_monitor.start()
 
     # Disable GC for the entire query to prevent expensive Gen 2 collections
@@ -122,6 +128,7 @@ def lookup(
                 gc_monitor,
                 node_filters=node_filters,
                 dehydrated=dehydrated,
+                logger=query_logger,
             )
             logs = log_collector.get_logs()
             if profile:
@@ -131,8 +138,8 @@ def lookup(
     finally:
         if lmdb_originals is not None:
             restore_lmdb_hook(getattr(graph, "lmdb_store", None), lmdb_originals)
-        gandalf_logger.removeHandler(log_collector)
-        gandalf_logger.setLevel(prev_level)
+        # No handler to detach and no level to restore: query_logger is private
+        # to this call and is discarded with it.
         gc_monitor.stop()
         if gc_was_enabled_at_start:
             gc.enable()
@@ -148,8 +155,16 @@ def _lookup_inner(
     gc_monitor,
     node_filters=None,
     dehydrated=None,
+    logger: Optional[logging.Logger] = None,
 ):
-    """Inner implementation of lookup with all the core logic."""
+    """Inner implementation of lookup with all the core logic.
+
+    Args:
+        logger: Logger to emit this query's records to.  ``lookup`` passes the
+            query's own logger so that entries reach that query's TRAPI logs
+            and no other's.  Defaults to the module logger.
+    """
+    logger = logger if logger is not None else logging.getLogger(__name__)
     logger.info("Starting lookup.")
     prof = current_profiler()
 
@@ -188,7 +203,7 @@ def _lookup_inner(
 
     # Store inverse predicates for each edge (needed for path reconstruction)
     # edge_id -> set of inverse predicates
-    edge_inverse_preds = {}
+    edge_inverse_preds: dict[str, set] = {}
 
     # Track original query graph structure for path reconstruction
     original_edges = list(query_graph["edges"].keys())
@@ -238,7 +253,11 @@ def _lookup_inner(
         if next_edge.get("_subclass"):
             subclass_edge_depth = next_edge.get("_subclass_depth", 1)
             edge_matches = query_subclass_edge(
-                graph, start_node_idxes, end_node_idxes, subclass_edge_depth
+                graph,
+                start_node_idxes,
+                end_node_idxes,
+                subclass_edge_depth,
+                logger=logger,
             )
             edge_inverse_preds[next_edge_id] = set()
         else:
@@ -295,6 +314,7 @@ def _lookup_inner(
                 attribute_constraints=edge_attribute_constraints,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
+                logger=logger,
             )
 
         # Store results for this edge
@@ -353,6 +373,7 @@ def _lookup_inner(
             edge_inverse_preds=edge_inverse_preds,
             dehydrated=dehydrated,
             bmt=bmt,
+            logger=logger,
         )
 
     num_paths = len(path_data) if path_data is not None else 0
@@ -396,6 +417,7 @@ def _lookup_inner(
                 gc_monitor,
                 node_set_interp=node_set_interp,
                 original_query_graph=original_query_graph,
+                logger=logger,
             )
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
@@ -445,8 +467,15 @@ def _build_response(
     gc_monitor,
     node_set_interp=None,
     original_query_graph=None,
+    logger: Optional[logging.Logger] = None,
 ):
-    """Build the TRAPI response from path data."""
+    """Build the TRAPI response from path data.
+
+    Args:
+        logger: Logger to emit this query's records to.  Defaults to the
+            module logger.
+    """
+    logger = logger if logger is not None else logging.getLogger(__name__)
     # Extract arrays and metadata from PathArrays for efficient access
     pa_nodes = path_data.paths_nodes
     pa_preds = path_data.paths_preds
@@ -516,7 +545,7 @@ def _build_response(
     # for 5M paths).
     # For ALL/COLLATE nodes, exclude them from the key so paths with
     # different bindings for those nodes merge into the same group.
-    node_binding_groups = defaultdict(list)
+    node_binding_groups: dict[tuple, list[int]] = defaultdict(list)
 
     for path_idx in range(num_paths):
         key_pairs = []
@@ -590,7 +619,7 @@ def _build_response(
     for node_key, path_indices in node_binding_groups.items():
         first_idx = path_indices[0]
 
-        result = {
+        result: dict[str, Any] = {
             "node_bindings": {},
             "analyses": [
                 {
@@ -663,7 +692,7 @@ def _build_response(
         # Edge dicts are created only for unique (subj, pred, obj,
         # qualifiers, sources) combinations -- not for every path.
         edge_bindings_by_qedge = defaultdict(list)
-        edge_seen_keys = defaultdict(set)
+        edge_seen_keys: dict[str, set] = defaultdict(set)
 
         for path_idx in path_indices:
             for col in range(pa_num_edges):
@@ -690,7 +719,7 @@ def _build_response(
 
                 # Compute dedup key
                 if lightweight or fwd_eidx < 0:
-                    edge_key = (subj_id, predicate, obj_id, (), ())
+                    edge_key: tuple = (subj_id, predicate, obj_id, (), ())
                 else:
                     quals = graph.edge_properties.get_qualifiers(fwd_eidx)
                     quals_key = tuple(

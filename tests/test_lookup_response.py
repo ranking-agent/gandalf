@@ -1,6 +1,7 @@
 """Tests for TRAPI response structure and specific edge queries."""
 
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 
 from tests.search_fixtures import graph  # noqa: F401
 
@@ -431,12 +432,24 @@ class TestTRAPILogs:
             assert "message" in entry
 
     def test_log_timestamps_are_iso8601(self, graph, bmt):
-        """Log timestamps should be valid ISO 8601 UTC strings."""
+        """Log timestamps are ISO 8601 in UTC with an explicit offset.
+
+        e.g. ``2026-08-24T19:42:44.661234+00:00`` -- an explicit ``+00:00``
+        rather than a 'Z' tag.  The fractional-seconds part is optional:
+        ``datetime.isoformat`` omits it entirely when microsecond is 0, so a
+        consumer must parse rather than assume a fixed width.
+        """
         response = lookup(graph, self._make_query(), bmt=bmt, log_level="DEBUG")
+        assert len(response["logs"]) > 0
         for entry in response["logs"]:
             ts = entry["timestamp"]
-            assert ts.endswith("Z")
-            datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+            assert ts.endswith("+00:00"), ts
+            assert re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?\+00:00", ts
+            ), ts
+            parsed = datetime.fromisoformat(ts)
+            assert parsed.tzinfo is not None
+            assert parsed.utcoffset() == timedelta(0)
 
     def test_log_levels_are_valid(self, graph, bmt):
         """Log levels should be one of the TRAPI-spec values or None."""

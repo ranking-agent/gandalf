@@ -4,16 +4,21 @@ import gc
 import logging
 import time
 from contextlib import contextmanager
-
-logger = logging.getLogger(__name__)
+from typing import Optional
 
 
 class GCMonitor:
     """Monitor garbage collection events and log timing information."""
 
-    def __init__(self):
-        self.gc_events = []
+    def __init__(self, logger: Optional[logging.Logger] = None):
+        """Args:
+        logger: Logger to report slow collections to. Pass a query's own
+            logger so the report lands in that query's TRAPI logs; defaults
+            to this module's logger.
+        """
+        self.gc_events: list[dict] = []
         self._start_time = None
+        self._logger = logger if logger is not None else logging.getLogger(__name__)
 
     def _gc_callback(self, phase, info):
         """Callback invoked by gc module on collection events."""
@@ -31,7 +36,7 @@ class GCMonitor:
                 }
             )
             if duration > 0.1:  # Only log slow GC (>100ms)
-                logger.debug(
+                self._logger.debug(
                     "  [GC] Gen %s: %.2fs, collected %s objects",
                     generation,
                     duration,

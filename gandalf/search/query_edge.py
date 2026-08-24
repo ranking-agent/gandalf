@@ -12,7 +12,13 @@ from gandalf.search.qualifiers import edge_matches_qualifier_constraints
 logger = logging.getLogger(__name__)
 
 
-def query_subclass_edge(graph, start_idxes, end_idxes, depth):
+def query_subclass_edge(
+    graph,
+    start_idxes,
+    end_idxes,
+    depth,
+    logger: Optional[logging.Logger] = None,
+):
     """Traverse ``subclass_of`` edges to find subclass relationships.
 
     The synthetic subclass edge connects a child node (subject) to a
@@ -28,12 +34,15 @@ def query_subclass_edge(graph, start_idxes, end_idxes, depth):
         start_idxes: Indices for the child (subject) side, or None
         end_idxes: Indices for the superclass (object) side
         depth: Maximum subclass_of hops
+        logger: Logger to emit this query's records to.  Defaults to the
+            module logger.
 
     Returns:
         List of (child_idx, "biolink:subclass_of", parent_idx, False, fwd_edge_idx) tuples.
         The depth-0 self-match is included with fwd_edge_idx=-1 (no real edge).
     """
-    matches = []
+    logger = logger if logger is not None else logging.getLogger(__name__)
+    matches: list[tuple] = []
 
     # Resolve the subclass_of predicate index once
     subclass_pred = "biolink:subclass_of"
@@ -93,6 +102,7 @@ def query_edge(
     attribute_constraints: Optional[list] = None,
     start_node_constraints: Optional[list] = None,
     end_node_constraints: Optional[list] = None,
+    logger: Optional[logging.Logger] = None,
 ):
     """Query for a single edge with given constraints.
 
@@ -119,12 +129,16 @@ def query_edge(
             filtering the start (subject) node by its attributes.
         end_node_constraints: List of TRAPI AttributeConstraint dicts for
             filtering the end (object) node by its attributes.
+        logger: Logger to emit this query's records to.  ``lookup`` passes the
+            query's own logger so that entries reach that query's TRAPI logs
+            and no other's.  Defaults to the module logger.
 
     Returns:
         List of (subject_idx, predicate, object_idx, via_inverse, fwd_edge_idx) tuples where
         via_inverse indicates if the edge was found through inverse/symmetric lookup and
         fwd_edge_idx is the forward-CSR array position (unique per physical edge).
     """
+    logger = logger if logger is not None else logging.getLogger(__name__)
     if node_filters is None:
         node_filters = []
     matches = []
@@ -180,6 +194,7 @@ def query_edge(
                 attribute_constraints=attribute_constraints,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
+                logger=logger,
             )
 
     # Case 2: Start unpinned, end pinned
@@ -206,6 +221,7 @@ def query_edge(
                 attribute_constraints=attribute_constraints,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
+                logger=logger,
             )
 
     # Case 3: Both pinned
@@ -232,6 +248,7 @@ def query_edge(
                 attribute_constraints=attribute_constraints,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
+                logger=logger,
             )
 
     else:
@@ -254,8 +271,10 @@ def _query_forward(
     attribute_constraints=None,
     start_node_constraints=None,
     end_node_constraints=None,
+    logger: Optional[logging.Logger] = None,
 ):
     """Case 1: Start pinned, end unpinned - forward search from pinned nodes."""
+    logger = logger if logger is not None else logging.getLogger(__name__)
     logger.debug("  Forward search from %s pinned nodes", len(start_idxes))
 
     t0 = time.perf_counter()
@@ -402,8 +421,10 @@ def _query_backward(
     attribute_constraints=None,
     start_node_constraints=None,
     end_node_constraints=None,
+    logger: Optional[logging.Logger] = None,
 ):
     """Case 2: Start unpinned, end pinned - backward search from pinned nodes."""
+    logger = logger if logger is not None else logging.getLogger(__name__)
     logger.debug("  Backward search from %s pinned nodes", len(end_idxes))
 
     t0 = time.perf_counter()
@@ -554,8 +575,10 @@ def _query_both_pinned(
     attribute_constraints=None,
     start_node_constraints=None,
     end_node_constraints=None,
+    logger: Optional[logging.Logger] = None,
 ):
     """Case 3: Both ends pinned - intersection search."""
+    logger = logger if logger is not None else logging.getLogger(__name__)
     logger.debug(
         "  Both ends pinned: %s start, %s end", len(start_idxes), len(end_idxes)
     )

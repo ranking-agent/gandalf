@@ -24,9 +24,9 @@ from __future__ import annotations
 import logging
 import time
 import traceback
-from datetime import datetime, timezone
 from typing import Any
 
+from gandalf.logging_config import log_timestamp
 from gandalf.profiler import current_profiler
 from gandalf.search.response_annotators import build_response_annotators
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def _log_entry(level: str, message: str, code: str | None = None) -> dict:
     entry = {
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": log_timestamp(),
         "level": level,
         "code": code,
         "message": message,

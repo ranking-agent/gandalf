@@ -5,6 +5,7 @@ import logging
 import sys
 from contextvars import ContextVar
 from datetime import datetime, timezone
+from typing import Optional
 
 # Context variable for per-request ID propagation.
 request_id_var: ContextVar[str] = ContextVar("request_id", default="")
@@ -31,6 +32,28 @@ class _JSONFormatter(logging.Formatter):
 _TRAPI_LEVELS = {"ERROR", "WARNING", "INFO", "DEBUG"}
 
 
+def log_timestamp() -> str:
+    """Return the current UTC time as a TRAPI ``LogEntry`` timestamp.
+
+    ISO 8601 with an explicit UTC offset, e.g.
+    ``2026-08-24T19:42:44.661+00:00``.  Every producer of a TRAPI log entry
+    uses this so a response's ``logs`` are uniformly formatted and ordering
+    is resolvable below the second.
+
+    Returns:
+        ISO 8601 timestamp string in UTC.
+
+    Example:
+        >>> ts = log_timestamp()
+        >>> ts.endswith("+00:00")
+        True
+        >>> from datetime import timezone
+        >>> datetime.fromisoformat(ts).tzinfo == timezone.utc
+        True
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
 class TRAPILogCollector(logging.Handler):
     """A logging handler that collects log entries as TRAPI-spec LogEntry dicts.
 
@@ -46,7 +69,7 @@ class TRAPILogCollector(logging.Handler):
         level_name = record.levelname
         self._entries.append(
             {
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "timestamp": log_timestamp(),
                 "level": level_name if level_name in _TRAPI_LEVELS else None,
                 "message": record.getMessage(),
             }
@@ -55,6 +78,47 @@ class TRAPILogCollector(logging.Handler):
     def get_logs(self) -> list[dict]:
         """Return collected log entries in chronological order."""
         return list(self._entries)
+
+
+def make_query_logger(
+    query_id: str, parent: Optional[logging.Logger] = None
+) -> logging.Logger:
+    """Create a logger private to a single query.
+
+    A :class:`TRAPILogCollector` attached to the shared ``gandalf`` logger would
+    also receive records from every other query running concurrently in the same
+    worker process, because ``logging.getLogger`` returns a process-global
+    singleton and handlers fire for every record that propagates through it.
+    Attaching the collector to a logger owned by one query instead keeps each
+    query's TRAPI ``logs`` to its own records.
+
+    The logger is constructed directly rather than via ``logging.getLogger`` so
+    that it is *not* interned in the global logger registry -- that registry
+    never evicts, so a name-per-query would leak an entry for the lifetime of
+    the process. This logger is garbage-collected along with the request.
+
+    Records still propagate to *parent* (the shared ``gandalf`` logger by
+    default), so stderr output is unaffected.
+
+    Args:
+        query_id: Short identifier distinguishing this query's logger.
+        parent: Logger to propagate records to. Defaults to ``gandalf``.
+
+    Returns:
+        A logger whose level and handlers are private to a single query.
+
+    Example:
+        >>> log = make_query_logger("abc123")
+        >>> log.name
+        'gandalf.query.abc123'
+        >>> log.parent.name
+        'gandalf'
+        >>> "gandalf.query.abc123" in logging.root.manager.loggerDict
+        False
+    """
+    log = logging.Logger(f"gandalf.query.{query_id}")
+    log.parent = parent if parent is not None else logging.getLogger("gandalf")
+    return log
 
 
 def configure_logging(level=logging.INFO, fmt: str = "text"):
