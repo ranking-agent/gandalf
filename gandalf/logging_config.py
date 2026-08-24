@@ -35,7 +35,7 @@ _TRAPI_LEVELS = {"ERROR", "WARNING", "INFO", "DEBUG"}
 def log_timestamp() -> str:
     """Return the current UTC time as a TRAPI ``LogEntry`` timestamp.
 
-    ISO 8601 with millisecond precision and an explicit UTC offset, e.g.
+    ISO 8601 with an explicit UTC offset, e.g.
     ``2026-08-24T19:42:44.661+00:00``.  Every producer of a TRAPI log entry
     uses this so a response's ``logs`` are uniformly formatted and ordering
     is resolvable below the second.
@@ -51,7 +51,7 @@ def log_timestamp() -> str:
         >>> datetime.fromisoformat(ts).tzinfo == timezone.utc
         True
     """
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(timezone.utc).isoformat()
 
 
 class TRAPILogCollector(logging.Handler):
