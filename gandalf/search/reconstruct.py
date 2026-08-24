@@ -5,6 +5,7 @@ import logging
 import time
 from collections import defaultdict
 from datetime import datetime
+from typing import Any, Optional
 
 import numpy as np
 
@@ -62,6 +63,7 @@ def reconstruct_paths(
     edge_inverse_preds=None,
     dehydrated=None,
     bmt=None,
+    logger: Optional[logging.Logger] = None,
 ):
     """Reconstruct complete paths by iteratively joining edge results.
 
@@ -74,10 +76,14 @@ def reconstruct_paths(
         edge_results: Dict of edge_id -> [(subj_idx, pred, obj_idx, via_inverse, fwd_edge_idx), ...]
         edge_order: List of edge IDs in original query order
         edge_inverse_preds: (Deprecated, kept for compatibility) Dict of edge_id -> set of inverse predicates
+        logger: Logger to emit this query's records to.  ``lookup`` passes the
+            query's own logger so that entries reach that query's TRAPI logs
+            and no other's.  Defaults to the module logger.
 
     Returns:
         PathArrays object, or None if no paths found
     """
+    logger = logger if logger is not None else logging.getLogger(__name__)
     if len(edge_order) == 0:
         return None
 
@@ -95,8 +101,8 @@ def reconstruct_paths(
     qedge_to_col = {eid: i for i, eid in enumerate(join_order)}
 
     # Build predicate vocabulary: predicate_string -> int
-    predicate_to_idx = {}
-    idx_to_predicate = []
+    predicate_to_idx: dict[str, int] = {}
+    idx_to_predicate: list[str] = []
 
     def get_pred_idx(pred):
         if pred not in predicate_to_idx:
@@ -205,6 +211,7 @@ def reconstruct_paths(
                     max_nodes,
                     num_edges,
                     get_pred_idx,
+                    logger=logger,
                 )
             )
 
@@ -225,6 +232,7 @@ def reconstruct_paths(
                     max_nodes,
                     num_edges,
                     get_pred_idx,
+                    logger=logger,
                 )
             )
 
@@ -245,6 +253,7 @@ def reconstruct_paths(
                     max_nodes,
                     num_edges,
                     get_pred_idx,
+                    logger=logger,
                 )
             )
 
@@ -271,6 +280,7 @@ def reconstruct_paths(
                     max_nodes,
                     num_edges,
                     get_pred_idx,
+                    logger=logger,
                 )
             )
 
@@ -379,12 +389,18 @@ def reconstruct_paths(
     )
 
     if DEBUG_PATHS_TSV:
-        _dump_debug_tsv(path_arrays, query_graph, join_order, graph)
+        _dump_debug_tsv(path_arrays, query_graph, join_order, graph, logger=logger)
 
     return path_arrays
 
 
-def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
+def _dump_debug_tsv(
+    path_arrays,
+    query_graph,
+    join_order,
+    graph,
+    logger: Optional[logging.Logger] = None,
+):
     """Write all reconstructed paths to a TSV file for debugging.
 
     Each row is one path.  Columns are dynamically generated based on the
@@ -398,6 +414,7 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
         ...
         nN_qnode, nN_curie, nN_name, nN_category
     """
+    logger = logger if logger is not None else logging.getLogger(__name__)
     # Determine output path
     tsv_path = DEBUG_PATHS_TSV
     if tsv_path.lower() in ("1", "true", "yes"):
@@ -420,7 +437,7 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
     # Build ordered sequence of (node_qid, edge_qid) pairs along the path.
     # Walk edges in join_order, tracking which nodes we've visited, to produce
     # a linear node-edge-node-edge-...-node sequence.
-    ordered_nodes = []  # qnode ids in path order
+    ordered_nodes: list[str] = []  # qnode ids in path order
     ordered_edges = []  # qedge ids in path order (between consecutive nodes)
 
     visited_nodes = set()
@@ -502,7 +519,7 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
             writer.writerow(header)
 
             for path_idx in range(num_paths):
-                row = [path_idx]
+                row: list[Any] = [path_idx]
                 for i, qnode_id in enumerate(ordered_nodes):
                     col = pa.qnode_to_col.get(qnode_id)
                     if col is not None:
@@ -524,7 +541,7 @@ def _dump_debug_tsv(path_arrays, query_graph, join_order, graph):
                         if ecol is not None:
                             pred_idx = int(pa.paths_preds[path_idx, ecol])
                             predicate = pa.idx_to_predicate[pred_idx]
-                            via_inv = bool(pa.paths_via_inverse[path_idx, ecol])
+                            via_inv: Any = bool(pa.paths_via_inverse[path_idx, ecol])
                             fwd_eidx = int(pa.paths_fwd_edge_idx[path_idx, ecol])
                         else:
                             predicate = ""
@@ -584,8 +601,10 @@ def _join_both_in_paths(
     max_nodes,
     num_edges,
     get_pred_idx,
+    logger: Optional[logging.Logger] = None,
 ):
     """Join when both nodes already in path - validate consistency."""
+    logger = logger if logger is not None else logging.getLogger(__name__)
     edge_index = defaultdict(list)
     for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
         edge_index[(subj_idx, obj_idx)].append(
@@ -650,8 +669,10 @@ def _join_on_subject(
     max_nodes,
     num_edges,
     get_pred_idx,
+    logger: Optional[logging.Logger] = None,
 ):
     """Join on subject node, add object node."""
+    logger = logger if logger is not None else logging.getLogger(__name__)
     edge_index = defaultdict(list)
     for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
         edge_index[subj_idx].append(
@@ -711,8 +732,10 @@ def _join_on_object(
     max_nodes,
     num_edges,
     get_pred_idx,
+    logger: Optional[logging.Logger] = None,
 ):
     """Join on object node, add subject node."""
+    logger = logger if logger is not None else logging.getLogger(__name__)
     edge_index = defaultdict(list)
     for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
         edge_index[obj_idx].append(
@@ -772,8 +795,10 @@ def _join_cartesian(
     max_nodes,
     num_edges,
     get_pred_idx,
+    logger: Optional[logging.Logger] = None,
 ):
     """Neither node in paths - cartesian product."""
+    logger = logger if logger is not None else logging.getLogger(__name__)
     output_count = len(paths_nodes) * len(edge_data)
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
         logger.warning(
