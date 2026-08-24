@@ -17,8 +17,9 @@ import logging
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
 from typing import Any, Iterator, Optional, Union
+
+from gandalf.logging_config import log_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ class Profiler:
         ``message`` is a JSON blob of the full tree.
         """
         self.finalize()
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts = log_timestamp()
         entries: list[dict] = []
 
         def _walk(node: dict, path: tuple[str, ...]) -> None:

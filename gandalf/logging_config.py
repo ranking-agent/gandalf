@@ -32,6 +32,28 @@ class _JSONFormatter(logging.Formatter):
 _TRAPI_LEVELS = {"ERROR", "WARNING", "INFO", "DEBUG"}
 
 
+def log_timestamp() -> str:
+    """Return the current UTC time as a TRAPI ``LogEntry`` timestamp.
+
+    ISO 8601 with millisecond precision and an explicit UTC offset, e.g.
+    ``2026-08-24T19:42:44.661+00:00``.  Every producer of a TRAPI log entry
+    uses this so a response's ``logs`` are uniformly formatted and ordering
+    is resolvable below the second.
+
+    Returns:
+        ISO 8601 timestamp string in UTC.
+
+    Example:
+        >>> ts = log_timestamp()
+        >>> ts.endswith("+00:00")
+        True
+        >>> from datetime import timezone
+        >>> datetime.fromisoformat(ts).tzinfo == timezone.utc
+        True
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
 class TRAPILogCollector(logging.Handler):
     """A logging handler that collects log entries as TRAPI-spec LogEntry dicts.
 
@@ -47,7 +69,7 @@ class TRAPILogCollector(logging.Handler):
         level_name = record.levelname
         self._entries.append(
             {
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "timestamp": log_timestamp(),
                 "level": level_name if level_name in _TRAPI_LEVELS else None,
                 "message": record.getMessage(),
             }
