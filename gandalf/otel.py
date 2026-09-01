@@ -99,6 +99,9 @@ def init_otel(app) -> None:
         app,
         tracer_provider=provider,
         excluded_urls="docs,openapi.json",
+        # receive/send spans are asgi events that are parts of a larger communication
+        # they are more so noisy than useful, exclude them from traces
+        exclude_spans=["receive", "send"],
     )
     _provider = provider
     _inject = _real_inject
