@@ -11,6 +11,7 @@ A high-performance Python library and [Translator](https://ncats.nih.gov/transla
 - **O(1) property lookups** via hash indexing
 - **Predicate filtering** to reduce path explosion
 - **Qualifier filtering** for advanced edge constraints (aspect, direction, mechanism)
+- **Attribute constraints** on edges and nodes, including filtering edges by specific PubMed IDs
 - **Subclass expansion** via Biolink Model Toolkit with configurable depth
 - **Batch property enrichment** — enrich only final paths, not intermediate results
 - **Diagnostic tools** to understand path counts and explosion
@@ -100,6 +101,41 @@ response = lookup(
 
 print(f"Found {len(response['message']['results'])} paths")
 ```
+
+### Filtering edges by attribute (including PubMed IDs)
+
+Any query edge accepts TRAPI `attribute_constraints`, evaluated against the
+edge's attributes; query nodes accept the same shape under `constraints`.
+Multiple constraints are ANDed, and `"not": true` negates one.
+
+Attribute values are often lists — `publications` above all — and every
+operator except `===` is applied to each member, so `==` reads as "contains".
+Filtering an edge down to specific PubMed IDs is therefore plain equality:
+
+```python
+"edges": {
+    "e0": {
+        "subject": "n0",
+        "object": "n1",
+        "predicates": ["biolink:affects"],
+        "attribute_constraints": [
+            {
+                "id": "biolink:publications",
+                "name": "publications",
+                "operator": "==",
+                "value": ["PMID:23456789", "PMID:11111111"],
+            }
+        ],
+    }
+}
+```
+
+Only edges citing at least one of those PMIDs survive. A list `value` means
+"any of"; a single string constrains to one publication. Publication
+identifiers are compared canonically, so `PMID:23456789`, `pubmed:23456789`,
+`https://pubmed.ncbi.nlm.nih.gov/23456789` and the bare `23456789` all select
+the same article — unlike the `matches` operator, which does a substring
+regex and would also accept `PMID:234567890`.
 
 ## Architecture
 

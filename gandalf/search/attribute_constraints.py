@@ -5,6 +5,22 @@ values.  Each constraint specifies an attribute_type_id (matched via the
 ``id`` field), an operator, and a value.  Multiple constraints use AND
 logic — all must be satisfied.
 
+Attribute values in a knowledge graph are frequently lists — ``publications``
+is the canonical example.  Every operator except ``===`` is evaluated against
+each member of such a list, so ``==`` reads as "contains".  That makes
+filtering an edge down to specific PubMed IDs a plain equality constraint::
+
+    {
+        "id": "biolink:publications",
+        "operator": "==",
+        "value": ["PMID:23456789", "PMID:11111111"],
+    }
+
+keeps only edges whose publications include at least one of those PMIDs.
+Publication identifiers are compared canonically, so ``PMID:23456789``,
+``pubmed:23456789``, ``https://pubmed.ncbi.nlm.nih.gov/23456789`` and the bare
+``23456789`` all select the same article.
+
 See the TRAPI spec ``AttributeConstraint`` schema for full details.
 """
 
@@ -94,8 +110,14 @@ def _apply_operator(operator, attr_value, constraint_value):
     if isinstance(constraint_value, list) and operator != "===":
         return any(_apply_operator(operator, attr_value, cv) for cv in constraint_value)
 
+    # A list-valued attribute (publications, for example) is satisfied when ANY
+    # of its members satisfies the operator, so `==` reads as "contains".
+    # `===` is again excluded so it can compare the list as a whole.
+    if isinstance(attr_value, (list, tuple)) and operator != "===":
+        return any(_apply_operator(operator, av, constraint_value) for av in attr_value)
+
     if operator == "==":
-        return attr_value == constraint_value
+        return _equals(attr_value, constraint_value)
 
     elif operator == "===":
         # Strict equality: type, value, and for lists also order
@@ -114,6 +136,72 @@ def _apply_operator(operator, attr_value, constraint_value):
         return _matches_regex(attr_value, constraint_value)
 
     return False
+
+
+def _equals(attr_value, constraint_value):
+    """Equality comparison that understands publication identifiers.
+
+    Falls back to canonical publication comparison when plain equality fails,
+    so the different spellings of a PubMed ID found across knowledge sources
+    (``PMID:123``, ``pubmed:123``, a pubmed.ncbi.nlm.nih.gov URL) all match one
+    another and the bare accession ``123``.
+    """
+    if attr_value == constraint_value:
+        return True
+    return _publications_equal(attr_value, constraint_value)
+
+
+# The spellings of a PubMed reference seen in KGX edge attributes.
+_PUBMED_CURIE = re.compile(r"^\s*(?:pmid|pubmed)\s*:\s*(\d+)\s*$", re.IGNORECASE)
+_PUBMED_URL = re.compile(
+    r"^\s*https?://(?:www\.)?(?:pubmed\.ncbi\.nlm\.nih\.gov|ncbi\.nlm\.nih\.gov/pubmed)"
+    r"/(\d+)/?\s*$",
+    re.IGNORECASE,
+)
+_BARE_ACCESSION = re.compile(r"^\s*(\d+)\s*$")
+
+
+def _publications_equal(attr_value, constraint_value):
+    """Compare two values as PubMed identifiers.
+
+    At least one side must be an *explicit* PubMed identifier — a ``PMID:``/
+    ``pubmed:`` CURIE or a PubMed URL.  A bare accession only counts as a
+    PubMed ID opposite such a side, which keeps this out of the way of
+    ordinary numeric attributes.
+
+    Returns:
+        True if both values denote the same PubMed article.
+    """
+    attr_explicit = _explicit_pubmed_accession(attr_value)
+    constraint_explicit = _explicit_pubmed_accession(constraint_value)
+    if attr_explicit is None and constraint_explicit is None:
+        return False
+
+    attr_accession = (
+        attr_explicit if attr_explicit is not None else _bare_accession(attr_value)
+    )
+    constraint_accession = (
+        constraint_explicit
+        if constraint_explicit is not None
+        else _bare_accession(constraint_value)
+    )
+    return attr_accession is not None and attr_accession == constraint_accession
+
+
+def _explicit_pubmed_accession(value):
+    """Return the accession digits of an explicit PubMed identifier, else None."""
+    if not isinstance(value, str):
+        return None
+    match = _PUBMED_CURIE.match(value) or _PUBMED_URL.match(value)
+    return match.group(1) if match else None
+
+
+def _bare_accession(value):
+    """Return the digits of a bare accession (``"123"`` or ``123``), else None."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    match = _BARE_ACCESSION.match(str(value))
+    return match.group(1) if match else None
 
 
 def _compare_numeric(attr_value, constraint_value, direction):
