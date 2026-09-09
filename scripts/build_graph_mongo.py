@@ -23,6 +23,7 @@ from pathlib import Path
 
 from gandalf import build_graph_from_mongo
 from gandalf.logging_config import configure_logging
+from gandalf.node_annotations import DEFAULT_ANNOTATION_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,23 @@ Examples:
     )
 
     parser.add_argument(
+        "--annotate",
+        action="store_true",
+        help=(
+            "Annotate nodes via the Translator Annotator (biothings_annotator) "
+            "and store the results as 'biothings_annotations' node attributes. "
+            "Requires network access and `pip install -r requirements-annotate.txt`"
+        ),
+    )
+
+    parser.add_argument(
+        "--annotate-batch-size",
+        type=int,
+        default=DEFAULT_ANNOTATION_BATCH_SIZE,
+        help="CURIEs per Annotator request (default: %(default)s)",
+    )
+
+    parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable debug logging"
     )
 
@@ -77,12 +95,17 @@ Examples:
         args.edges_collection,
     )
 
+    if args.annotate:
+        logger.info("Node annotation enabled (biothings_annotator)")
+
     try:
         graph = build_graph_from_mongo(
             mongo_uri=args.mongo_uri,
             db=args.db,
             nodes_collection=args.nodes_collection,
             edges_collection=args.edges_collection,
+            annotate_nodes=args.annotate,
+            annotation_batch_size=args.annotate_batch_size,
         )
 
         # Save graph

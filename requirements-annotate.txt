@@ -1,0 +1,11 @@
+# Optional dependencies for build-time node annotation
+# (gandalf-build --annotate).
+#
+# biothings_annotator is the Translator Annotator service package.  It is not
+# published to PyPI, so it is installed straight from its repository rather
+# than declared as a project extra in pyproject.toml -- PyPI rejects
+# distributions whose metadata contains direct-URL dependencies, which would
+# break the publish workflow.
+#
+#   pip install -r requirements-annotate.txt
+biothings_annotator @ git+https://github.com/biothings/biothings_annotator.git

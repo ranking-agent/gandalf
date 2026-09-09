@@ -52,6 +52,13 @@ gandalf-build-mongo = "scripts.build_graph_mongo:main"
 gandalf-query = "scripts.query_paths:main"
 gandalf-diagnose = "scripts.diagnose:main"
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: exercises a live external service (deselected by default; run with `python -m pytest -m integration`)",
+]
+# External-service tests are opt-in so the default suite stays hermetic.
+addopts = "-m 'not integration'"
+
 [tool.mypy]
 warn_return_any = true
 warn_unused_configs = true
