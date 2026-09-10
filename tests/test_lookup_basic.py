@@ -42,11 +42,11 @@ class TestLookupOneHop:
         result = results[0]
         assert "n0" in result["node_bindings"]
         assert "n1" in result["node_bindings"]
-        assert result["node_bindings"]["n0"][0]["id"] == "CHEBI:6801"
-        assert result["node_bindings"]["n1"][0]["id"] == "MONDO:0005148"
+        assert result["node_bindings"]["n0"]["ids"][0] == "CHEBI:6801"
+        assert result["node_bindings"]["n1"]["ids"][0] == "MONDO:0005148"
 
         # Edge bindings should contain all 4 matching edges
-        edge_bindings = result["analyses"][0]["edge_bindings"]["e0"]
+        edge_bindings = result["analyses"][0]["edge_bindings"]["e0"]["ids"]
         assert len(edge_bindings) == 4
 
     def test_one_hop_pinned_start_unpinned_end(self, graph, bmt):
@@ -75,7 +75,7 @@ class TestLookupOneHop:
         # CHEBI:6801 (Metformin) affects 4 genes:
         # NCBIGene:5468 (PPARG), NCBIGene:3643 (INSR), NCBIGene:2645 (GCK), NCBIGene:7124 (TNF)
         assert len(results) == 4
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {
             "NCBIGene:5468",
             "NCBIGene:3643",
@@ -136,7 +136,7 @@ class TestLookupOneHop:
         assert len(results) == 3
 
         # Collect all gene IDs from results
-        gene_ids = {r["node_bindings"]["n0"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n0"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643", "NCBIGene:2645"}
 
 
@@ -177,12 +177,12 @@ class TestLookupTwoHop:
         # CHEBI:6801 --affects--> NCBIGene:3643 (INSR) --gene_associated--> MONDO:0005148
         # CHEBI:6801 --affects--> NCBIGene:2645 (GCK) --gene_associated--> MONDO:0005148
         assert len(results) == 3
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643", "NCBIGene:2645"}
         # All paths should start with Metformin and end with Type 2 Diabetes
         for result in results:
-            assert result["node_bindings"]["n0"][0]["id"] == "CHEBI:6801"
-            assert result["node_bindings"]["n2"][0]["id"] == "MONDO:0005148"
+            assert result["node_bindings"]["n0"]["ids"][0] == "CHEBI:6801"
+            assert result["node_bindings"]["n2"]["ids"][0] == "MONDO:0005148"
 
     def test_two_hop_multiple_intermediate_nodes(self, graph, bmt):
         """Two-hop query with multiple valid intermediate nodes."""
@@ -217,7 +217,7 @@ class TestLookupTwoHop:
         # NCBIGene:2645 (GCK) gene_associated_with_condition MONDO:0005148
         # This is a query where n0 appears in both edges
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:2645"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:2645"
 
 
 class TestLookupEdgeCases:

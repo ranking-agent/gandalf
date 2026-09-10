@@ -5,7 +5,7 @@ for the Swagger UI documentation.
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -94,11 +94,84 @@ class QNode(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class AllowDenyBehavior(str, Enum):
+    """Whether an AllowDenyConstraint's values are required or forbidden."""
+
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+
+
+class AllowDenyConstraint(BaseModel):
+    """A TRAPI list of values that bound edges must, or must not, carry.
+
+    ALLOW is satisfied when at least one listed value is present (OR); DENY
+    when none of them is.
+    """
+
+    behavior: AllowDenyBehavior = Field(
+        ..., description="Whether the values are required (ALLOW) or forbidden (DENY)"
+    )
+    values: List[str] = Field(
+        ..., min_length=1, description="The values to allow or deny"
+    )
+
+    model_config = ConfigDict(extra="allow")
+
+
+class SourcesConstraint(AllowDenyConstraint):
+    """An ``AllowDenyConstraint`` over the infores CURIEs in an edge's sources."""
+
+    primary_only: Optional[bool] = Field(
+        False,
+        description="When true, the constraint applies only to the source with "
+        "the primary_knowledge_source role rather than to every source on the "
+        "edge.",
+    )
+
+
+class QEdgeConstraints(BaseModel):
+    """Constraints a QEdge places on the edges bound to it (TRAPI 2.0).
+
+    Replaces TRAPI 1.x's separate ``qualifier_constraints`` and
+    ``attribute_constraints`` lists, and adds allow/deny constraints on an
+    edge's ``knowledge_level``, ``agent_type`` and sources.  Every constraint
+    given must hold (AND).
+    """
+
+    knowledge_level: Optional[AllowDenyConstraint] = Field(
+        None,
+        description="Allow or deny Biolink knowledge_level values on bound "
+        "edges (e.g. 'knowledge_assertion', 'prediction')",
+    )
+    agent_type: Optional[AllowDenyConstraint] = Field(
+        None,
+        description="Allow or deny Biolink agent_type values on bound edges "
+        "(e.g. 'manual_agent', 'text_mining_agent')",
+    )
+    sources: Optional[SourcesConstraint] = Field(
+        None,
+        description="Allow or deny infores CURIEs in the sources of bound edges",
+    )
+    qualifiers: Optional[List[Dict[str, str]]] = Field(
+        None,
+        description="QualifierSetConstraints, each a mapping of "
+        "qualifier_type_id to the required qualifier_value. AND within a "
+        "mapping, OR between mappings.",
+    )
+    attributes: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="AttributeConstraints applied to bound edges; all must "
+        "be satisfied (AND)",
+    )
+
+    model_config = ConfigDict(extra="allow")
+
+
 class QEdge(BaseModel):
     """An edge in the TRAPI query graph.
 
     Connects two nodes (``subject`` → ``object``) with optional predicate
-    and qualifier filters.
+    filters and a ``constraints`` object.
     """
 
     subject: str = Field(..., description="Key of the subject node in the query graph")
@@ -107,11 +180,15 @@ class QEdge(BaseModel):
         None,
         description="Biolink predicates to filter edges " "(e.g. 'biolink:treats')",
     )
-    qualifier_constraints: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Qualifier constraints for edge filtering"
+    knowledge_type: Optional[str] = Field(
+        None,
+        description="'lookup' (the default when absent) or 'inferred'. Only "
+        "'lookup' is supported.",
     )
-    attribute_constraints: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Attribute constraints for edge filtering"
+    constraints: Optional[QEdgeConstraints] = Field(
+        None,
+        description="Constraints on the edges bound to this QEdge: "
+        "knowledge_level, agent_type, sources, qualifiers, attributes.",
     )
 
     model_config = ConfigDict(extra="allow")
@@ -124,10 +201,11 @@ class QPathConstraint(BaseModel):
     subject and object endpoints (e.g. by biolink category).
     """
 
-    intermediate_categories: Optional[List[str]] = Field(
+    required_intermediate_categories: Optional[List[str]] = Field(
         None,
         description="Biolink categories that must appear at intermediate "
-        "nodes along the path (e.g. 'biolink:Gene')",
+        "nodes along the path (e.g. 'biolink:Gene'). Each path returned must "
+        "contain at least one node of each category listed.",
     )
 
     model_config = ConfigDict(extra="allow")
@@ -267,16 +345,17 @@ _QUERY_EXAMPLE_QUALIFIERS: dict = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:affects"],
-                    "qualifier_constraints": [
-                        {
-                            "qualifier_set": [
-                                {
-                                    "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                    "qualifier_value": "activity",
-                                }
-                            ]
-                        }
-                    ],
+                    "constraints": {
+                        "qualifiers": [{"biolink:object_aspect_qualifier": "activity"}],
+                        "knowledge_level": {
+                            "behavior": "ALLOW",
+                            "values": ["knowledge_assertion"],
+                        },
+                        "agent_type": {
+                            "behavior": "DENY",
+                            "values": ["text_mining_agent"],
+                        },
+                    },
                 }
             },
         }
@@ -295,7 +374,9 @@ _QUERY_EXAMPLE_PATHFINDER: dict = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:related_to"],
-                    "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
+                    "constraints": [
+                        {"required_intermediate_categories": ["biolink:Gene"]}
+                    ],
                 }
             },
         }
@@ -318,8 +399,9 @@ _QUERY_EXAMPLE_WITH_PARAMS: dict = {
             },
         }
     },
-    "log_level": "DEBUG",
     "parameters": {
+        "log_level": "DEBUG",
+        "timeout": 60,
         "subclass": True,
         "subclass_depth": 1,
         "dehydrated": False,
@@ -330,11 +412,35 @@ _QUERY_EXAMPLE_WITH_PARAMS: dict = {
 
 
 class QueryParameters(BaseModel):
-    """Nested request configuration for ``/query`` and ``/asyncquery``.
+    """TRAPI ``parameters`` for ``/query`` and ``/asyncquery``.
+
+    TRAPI 2.0 defines this object for "query-time parameters that don't affect
+    the semantics of the query or intended workflow, but may affect overall
+    behavior of the server", and requires the server to repeat it back in the
+    Response.  ``timeout``, ``log_level`` and ``bypass_cache`` are the standard
+    TRAPI members (``log_level`` and ``bypass_cache`` moved here from the
+    request's top level in 2.0); the rest are gandalf's own, carried under the
+    schema's ``additionalProperties``.
 
     All fields are optional; absent fields fall back to server defaults.
     """
 
+    timeout: Optional[float] = Field(
+        None,
+        description="Seconds the client is willing to wait. When exceeded the "
+        "query stops and the Response reports a 'Timeout' status. A negative "
+        "value disables the server's default timeout. A value below what this "
+        "server can answer within is refused with HTTP 409.",
+    )
+    log_level: Optional[LogLevel] = Field(
+        None, description="The least critical level of logs to return"
+    )
+    bypass_cache: Optional[bool] = Field(
+        None,
+        description="Request fresh information from sources rather than cached "
+        "information. Gandalf answers from its own graph and holds no query "
+        "cache, so this is accepted and has no effect.",
+    )
     subclass: Optional[bool] = Field(
         None, description="Enable biolink subclass inference (default True)"
     )
@@ -365,7 +471,11 @@ class QueryParameters(BaseModel):
         "dict) is the plugin's per-request settings. Unknown keys are ignored.",
     )
 
-    model_config = ConfigDict(extra="allow")
+    # ``use_enum_values`` keeps log_level a plain string after validation.  The
+    # server passes it to ``logging.setLevel``, which rejects anything that is
+    # not exactly ``str``, and echoes the whole object back in the Response,
+    # where an enum member would not survive JSON serialization.
+    model_config = ConfigDict(extra="allow", use_enum_values=True)
 
 
 class TRAPIQuery(BaseModel):
@@ -399,17 +509,16 @@ class TRAPIQuery(BaseModel):
     message: Message = Field(
         ..., description="TRAPI message containing the query graph"
     )
-    log_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = (
-        Field(
-            None,
-            description="Set logging level for this request "
-            "(e.g. 'DEBUG' to see serialization timings)",
-        )
+    submitter: Optional[str] = Field(
+        None,
+        description="Any string self-identifying the submitter of this query, "
+        "to aid in tracking the source of queries.",
     )
     parameters: Optional[QueryParameters] = Field(
         None,
-        description="Nested request configuration: subclass, subclass_depth, "
-        "dehydrated, rehydrate, filter_config, annotator_config.",
+        description="TRAPI query parameters: timeout, log_level, bypass_cache, "
+        "plus gandalf's subclass, subclass_depth, dehydrated, rehydrate, "
+        "filter_config and annotator_config.",
     )
 
     model_config = ConfigDict(
@@ -457,20 +566,19 @@ class AsyncTRAPIQuery(BaseModel):
         None,
         description="Workflow operations (defaults to [{'id': 'lookup'}])",
     )
+    submitter: Optional[str] = Field(
+        None,
+        description="Any string self-identifying the submitter of this query, "
+        "to aid in tracking the source of queries.",
+    )
     set_interpretation: Optional[str] = Field(
         None, description="Set interpretation mode (only 'BATCH' is supported)"
     )
-    log_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = (
-        Field(
-            None,
-            description="Set logging level for this request "
-            "(e.g. 'DEBUG' to see detailed query processing)",
-        )
-    )
     parameters: Optional[QueryParameters] = Field(
         None,
-        description="Nested request configuration: subclass, subclass_depth, "
-        "dehydrated, rehydrate, filter_config, annotator_config.",
+        description="TRAPI query parameters: timeout, log_level, bypass_cache, "
+        "plus gandalf's subclass, subclass_depth, dehydrated, rehydrate, "
+        "filter_config and annotator_config.",
     )
 
     model_config = ConfigDict(
@@ -511,12 +619,38 @@ class TRAPIResponse(BaseModel):
     """Response from ``POST /query``.
 
     Contains the original query graph, a knowledge graph subgraph with
-    matching nodes and edges, and result bindings.
+    matching nodes and edges, result bindings, and the TRAPI 2.0 Response
+    metadata (including an echo of the request's ``parameters``, which the
+    spec requires the server to repeat).
     """
 
     message: Dict[str, Any] = Field(
         ...,
         description="TRAPI message with query_graph, knowledge_graph, and results",
+    )
+    status: Optional[str] = Field(
+        None,
+        description="Short status code for the outcome, e.g. 'Success' or " "'Timeout'",
+    )
+    description: Optional[str] = Field(
+        None, description="Brief human-readable description of the outcome"
+    )
+    logs: Optional[List[LogEntry]] = Field(
+        None, description="Log entries produced while answering the query"
+    )
+    parameters: Optional[QueryParameters] = Field(
+        None,
+        description="The query parameters this service received, repeated as "
+        "TRAPI 2.0 requires",
+    )
+    schema_version: Optional[str] = Field(
+        None, description="Version of the TRAPI schema used in this document"
+    )
+    biolink_version: Optional[str] = Field(
+        None, description="Version of the Biolink Model used in this document"
+    )
+    data_release_versions: Optional[Dict[str, str]] = Field(
+        None, description="Versions of the data sources used in this document"
     )
 
     model_config = ConfigDict(extra="allow")

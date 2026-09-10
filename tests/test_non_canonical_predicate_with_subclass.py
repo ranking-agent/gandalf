@@ -71,9 +71,9 @@ class TestNonCanonicalPredicateWithSubclass:
         result = results[0]
 
         # Verify node bindings are in the correct query-graph positions
-        assert result["node_bindings"]["n0"][0]["id"] == "MONDO:0005148"
-        assert result["node_bindings"]["n1"][0]["id"] == "CHEBI:6801"
-        assert result["node_bindings"]["n2"][0]["id"] == "MONDO:0005015"
+        assert result["node_bindings"]["n0"]["ids"][0] == "MONDO:0005148"
+        assert result["node_bindings"]["n1"]["ids"][0] == "CHEBI:6801"
+        assert result["node_bindings"]["n2"]["ids"][0] == "MONDO:0005015"
 
         # Verify edge bindings exist for both edges
         edge_bindings = result["analyses"][0]["edge_bindings"]
@@ -193,9 +193,9 @@ class TestNonCanonicalPredicateWithSubclass:
         result = results[0]
 
         # Verify correct node ordering
-        assert result["node_bindings"]["n0"][0]["id"] == "HP:0001943"
-        assert result["node_bindings"]["n1"][0]["id"] == "MONDO:0005148"
-        assert result["node_bindings"]["n2"][0]["id"] == "MONDO:0005015"
+        assert result["node_bindings"]["n0"]["ids"][0] == "HP:0001943"
+        assert result["node_bindings"]["n1"]["ids"][0] == "MONDO:0005148"
+        assert result["node_bindings"]["n2"]["ids"][0] == "MONDO:0005015"
 
         # Verify both edges are bound
         edge_bindings = result["analyses"][0]["edge_bindings"]
@@ -237,10 +237,10 @@ class TestNonCanonicalPredicateWithSubclass:
 
         # Verify n0 is always the parent (queried node)
         for result in results:
-            assert result["node_bindings"]["n0"][0]["id"] == "MONDO:0005015"
+            assert result["node_bindings"]["n0"]["ids"][0] == "MONDO:0005015"
 
         # MONDO:0005148 should be among the child nodes found
-        child_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        child_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert "MONDO:0005148" in child_ids
 
     def test_non_canonical_with_subclass_expansion(self, graph, bmt):
@@ -281,8 +281,8 @@ class TestNonCanonicalPredicateWithSubclass:
 
         # Node bindings should reference the queried IDs
         for result in results:
-            assert result["node_bindings"]["n0"][0]["id"] == "MONDO:0005015"
-            assert result["node_bindings"]["n1"][0]["id"] == "CHEBI:6801"
+            assert result["node_bindings"]["n0"]["ids"][0] == "MONDO:0005015"
+            assert result["node_bindings"]["n1"]["ids"][0] == "CHEBI:6801"
 
         # KG edges should exist and endpoints should be in KG nodes
         kg_nodes = set(response["message"]["knowledge_graph"]["nodes"].keys())

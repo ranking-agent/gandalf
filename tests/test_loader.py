@@ -11,8 +11,9 @@ from gandalf.normalize import (
     _extract_qualifiers,
     _extract_attributes,
     _get_qualifier_fields,
+    normalize_edge,
 )
-from gandalf.graph import CSRGraph
+from gandalf.graph import NOT_PROVIDED, CSRGraph, GraphFormatError
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 NODES_FILE = os.path.join(FIXTURES_DIR, "nodes.jsonl")
@@ -74,6 +75,70 @@ class TestBuildGraphFromJsonl:
         ]
         for pred in expected_predicates:
             assert pred in graph.predicate_to_idx
+
+
+class TestKnowledgeLevelAndAgentType:
+    """TRAPI 2.0 requires both on every Edge, so the loader always stores them."""
+
+    def test_stored_from_the_kgx_record(self, graph):
+        assert graph.edge_properties.get_kl_at(0) == (
+            "knowledge_assertion",
+            "manual_agent",
+        )
+
+    def test_not_carried_as_edge_attributes(self):
+        """They are Edge properties in 2.0, so they leave the attribute list."""
+        raw = {
+            "subject": "A:1",
+            "object": "B:1",
+            "predicate": "biolink:related_to",
+            "knowledge_level": "prediction",
+            "agent_type": "computational_model",
+            "primary_knowledge_source": "infores:test",
+        }
+        edge = normalize_edge(raw)
+        assert edge["knowledge_level"] == "prediction"
+        assert edge["agent_type"] == "computational_model"
+        assert not [
+            a
+            for a in edge["attributes"]
+            if a["attribute_type_id"]
+            in ("biolink:knowledge_level", "biolink:agent_type")
+        ]
+
+    def test_absent_values_become_not_provided(self, tmp_path):
+        """A KGX record predating the requirement still yields a valid Edge."""
+        nodes = tmp_path / "nodes.jsonl"
+        edges = tmp_path / "edges.jsonl"
+        nodes.write_text(
+            '{"id": "A:1", "name": "A", "category": ["biolink:NamedThing"]}\n'
+            '{"id": "B:1", "name": "B", "category": ["biolink:NamedThing"]}\n'
+        )
+        edges.write_text(
+            '{"id": "e1", "subject": "A:1", "object": "B:1", '
+            '"predicate": "biolink:related_to", '
+            '"primary_knowledge_source": "infores:test"}\n'
+        )
+        built = build_graph_from_jsonl(str(edges), str(nodes))
+        assert built.edge_properties.get_kl_at(0) == (
+            NOT_PROVIDED,
+            NOT_PROVIDED,
+        )
+
+    def test_survives_a_save_load_round_trip(self, graph, tmp_path):
+        graph.save_mmap(tmp_path / "mmap")
+        reloaded = CSRGraph.load_mmap(tmp_path / "mmap")
+        assert reloaded.edge_properties.get_kl_at(0) == graph.edge_properties.get_kl_at(
+            0
+        )
+
+    def test_graph_without_them_is_refused(self, graph, tmp_path):
+        """A graph built before 2.0 support cannot be served; say so plainly."""
+        directory = tmp_path / "legacy"
+        graph.save_mmap(directory)
+        (directory / "edge_kl_at_idx.npy").unlink()
+        with pytest.raises(GraphFormatError, match="Rebuild the graph"):
+            CSRGraph.load_mmap(directory)
 
 
 class TestNodeProperties:

@@ -42,8 +42,8 @@ class TestSymmetricPredicates:
 
         # Should find the direct edge PPARG -> INSR
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:3643"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:3643"
 
         # The edge in the knowledge graph should be in the stored direction
         kg_edges = response["message"]["knowledge_graph"]["edges"]
@@ -85,8 +85,8 @@ class TestSymmetricPredicates:
         # Should find 1 result - the symmetric edge
         assert len(results) == 1
         # Node bindings should reflect the query structure
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:3643"
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:3643"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
 
         # The edge in knowledge graph should be the ACTUAL stored edge
         kg_edges = response["message"]["knowledge_graph"]["edges"]
@@ -122,7 +122,7 @@ class TestSymmetricPredicates:
 
         # Should find INSR as interacting partner
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:3643"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:3643"
 
     def test_symmetric_predicate_unpinned_start_pinned_end(self, graph, bmt):
         """Query with pinned end should find neighbors via symmetric predicate.
@@ -154,7 +154,7 @@ class TestSymmetricPredicates:
 
         # Should find INSR as the subject (interacts with PPARG)
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:3643"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:3643"
 
     def test_symmetric_predicate_two_hop_forward(self, graph, bmt):
         """Two-hop query with symmetric predicate in forward direction.
@@ -190,9 +190,9 @@ class TestSymmetricPredicates:
 
         # Should find 1 path: Metformin -> PPARG -> INSR
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "CHEBI:6801"
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
-        assert results[0]["node_bindings"]["n2"][0]["id"] == "NCBIGene:3643"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "CHEBI:6801"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n2"]["ids"][0] == "NCBIGene:3643"
 
     def test_symmetric_predicate_two_hop_reverse(self, graph, bmt):
         """Two-hop query with symmetric predicate in reverse direction.
@@ -230,9 +230,9 @@ class TestSymmetricPredicates:
 
         # Should find 1 path via symmetric interacts_with
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "CHEBI:6801"
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
-        assert results[0]["node_bindings"]["n2"][0]["id"] == "NCBIGene:3643"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "CHEBI:6801"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n2"]["ids"][0] == "NCBIGene:3643"
 
 
 class TestSymmetricBothPinnedDedup:
@@ -295,8 +295,8 @@ class TestSymmetricBothPinnedDedup:
         # Collect (SN, h) binding pairs from results
         binding_pairs = set()
         for r in results:
-            sn_id = r["node_bindings"]["SN"][0]["id"]
-            h_id = r["node_bindings"]["h"][0]["id"]
+            sn_id = r["node_bindings"]["SN"]["ids"][0]
+            h_id = r["node_bindings"]["h"]["ids"][0]
             binding_pairs.add((sn_id, h_id))
 
         # Must have both directions

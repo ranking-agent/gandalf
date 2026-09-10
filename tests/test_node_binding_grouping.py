@@ -60,14 +60,14 @@ class TestNodeBindingGrouping:
                 ), f"node_bindings[{qnode_id!r}] has {len(bindings)} entries, expected 1"
 
             # Pinned endpoints should match the query
-            assert result["node_bindings"]["n0"][0]["id"] == "CHEBI:6801"
-            assert result["node_bindings"]["n3"][0]["id"] == "HP:0001943"
+            assert result["node_bindings"]["n0"]["ids"][0] == "CHEBI:6801"
+            assert result["node_bindings"]["n3"]["ids"][0] == "HP:0001943"
 
             # Intermediate disease should be T2D (only disease with has_phenotype to Hypoglycemia)
-            assert result["node_bindings"]["n2"][0]["id"] == "MONDO:0005148"
+            assert result["node_bindings"]["n2"]["ids"][0] == "MONDO:0005148"
 
         # Each result should have a distinct gene for n1
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643", "NCBIGene:2645"}
 
     def test_three_hop_pinned_endpoints_with_subclass(self, graph, bmt):
@@ -188,7 +188,7 @@ class TestNodeBindingGrouping:
         fingerprints = []
         for result in results:
             fp = tuple(
-                (qn, result["node_bindings"][qn][0]["id"])
+                (qn, result["node_bindings"][qn]["ids"][0])
                 for qn in sorted(result["node_bindings"])
             )
             fingerprints.append(fp)

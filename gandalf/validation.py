@@ -262,9 +262,8 @@ def validate_trapi_response(
 
         # Check node bindings
         node_bindings = result.get("node_bindings", {})
-        for qnode_id, bindings in node_bindings.items():
-            for binding in bindings:
-                node_id = binding.get("id")
+        for qnode_id, binding in node_bindings.items():
+            for node_id in binding.get("ids", []):
                 if node_id and node_id not in kg_nodes:
                     errors.append(
                         ValidationError(
@@ -280,9 +279,8 @@ def validate_trapi_response(
         analyses = result.get("analyses", [])
         for analysis in analyses:
             edge_bindings = analysis.get("edge_bindings", {})
-            for qedge_id, bindings in edge_bindings.items():
-                for binding in bindings:
-                    edge_id = binding.get("id")
+            for qedge_id, binding in edge_bindings.items():
+                for edge_id in binding.get("ids", []):
                     if edge_id and edge_id not in kg_edges:
                         errors.append(
                             ValidationError(
@@ -526,9 +524,9 @@ def _result_node_fingerprint(
 ) -> frozenset[tuple[str, str]]:
     """Create a hashable fingerprint from a result's node bindings."""
     pairs: list[tuple[str, str]] = []
-    for qnode_id, bindings in result.get("node_bindings", {}).items():
-        for binding in bindings:
-            pairs.append((qnode_id, binding.get("id", "")))
+    for qnode_id, binding in result.get("node_bindings", {}).items():
+        for node_id in binding.get("ids", []):
+            pairs.append((qnode_id, node_id))
     return frozenset(pairs)
 
 
@@ -607,9 +605,10 @@ def _format_result_path(
 
     # Map qnode_id -> bound node ID.
     qnode_to_id: dict[str, str] = {}
-    for qnode_id, bindings in node_bindings.items():
-        if bindings:
-            qnode_to_id[qnode_id] = bindings[0].get("id", "?")
+    for qnode_id, binding in node_bindings.items():
+        ids = binding.get("ids") or []
+        if ids:
+            qnode_to_id[qnode_id] = ids[0]
 
     parts: list[str] = []
     for i, qnode_id in enumerate(qnode_order):
@@ -633,15 +632,14 @@ def _format_edge_bindings(
     Multiple distinct predicate/qualifier combinations are separated by
     ``" | "``.
     """
-    bindings = edge_bindings.get(qedge_id, [])
-    if not bindings:
+    bound_ids = (edge_bindings.get(qedge_id) or {}).get("ids") or []
+    if not bound_ids:
         return "?"
 
     descriptions: list[str] = []
     seen: set[tuple[str, str]] = set()
 
-    for binding in bindings:
-        edge_id = binding.get("id")
+    for edge_id in bound_ids:
         edge = kg_edges.get(edge_id, {}) if edge_id else {}
 
         predicate = edge.get("predicate", "?")

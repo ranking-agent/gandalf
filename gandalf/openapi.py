@@ -80,6 +80,11 @@ def construct_open_api_schema(app, description=None, subpath=""):
         # if x_translator_team is defined amends schema with x_translator extension
         open_api_schema["info"]["x-translator"] = x_translator_extension
         open_api_schema["info"]["x-translator"]["infores"] = settings.infores
+        # Advertise the Biolink version the server actually runs on, so the
+        # declared version cannot drift from the one stamped on responses.
+        open_api_schema["info"]["x-translator"][
+            "biolink-version"
+        ] = settings.biolink_version
 
     if x_trapi_extension:
         # if x_translator_team is defined amends schema with x_translator extension

@@ -12,7 +12,7 @@ LMDB cold-path store.
 
 from __future__ import annotations
 
-from gandalf.graph import CSRGraph
+from gandalf.graph import NOT_PROVIDED, CSRGraph
 from gandalf.profiler import current_profiler
 
 
@@ -28,9 +28,11 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
         * ``attributes`` — TRAPI Attribute objects (defaults to ``[]``)
 
     Edge properties added (when present in the graph):
-        * ``sources``       — from the in-memory dedup store (hot path)
-        * ``qualifiers``    — from the in-memory dedup store (hot path)
-        * ``attributes``    — from LMDB (cold path; includes publications)
+        * ``sources``         — from the in-memory dedup store (hot path)
+        * ``qualifiers``      — from the in-memory dedup store (hot path)
+        * ``knowledge_level`` — from the in-memory dedup store (hot path)
+        * ``agent_type``      — from the in-memory dedup store (hot path)
+        * ``attributes``      — from LMDB (cold path; includes publications)
 
     Args:
         message: A TRAPI ``message`` dict that contains at least
@@ -123,10 +125,14 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
     for edge_uuid, edge in edges.items():
         fwd_idx = edge_idx_map.get(edge_uuid)
         if fwd_idx is None:
-            # Could not resolve — ensure defaults are present
+            # Could not resolve — ensure defaults are present.  TRAPI 2.0
+            # requires knowledge_level and agent_type on every Edge, so an
+            # unresolvable edge still gets the Biolink "not_provided" value.
             edge.setdefault("sources", [])
             edge.setdefault("qualifiers", [])
             edge.setdefault("attributes", [])
+            edge.setdefault("knowledge_level", NOT_PROVIDED)
+            edge.setdefault("agent_type", NOT_PROVIDED)
             continue
 
         # Hot-path properties (in-memory dedup store)
@@ -135,6 +141,11 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
 
         if "qualifiers" not in edge:
             edge["qualifiers"] = graph.edge_properties.get_qualifiers(fwd_idx)
+
+        if "knowledge_level" not in edge or "agent_type" not in edge:
+            knowledge_level, agent_type = graph.edge_properties.get_kl_at(fwd_idx)
+            edge.setdefault("knowledge_level", knowledge_level)
+            edge.setdefault("agent_type", agent_type)
 
         # Cold-path properties (LMDB)
         detail = lmdb_results.get(fwd_idx, {})

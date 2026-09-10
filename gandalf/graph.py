@@ -19,6 +19,10 @@ from gandalf.node_store import NodeStore
 logger = logging.getLogger(__name__)
 
 
+class GraphFormatError(RuntimeError):
+    """Raised when a serialized graph is too old for this version of gandalf."""
+
+
 def _load_npy(path: Path, mmap_mode: Literal["r+", "r", "w+", "c"] = "r") -> np.ndarray:
     """Load a .npy file, optionally copying into RAM instead of memory-mapping."""
     arr: np.ndarray = np.load(path, mmap_mode=mmap_mode)
@@ -27,13 +31,66 @@ def _load_npy(path: Path, mmap_mode: Literal["r+", "r", "w+", "c"] = "r") -> np.
     return arr
 
 
+# Biolink's own "we don't know" member of both KnowledgeLevelEnum and
+# AgentTypeEnum. TRAPI 2.0 requires knowledge_level and agent_type on every
+# Edge, so a source that omits them still has to serve something valid.
+NOT_PROVIDED = "not_provided"
+
+# Index width for the (knowledge_level, agent_type) pool. Both are small
+# Biolink enums, so the pool holds a few dozen pairs at most and int16 keeps
+# the per-edge array a quarter the size of the int32 arrays used for the
+# far more varied source and qualifier pools.
+_KL_AT_IDX_DTYPE = np.int16
+_KL_AT_POOL_LIMIT = np.iinfo(_KL_AT_IDX_DTYPE).max
+
+
+def kl_at_pair(props: dict) -> tuple:
+    """Return the ``(knowledge_level, agent_type)`` pair for a normalized edge.
+
+    TRAPI 2.0 requires both on every Edge, so a source that recorded neither
+    still yields the Biolink ``not_provided`` value rather than a gap.
+
+    Examples:
+        >>> kl_at_pair({"knowledge_level": "prediction", "agent_type": "computational_model"})
+        ('prediction', 'computational_model')
+        >>> kl_at_pair({})
+        ('not_provided', 'not_provided')
+        >>> kl_at_pair({"knowledge_level": None, "agent_type": "manual_agent"})
+        ('not_provided', 'manual_agent')
+    """
+    return (
+        props.get("knowledge_level") or NOT_PROVIDED,
+        props.get("agent_type") or NOT_PROVIDED,
+    )
+
+
+def _new_kl_at_index(pool: list, kl_at: tuple) -> int:
+    """Append ``kl_at`` to ``pool`` and return its index, guarding the width.
+
+    The index array is int16 (see ``_KL_AT_IDX_DTYPE``), which comfortably
+    holds every combination of the two Biolink enums. A source feeding in
+    free-text values could still overflow it, and silently wrapping would
+    mislabel edges, so fail loudly instead.
+    """
+    if len(pool) >= _KL_AT_POOL_LIMIT:
+        raise GraphFormatError(
+            f"more than {_KL_AT_POOL_LIMIT} distinct (knowledge_level, "
+            f"agent_type) pairs; these are small Biolink enums, so the source "
+            f"data is most likely carrying free text in one of them"
+        )
+    pool.append(kl_at)
+    return len(pool) - 1
+
+
 class EdgePropertyStore:
     """Memory-efficient storage for qualifier and source dedup via interning.
 
-    Qualifiers and sources are the "hot path" data — accessed during
-    traversal for every predicate-matching edge. They have very high
+    Qualifiers, sources and the (knowledge_level, agent_type) pair are the
+    "hot path" data — accessed during traversal for every predicate-matching
+    edge, and required on every TRAPI 2.0 Edge. They have very high
     deduplication ratios (~10K unique qualifier combos, ~50 unique source
-    configs) so the pools are tiny and shared across workers via fork COW.
+    configs, a few dozen knowledge_level/agent_type pairs) so the pools are
+    tiny and shared across workers via fork COW.
 
     The wrapper dicts returned by _get_props() contain only references to
     long-lived pool objects, so they are freed by refcount (no GC cycles).
@@ -45,15 +102,19 @@ class EdgePropertyStore:
     __slots__ = (
         "_sources_pool",
         "_quals_pool",
+        "_kl_at_pool",
         "_sources_idx",
         "_quals_idx",
+        "_kl_at_idx",
     )
 
     def __init__(self):
         self._sources_pool = []
         self._quals_pool = []
+        self._kl_at_pool = []
         self._sources_idx = None
         self._quals_idx = None
+        self._kl_at_idx = None
 
     @staticmethod
     def _make_hashable(obj):
@@ -72,17 +133,20 @@ class EdgePropertyStore:
 
         Args:
             props_list: List of dicts, each with keys like 'sources',
-                        'qualifiers'. Only these two fields are stored;
-                        publications/attributes belong in LMDBPropertyStore.
+                        'qualifiers', 'knowledge_level', 'agent_type'. Only
+                        these fields are stored; publications/attributes
+                        belong in LMDBPropertyStore.
         """
         store = cls()
         n = len(props_list)
 
         sources_intern = {}
         quals_intern = {}
+        kl_at_intern = {}
 
         sources_indices = np.empty(n, dtype=np.int32)
         quals_indices = np.empty(n, dtype=np.int32)
+        kl_at_indices = np.empty(n, dtype=_KL_AT_IDX_DTYPE)
 
         for i, props in enumerate(props_list):
             # Intern sources
@@ -101,8 +165,15 @@ class EdgePropertyStore:
                 store._quals_pool.append(quals)
             quals_indices[i] = quals_intern[quals_key]
 
+            # Intern the (knowledge_level, agent_type) pair
+            kl_at = kl_at_pair(props)
+            if kl_at not in kl_at_intern:
+                kl_at_intern[kl_at] = _new_kl_at_index(store._kl_at_pool, kl_at)
+            kl_at_indices[i] = kl_at_intern[kl_at]
+
         store._sources_idx = sources_indices
         store._quals_idx = quals_indices
+        store._kl_at_idx = kl_at_indices
 
         return store
 
@@ -122,6 +193,11 @@ class EdgePropertyStore:
 
         Returns a dict with pool references (no new allocations beyond the
         wrapper dict itself, which is cycle-free and freed by refcount).
+
+        This runs once per candidate edge during traversal, so it carries only
+        what filtering needs to look at for every edge.  knowledge_level and
+        agent_type are read through :meth:`get_kl_at` by the few callers that
+        want them, rather than assembled here for the many that do not.
         """
         return {
             "sources": self._sources_pool[self._sources_idx[idx]],
@@ -136,12 +212,24 @@ class EdgePropertyStore:
         """Get just the sources for an edge. Zero-alloc pool reference."""
         return self._sources_pool[self._sources_idx[idx]]
 
+    def get_kl_at(self, idx):
+        """Get the ``(knowledge_level, agent_type)`` pair for an edge.
+
+        Both are required TRAPI 2.0 Edge properties, and they are always read
+        together, so they share one interned pool and one index array.
+        """
+        return self._kl_at_pool[self._kl_at_idx[idx]]
+
     def get_field(self, idx, key, default=None):
         """Get a single field value without creating a full dict."""
         if key == "sources":
             return self._sources_pool[self._sources_idx[idx]]
         elif key == "qualifiers":
             return self._quals_pool[self._quals_idx[idx]]
+        elif key == "knowledge_level":
+            return self._kl_at_pool[self._kl_at_idx[idx]][0]
+        elif key == "agent_type":
+            return self._kl_at_pool[self._kl_at_idx[idx]][1]
         return default
 
     def dedup_stats(self):
@@ -151,23 +239,31 @@ class EdgePropertyStore:
             "total_edges": n,
             "unique_sources": len(self._sources_pool),
             "unique_qualifiers": len(self._quals_pool),
+            "unique_knowledge_level_agent_type": len(self._kl_at_pool),
         }
 
     def save_mmap(self, directory: Path):
         """Save to directory as mmap-friendly files."""
         np.save(directory / "edge_sources_idx.npy", self._sources_idx)
         np.save(directory / "edge_quals_idx.npy", self._quals_idx)
+        np.save(directory / "edge_kl_at_idx.npy", self._kl_at_idx)
 
         pools = {
             "sources_pool": self._sources_pool,
             "quals_pool": self._quals_pool,
+            "kl_at_pool": self._kl_at_pool,
         }
         with open(directory / "edge_property_pools.pkl", "wb") as f:
             pickle.dump(pools, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     @classmethod
     def load_mmap(cls, directory: Path, mmap_mode: Literal["r+", "r", "w+", "c"] = "r"):
-        """Load from directory, memory-mapping the index arrays."""
+        """Load from directory, memory-mapping the index arrays.
+
+        Raises:
+            GraphFormatError: if the saved graph predates TRAPI 2.0 support and
+                so carries no knowledge_level / agent_type for its edges.
+        """
         store = cls()
 
         store._sources_idx = _load_npy(
@@ -177,11 +273,24 @@ class EdgePropertyStore:
             directory / "edge_quals_idx.npy", mmap_mode=mmap_mode
         )
 
+        kl_at_idx_path = directory / "edge_kl_at_idx.npy"
+        if not kl_at_idx_path.exists():
+            raise GraphFormatError(
+                f"{directory} was built before TRAPI 2.0 support and stores no "
+                f"knowledge_level / agent_type for its edges, both of which "
+                f"TRAPI 2.0 requires on every Edge. Rebuild the graph with "
+                f"gandalf-build to serve it."
+            )
+        store._kl_at_idx = _load_npy(kl_at_idx_path, mmap_mode=mmap_mode)
+
         with open(directory / "edge_property_pools.pkl", "rb") as f:
             pools = pickle.load(f)
 
         store._sources_pool = pools["sources_pool"]
         store._quals_pool = pools["quals_pool"]
+        # Pickle round-trips the pairs as lists; normalize back to tuples so
+        # ``get_kl_at`` always returns the same shape.
+        store._kl_at_pool = [tuple(pair) for pair in pools["kl_at_pool"]]
 
         return store
 
@@ -197,13 +306,20 @@ class EdgePropertyStoreBuilder:
     def __init__(self, num_edges):
         self._sources_pool = []
         self._quals_pool = []
+        self._kl_at_pool = []
         self._sources_intern = {}
         self._quals_intern = {}
+        self._kl_at_intern = {}
         self._sources_idx = np.empty(num_edges, dtype=np.int32)
         self._quals_idx = np.empty(num_edges, dtype=np.int32)
+        self._kl_at_idx = np.empty(num_edges, dtype=_KL_AT_IDX_DTYPE)
 
     def add(self, pos, props):
-        """Intern one edge's qualifier and source properties at position pos."""
+        """Intern one edge's hot-path properties at position pos.
+
+        Covers sources, qualifiers, and the (knowledge_level, agent_type) pair
+        that TRAPI 2.0 requires on every Edge.
+        """
         # Intern sources
         sources = props.get("sources", [])
         sources_key = EdgePropertyStore._make_hashable(sources)
@@ -220,21 +336,31 @@ class EdgePropertyStoreBuilder:
             self._quals_pool.append(quals)
         self._quals_idx[pos] = self._quals_intern[quals_key]
 
+        # Intern the (knowledge_level, agent_type) pair
+        kl_at = kl_at_pair(props)
+        if kl_at not in self._kl_at_intern:
+            self._kl_at_intern[kl_at] = _new_kl_at_index(self._kl_at_pool, kl_at)
+        self._kl_at_idx[pos] = self._kl_at_intern[kl_at]
+
     def reorder(self, permutation):
         """Reorder index arrays to match CSR sort order."""
         self._sources_idx = self._sources_idx[permutation]
         self._quals_idx = self._quals_idx[permutation]
+        self._kl_at_idx = self._kl_at_idx[permutation]
 
     def build(self):
         """Finalize to an EdgePropertyStore."""
         store = EdgePropertyStore()
         store._sources_pool = self._sources_pool
         store._quals_pool = self._quals_pool
+        store._kl_at_pool = self._kl_at_pool
         store._sources_idx = self._sources_idx
         store._quals_idx = self._quals_idx
+        store._kl_at_idx = self._kl_at_idx
         # Free intern dicts
         self._sources_intern = None
         self._quals_intern = None
+        self._kl_at_intern = None
         return store
 
 
@@ -679,7 +805,8 @@ class CSRGraph:
     def get_edge_property(self, src_idx, dst_idx, predicate, key, default=None):
         """Get a specific property for an edge.
 
-        For 'qualifiers' and 'sources': O(log(degree)) via dedup store.
+        For 'qualifiers', 'sources', 'knowledge_level' and 'agent_type':
+        O(log(degree)) via dedup store.
         For 'attributes': O(log(degree)) + LMDB lookup.
         """
         if key == "predicate":
@@ -708,8 +835,8 @@ class CSRGraph:
     def get_all_edge_properties(self, src_idx, dst_idx, predicate):
         """Get all properties for an edge.
 
-        Merges hot-path (qualifiers, sources from dedup store) with
-        cold-path (attributes from LMDB).
+        Merges hot-path (qualifiers, sources, knowledge_level, agent_type
+        from the dedup store) with cold-path (attributes from LMDB).
         """
         pred_id = self.predicate_to_idx.get(predicate)
         if pred_id is None:
@@ -721,6 +848,9 @@ class CSRGraph:
 
         # Start with hot-path data (pool references, no GC pressure)
         props = self.edge_properties._get_props(edge_idx)
+        props["knowledge_level"], props["agent_type"] = self.edge_properties.get_kl_at(
+            edge_idx
+        )
 
         # Merge cold-path data from LMDB
         if self.lmdb_store is not None:
@@ -733,8 +863,8 @@ class CSRGraph:
     def get_edge_properties_by_index(self, fwd_edge_idx, lmdb_detail=None):
         """Get all properties for an edge by its forward-CSR array position.
 
-        This is O(1) for hot-path data (qualifiers, sources) and a single
-        LMDB lookup for cold-path data (attributes).  Prefer
+        This is O(1) for hot-path data (qualifiers, sources, knowledge_level,
+        agent_type) and a single LMDB lookup for cold-path data (attributes).  Prefer
         this over ``get_all_edge_properties`` when you already have the
         forward edge index (e.g. from ``neighbors_with_properties``).
 
@@ -745,6 +875,9 @@ class CSRGraph:
         """
         fwd_edge_idx = int(fwd_edge_idx)
         props = self.edge_properties._get_props(fwd_edge_idx)
+        props["knowledge_level"], props["agent_type"] = self.edge_properties.get_kl_at(
+            fwd_edge_idx
+        )
 
         pred_id = int(self.fwd_predicates[fwd_edge_idx])
         props["predicate"] = self.id_to_predicate[pred_id]

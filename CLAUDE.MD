@@ -51,12 +51,14 @@ pytest --cov=gandalf
 gandalf/
 ├── graph.py          # CSRGraph class (core data structure)
 ├── loader.py         # JSONL to graph conversion
+├── trapi.py          # TRAPI 2.0 envelope, query parameters, timeouts
 ├── search/           # Search & path finding (package)
 │   ├── __init__.py       # Re-exports public API
 │   ├── lookup.py         # Main TRAPI lookup entry point
 │   ├── expanders.py      # PredicateExpander, QualifierExpander
 │   ├── qualifiers.py     # Qualifier constraint matching
-│   ├── query_edge.py     # Edge query with predicate/qualifier filtering
+│   ├── edge_constraints.py  # QEdge.constraints parsing & matching
+│   ├── query_edge.py     # Edge query with predicate/constraint filtering
 │   ├── reconstruct.py    # Path reconstruction & join ordering
 │   ├── path_arrays.py    # Compact numpy path representation
 │   ├── path_finder.py    # 3-hop path finding functions
@@ -96,6 +98,30 @@ scripts/              # CLI entry points (gandalf-build, gandalf-query, gandalf-
 - **Bidirectional search**: Expands from both start and end nodes to minimize traversal
 - **Property storage**: Hash dicts keyed by `(src_idx, dst_idx, pred_idx)` tuples
 - **Node indexing**: Original string IDs mapped to integer indices for NumPy operations
+
+## TRAPI version
+
+The server implements **TRAPI 2.0** (`x-trapi.version` in
+`gandalf/openapi-config.yaml`). Things 2.0 changed that the code depends on:
+
+- A NodeBinding / EdgeBinding / PathBinding is one object with an `ids` array,
+  not a list of objects each with an `id`.
+- `knowledge_level` and `agent_type` are required top-level Edge properties.
+  They are interned into `EdgePropertyStore` at build time alongside sources
+  and qualifiers, so a graph built before this cannot be loaded — `load_mmap`
+  refuses it with a `GraphFormatError` naming the rebuild.
+- A QEdge's constraints all live in one `constraints` object
+  (`gandalf/search/edge_constraints.py`), replacing `qualifier_constraints`
+  and `attribute_constraints`. A QualifierSetConstraint is a
+  `{qualifier_type_id: qualifier_value}` mapping.
+- `log_level` and `bypass_cache` moved into `parameters`, which also gained
+  `timeout`; the server must repeat `parameters` in its Response.
+- `Response.logs` has `minItems: 1`, so an empty log list is omitted rather
+  than sent as `[]`.
+
+The 1.x spellings of renamed request fields are rejected with a 400 rather
+than ignored (see `gandalf/request_validation.py`): silently dropping a filter
+a client asked for is worse than an error.
 
 ## API Endpoints
 

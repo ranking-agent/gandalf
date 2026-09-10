@@ -38,6 +38,16 @@ def normalize_query_graph(query_graph: dict) -> None:
                 continue
             for key in [k for k, v in element.items() if v is None]:
                 del element[key]
+            # A QEdge's TRAPI 2.0 constraints object needs the same treatment:
+            # ``{"constraints": {"qualifiers": null}}`` must read as "no
+            # qualifier constraint", not as a null the parser has to defend
+            # against.
+            constraints = element.get("constraints")
+            if isinstance(constraints, dict):
+                for key in [k for k, v in constraints.items() if v is None]:
+                    del constraints[key]
+                if not constraints:
+                    del element["constraints"]
 
 
 def validate_set_interpretation(query_graph: dict) -> None:
@@ -68,6 +78,53 @@ def validate_set_interpretation(query_graph: dict) -> None:
                 f"set_interpretation COLLATE is only valid for unpinned nodes "
                 f"without ids (node '{qnode_id}')",
             )
+
+
+# TRAPI 1.x request fields that 2.0 replaced.  Each maps to the 2.0 spelling
+# so the error can name the fix.
+_RETIRED_QEDGE_FIELDS = {
+    "qualifier_constraints": "constraints.qualifiers",
+    "attribute_constraints": "constraints.attributes",
+}
+_RETIRED_QPATH_CONSTRAINT_FIELDS = {
+    "intermediate_categories": "required_intermediate_categories",
+}
+
+
+def reject_retired_trapi_fields(query_graph: dict) -> None:
+    """Reject TRAPI 1.x query-graph fields that 2.0 renamed.
+
+    The 2.0 schema sets ``additionalProperties: true`` on QEdge, so a stray
+    ``qualifier_constraints`` would simply be ignored -- and a client that
+    asked for filtering would silently get unfiltered results back, which is
+    worse than an error.  Name the 2.0 replacement instead.
+
+    Raises ``HTTPException(400)`` for the first retired field found.
+    """
+    for qedge_id, qedge in (query_graph.get("edges") or {}).items():
+        if not isinstance(qedge, dict):
+            continue
+        for retired, replacement in _RETIRED_QEDGE_FIELDS.items():
+            if retired in qedge:
+                raise HTTPException(
+                    400,
+                    f"edge '{qedge_id}' uses '{retired}', which TRAPI 2.0 "
+                    f"replaced with '{replacement}'",
+                )
+
+    for qpath_id, qpath in (query_graph.get("paths") or {}).items():
+        if not isinstance(qpath, dict):
+            continue
+        for constraint in qpath.get("constraints") or []:
+            if not isinstance(constraint, dict):
+                continue
+            for retired, replacement in _RETIRED_QPATH_CONSTRAINT_FIELDS.items():
+                if retired in constraint:
+                    raise HTTPException(
+                        400,
+                        f"path '{qpath_id}' uses '{retired}', which TRAPI 2.0 "
+                        f"replaced with '{replacement}'",
+                    )
 
 
 def validate_edge_node_references(query_graph: dict) -> None:

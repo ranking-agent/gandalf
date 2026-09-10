@@ -138,17 +138,18 @@ class TestTRAPIQuery:
         assert q.parameters is None
 
     def test_log_level_valid_values(self):
-        for level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-            q = TRAPIQuery(**ONEHOP_QUERY, log_level=level)
-            assert q.log_level == level
+        """TRAPI 2.0 moved log_level into the parameters object."""
+        for level in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            q = TRAPIQuery(**ONEHOP_QUERY, parameters={"log_level": level})
+            assert q.parameters.log_level == level
 
     def test_log_level_invalid_value_raises(self):
         with pytest.raises(ValidationError, match="log_level"):
-            TRAPIQuery(**ONEHOP_QUERY, log_level="TRACE")
+            TRAPIQuery(**ONEHOP_QUERY, parameters={"log_level": "TRACE"})
 
     def test_log_level_defaults_none(self):
-        q = TRAPIQuery(**ONEHOP_QUERY)
-        assert q.log_level is None
+        q = TRAPIQuery(**ONEHOP_QUERY, parameters={})
+        assert q.parameters.log_level is None
 
     def test_extra_fields_allowed(self):
         data = {**ONEHOP_QUERY, "some_custom_field": "value"}

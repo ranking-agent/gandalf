@@ -5,12 +5,12 @@ Three-pass streaming loader that keeps peak memory at ~3-4GB for 38M edges:
 Pass 1: Stream edge triples to collect vocabularies (node IDs, predicates,
         edge count).
 Pass 2: Stream edges again, converting each to integer indices stored in
-        pre-allocated numpy arrays. Simultaneously interns qualifier/source data
-        into the EdgePropertyStoreBuilder and writes attributes to
-        a temporary LMDB keyed by original line index.
+        pre-allocated numpy arrays. Simultaneously interns qualifier/source and
+        knowledge_level/agent_type data into the EdgePropertyStoreBuilder and
+        writes attributes to a temporary LMDB keyed by original line index.
 Pass 3: Sort numpy arrays by (src, dst, pred) via np.lexsort. Rewrite the temp
         LMDB in CSR-sorted order to produce the final LMDB where key == CSR
-        edge index (zero indirection at query time). Reorder qualifier/source
+        edge index (zero indirection at query time). Reorder the hot-path
         dedup indices to match. Build CSR offset arrays.
 
 The build core (``_build_graph_from_source``) is agnostic to where records come
@@ -142,9 +142,17 @@ def _build_graph_from_source(source: GraphSource) -> CSRGraph:
             # Capture edge ID from the normalized record (if present)
             edge_ids[i] = edge.get("id")
 
-            # Hot path: intern qualifiers + sources (already normalized)
+            # Hot path: intern qualifiers, sources and the knowledge_level /
+            # agent_type pair TRAPI 2.0 requires on every Edge (already
+            # normalized; a source that omits either yields "not_provided").
             prop_builder.add(
-                i, {"sources": edge["sources"], "qualifiers": edge["qualifiers"]}
+                i,
+                {
+                    "sources": edge["sources"],
+                    "qualifiers": edge["qualifiers"],
+                    "knowledge_level": edge.get("knowledge_level"),
+                    "agent_type": edge.get("agent_type"),
+                },
             )
 
             # Cold path: write attributes to temp LMDB

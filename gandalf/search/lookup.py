@@ -23,7 +23,10 @@ from gandalf.profiler import (
     restore_lmdb_hook,
     set_profiler,
 )
+from gandalf.graph import NOT_PROVIDED
 from gandalf.query_planner import get_next_qedge, remove_orphaned
+from gandalf.trapi import Deadline, QueryTimeout, finalize_response, timeout_response
+from gandalf.search.edge_constraints import EdgeConstraints
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
 from gandalf.search.gc_utils import GCMonitor
 from gandalf.search.node_filters import build_node_filters
@@ -41,6 +44,7 @@ def lookup(
     log_level=None,
     dehydrated=None,
     profile=False,
+    deadline=None,
 ):
     """Take an arbitrary Translator query graph and return all matching paths.
 
@@ -65,10 +69,15 @@ def lookup(
             query, path reconstruction, response building, LMDB enrichment,
             annotators) and append them to ``response["logs"]`` as TRAPI
             ``LogEntry`` dicts with ``code`` ``ProfileStage``/``ProfileSummary``.
+        deadline: Optional :class:`~gandalf.trapi.Deadline` carrying the
+            client's ``parameters.timeout`` budget.  When it is exhausted the
+            query stops and returns a Response with a ``Timeout`` status
+            rather than partial results.
 
     Returns:
-        TRAPI response dict with message containing results, knowledge_graph,
-        and a ``logs`` list of TRAPI LogEntry dicts.
+        Complete TRAPI 2.0 Response dict: ``message`` (query_graph,
+        knowledge_graph, results), the version metadata, an echo of the
+        request's ``parameters``, and a ``logs`` list of TRAPI LogEntry dicts.
     """
     t_start = time.perf_counter()
 
@@ -101,6 +110,9 @@ def lookup(
 
     node_filters = build_node_filters(filter_config or {})
 
+    if deadline is None:
+        deadline = Deadline(None)
+
     prof: Union[Profiler, NullProfiler] = (
         Profiler(root_name="lookup") if profile else NullProfiler()
     )
@@ -118,23 +130,35 @@ def lookup(
                         "lmdb_hook_skipped",
                         "another_profile_already_active",
                     )
-            response = _lookup_inner(
-                graph,
-                query,
-                bmt,
-                subclass,
-                subclass_depth,
-                t_start,
-                gc_monitor,
-                node_filters=node_filters,
-                dehydrated=dehydrated,
-                logger=query_logger,
-            )
+            try:
+                response = _lookup_inner(
+                    graph,
+                    query,
+                    bmt,
+                    subclass,
+                    subclass_depth,
+                    t_start,
+                    gc_monitor,
+                    node_filters=node_filters,
+                    dehydrated=dehydrated,
+                    logger=query_logger,
+                    deadline=deadline,
+                )
+            except QueryTimeout as exc:
+                # Report the overrun as a TRAPI outcome rather than an error:
+                # the client asked for a budget and gets back a Response that
+                # says the budget ran out, with the logs from the work done.
+                query_logger.error("%s", exc)
+                logs = log_collector.get_logs()
+                if profile:
+                    logs.extend(prof.to_log_entries())
+                return timeout_response(query, deadline, logs)
+
             logs = log_collector.get_logs()
             if profile:
                 logs.extend(prof.to_log_entries())
             response["logs"] = logs
-        return response
+        return finalize_response(response, query)
     finally:
         if lmdb_originals is not None:
             restore_lmdb_hook(getattr(graph, "lmdb_store", None), lmdb_originals)
@@ -156,6 +180,7 @@ def _lookup_inner(
     node_filters=None,
     dehydrated=None,
     logger: Optional[logging.Logger] = None,
+    deadline=None,
 ):
     """Inner implementation of lookup with all the core logic.
 
@@ -163,7 +188,12 @@ def _lookup_inner(
         logger: Logger to emit this query's records to.  ``lookup`` passes the
             query's own logger so that entries reach that query's TRAPI logs
             and no other's.  Defaults to the module logger.
+        deadline: The query's :class:`~gandalf.trapi.Deadline`.  Checked at
+            stage boundaries; raises :class:`~gandalf.trapi.QueryTimeout` once
+            the budget is spent.
     """
+    if deadline is None:
+        deadline = Deadline(None)
     logger = logger if logger is not None else logging.getLogger(__name__)
     logger.info("Starting lookup.")
     prof = current_profiler()
@@ -215,6 +245,8 @@ def _lookup_inner(
 
     # Process edges one at a time
     while len(subqgraph["edges"].keys()) > 0:
+        deadline.check("edge query")
+
         # Get next edge to query
         next_edge_id, next_edge = get_next_qedge(subqgraph)
 
@@ -288,15 +320,18 @@ def _lookup_inner(
                 set(inverse_predicates) if inverse_predicates is not None else set()
             )
 
-            # Get qualifier constraints for this edge and expand to include descendant values
-            qualifier_constraints = next_edge.get("qualifier_constraints", [])
-            if qualifier_constraints:
-                qualifier_constraints = qualifier_expander.expand_qualifier_constraints(
-                    qualifier_constraints
+            # Parse this edge's TRAPI constraints object, expanding each
+            # qualifier value to its Biolink descendants so a query for a
+            # parent value also matches edges carrying a child value.
+            edge_constraints = EdgeConstraints.parse(next_edge)
+            if edge_constraints.qualifiers:
+                edge_constraints = edge_constraints.with_qualifiers(
+                    qualifier_expander.expand_qualifier_constraints(
+                        list(edge_constraints.qualifiers)
+                    )
                 )
 
-            # Get attribute constraints for this edge and its endpoint nodes
-            edge_attribute_constraints = next_edge.get("attribute_constraints", [])
+            # Node constraints stay per-endpoint (TRAPI QNode.constraints)
             start_node_constraints = start_node.get("constraints", [])
             end_node_constraints = end_node.get("constraints", [])
 
@@ -308,10 +343,9 @@ def _lookup_inner(
                 start_node.get("categories", []),
                 end_node.get("categories", []),
                 allowed_predicates,
-                qualifier_constraints,
+                edge_constraints,
                 inverse_predicates=inverse_predicates,
                 node_filters=node_filters,
-                attribute_constraints=edge_attribute_constraints,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
                 logger=logger,
@@ -362,6 +396,7 @@ def _lookup_inner(
         qedge_cm.__exit__(None, None, None)
 
     # Reconstruct complete paths from edge results
+    deadline.check("path reconstruction")
     logger.debug("Reconstructing complete paths...")
 
     with prof.stage("reconstruct"):
@@ -418,6 +453,7 @@ def _lookup_inner(
                 node_set_interp=node_set_interp,
                 original_query_graph=original_query_graph,
                 logger=logger,
+                deadline=deadline,
             )
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
@@ -441,20 +477,25 @@ def _lookup_inner(
     return response
 
 
-def _append_edge_binding(bindings: list, edge_kg_id: str) -> None:
-    """Append an edge binding for ``edge_kg_id`` unless one is already present.
+#: How many results to build between wall-clock checks in _build_response.
+_DEADLINE_CHECK_INTERVAL = 4096
 
-    A single QEdge binding must never reference the same knowledge-graph edge
-    twice.  Deduping on append keeps that invariant regardless of how the edge
-    id was derived (real edge, composite inferred edge, or uuid fallback).
+
+def _append_edge_binding(binding: dict, edge_kg_id: str) -> None:
+    """Add ``edge_kg_id`` to a QEdge's EdgeBinding unless already present.
+
+    A TRAPI 2.0 EdgeBinding lists every knowledge-graph edge bound to one
+    QEdge in its ``ids`` array, and must never reference the same edge twice.
+    Deduping on append keeps that invariant regardless of how the edge id was
+    derived (real edge, composite inferred edge, or uuid fallback).
 
     Args:
-        bindings: The edge-binding list for one QEdge (mutated in place).
+        binding: The EdgeBinding for one QEdge (mutated in place).
         edge_kg_id: The knowledge-graph edge id to bind.
     """
-    if any(b["id"] == edge_kg_id for b in bindings):
-        return
-    bindings.append({"id": edge_kg_id, "attributes": []})
+    ids = binding["ids"]
+    if edge_kg_id not in ids:
+        ids.append(edge_kg_id)
 
 
 def _build_response(
@@ -468,14 +509,20 @@ def _build_response(
     node_set_interp=None,
     original_query_graph=None,
     logger: Optional[logging.Logger] = None,
+    deadline=None,
 ):
     """Build the TRAPI response from path data.
 
     Args:
         logger: Logger to emit this query's records to.  Defaults to the
             module logger.
+        deadline: The query's :class:`~gandalf.trapi.Deadline`, checked every
+            ``_DEADLINE_CHECK_INTERVAL`` results so that a huge result set
+            cannot blow through the client's budget while being assembled.
     """
     logger = logger if logger is not None else logging.getLogger(__name__)
+    if deadline is None:
+        deadline = Deadline(None)
     # Extract arrays and metadata from PathArrays for efficient access
     pa_nodes = path_data.paths_nodes
     pa_preds = path_data.paths_preds
@@ -616,7 +663,14 @@ def _build_response(
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
     # Edge dicts are created only for unique edges (not per-path).
-    for node_key, path_indices in node_binding_groups.items():
+    for group_number, (node_key, path_indices) in enumerate(
+        node_binding_groups.items()
+    ):
+        # Checking the clock per result would cost a syscall per result on
+        # multi-million-result queries, so sample it instead.
+        if deadline and group_number % _DEADLINE_CHECK_INTERVAL == 0:
+            deadline.check("response building")
+
         first_idx = path_indices[0]
 
         result: dict[str, Any] = {
@@ -639,15 +693,15 @@ def _build_response(
 
             if qnode_id in all_mode_nodes:
                 # ALL: include all required IDs in this binding
-                bindings = []
+                bound_ids = []
                 for rid in sorted(all_mode_requirements[qnode_id]):
                     rid_idx = graph.get_node_idx(rid)
                     if rid_idx is not None and rid_idx in node_cache:
                         response["message"]["knowledge_graph"]["nodes"][rid] = (
                             node_cache[rid_idx]
                         )
-                    bindings.append({"id": rid, "attributes": []})
-                result["node_bindings"][qnode_id] = bindings
+                    bound_ids.append(rid)
+                result["node_bindings"][qnode_id] = {"ids": bound_ids}
             elif qnode_id in collate_mode_nodes:
                 # COLLATE: collect all distinct bound entities across paths
                 seen_ids = {}
@@ -656,13 +710,11 @@ def _build_response(
                     nid = node_id_cache[nidx]
                     if nid not in seen_ids:
                         seen_ids[nid] = nidx
-                bindings = []
                 for nid, nidx in seen_ids.items():
                     response["message"]["knowledge_graph"]["nodes"][nid] = node_cache[
                         nidx
                     ]
-                    bindings.append({"id": nid, "attributes": []})
-                result["node_bindings"][qnode_id] = bindings
+                result["node_bindings"][qnode_id] = {"ids": list(seen_ids)}
             else:
                 # BATCH (default): single binding from first path
                 node_idx = int(pa_nodes[first_idx, col])
@@ -684,9 +736,7 @@ def _build_response(
                                 sc_node_id
                             ] = sc_node
 
-                result["node_bindings"][qnode_id] = [
-                    {"id": bound_id, "attributes": []},
-                ]
+                result["node_bindings"][qnode_id] = {"ids": [bound_id]}
 
         # Aggregate edge bindings from all paths in group.
         # Edge dicts are created only for unique (subj, pred, obj,
@@ -743,11 +793,23 @@ def _build_response(
                 if edge_key not in edge_seen_keys[qedge_id]:
                     edge_seen_keys[qedge_id].add(edge_key)
                     # Build edge dict only for unique edges
+                    # knowledge_level and agent_type are required on every
+                    # TRAPI 2.0 Edge, and both come from the in-memory dedup
+                    # store, so even a dehydrated response carries them.
+                    if fwd_eidx >= 0:
+                        knowledge_level, agent_type = graph.edge_properties.get_kl_at(
+                            fwd_eidx
+                        )
+                    else:
+                        knowledge_level = agent_type = NOT_PROVIDED
+
                     if lightweight:
                         edge_props = {
                             "predicate": predicate,
                             "subject": subj_id,
                             "object": obj_id,
+                            "knowledge_level": knowledge_level,
+                            "agent_type": agent_type,
                         }
                     else:
                         if fwd_eidx < 0:
@@ -760,6 +822,8 @@ def _build_response(
                         edge_props["predicate"] = predicate
                         edge_props["subject"] = subj_id
                         edge_props["object"] = obj_id
+                        edge_props["knowledge_level"] = knowledge_level
+                        edge_props["agent_type"] = agent_type
 
                     if fwd_eidx >= 0:
                         orig_id = edge_id_map.get(fwd_eidx)
@@ -780,7 +844,7 @@ def _build_response(
             if edge_id in subclass_qedges:
                 continue
 
-            result["analyses"][0]["edge_bindings"][edge_id] = []
+            result["analyses"][0]["edge_bindings"][edge_id] = {"ids": []}
 
             attached = qedge_attached_subclass.get(edge_id, [])
 
@@ -861,7 +925,6 @@ def _build_response(
                         if aux_graph_id not in response["message"]["auxiliary_graphs"]:
                             response["message"]["auxiliary_graphs"][aux_graph_id] = {
                                 "edges": composite_edge_ids,
-                                "attributes": [],
                             }
 
                         if (
@@ -876,15 +939,10 @@ def _build_response(
                                 "subject": superclass_node_overrides.get("subject", qs),
                                 "predicate": edge["predicate"],
                                 "object": superclass_node_overrides.get("object", qo),
+                                # TRAPI 2.0 Edge properties, not attributes
+                                "knowledge_level": "logical_entailment",
+                                "agent_type": "automated_agent",
                                 "attributes": [
-                                    {
-                                        "attribute_type_id": "biolink:knowledge_level",
-                                        "value": "logical_entailment",
-                                    },
-                                    {
-                                        "attribute_type_id": "biolink:agent_type",
-                                        "value": "automated_agent",
-                                    },
                                     {
                                         "attribute_type_id": "biolink:support_graphs",
                                         "value": [aux_graph_id],
@@ -925,6 +983,13 @@ def _build_response(
                         result["analyses"][0]["edge_bindings"][edge_id],
                         edge_kg_id,
                     )
+
+        # A TRAPI 2.0 Analysis must bind at least one QEdge, and a Result's
+        # analyses list must not be empty.  A result whose every qedge was a
+        # synthetic subclass edge binds nothing, so it carries no analysis
+        # rather than an empty one (2.0 makes Result.analyses optional).
+        if not result["analyses"][0]["edge_bindings"]:
+            del result["analyses"]
 
         response["message"]["results"].append(result)
 

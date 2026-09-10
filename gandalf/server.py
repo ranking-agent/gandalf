@@ -53,8 +53,16 @@ _validate = settings.validate_responses
 from gandalf.openapi import construct_open_api_schema
 from gandalf.request_validation import (
     normalize_query_graph,
+    reject_retired_trapi_fields,
     validate_edge_node_references,
     validate_set_interpretation,
+)
+from gandalf.search.edge_constraints import ConstraintError, EdgeConstraints
+from gandalf.trapi import (
+    Deadline,
+    TimeoutNotSatisfiable,
+    finalize_response,
+    resolve_timeout,
 )
 
 configure_logging(
@@ -124,6 +132,46 @@ def _request_dict(body: dict, model: type[BaseModel]) -> dict:
         validated: dict = model.model_validate(body).model_dump(exclude_none=True)
         return validated
     return body
+
+
+def _prepare_query(raw: dict) -> Deadline:
+    """Validate a TRAPI request's query graph and read its query parameters.
+
+    Shared by ``/query`` and ``/asyncquery`` so both reject the same malformed
+    requests with the same status codes.
+
+    Args:
+        raw: The request body, normalized in place.
+
+    Returns:
+        The :class:`~gandalf.trapi.Deadline` for this query.
+
+    Raises:
+        HTTPException: 400 for a malformed query graph or constraints object,
+            409 when the requested ``parameters.timeout`` is below what this
+            server can answer within, 422 for an unsupported
+            ``set_interpretation``.
+    """
+    query_graph = raw["message"]["query_graph"]
+    normalize_query_graph(query_graph)
+    reject_retired_trapi_fields(query_graph)
+    validate_set_interpretation(query_graph)
+    validate_edge_node_references(query_graph)
+
+    # Parse each QEdge's constraints up front so a malformed constraint is a
+    # 400 here rather than an opaque 500 from deep inside the search.
+    for qedge_id, qedge in (query_graph.get("edges") or {}).items():
+        try:
+            EdgeConstraints.parse(qedge)
+        except ConstraintError as exc:
+            raise HTTPException(400, f"edge '{qedge_id}': {exc}") from exc
+
+    try:
+        return Deadline(resolve_timeout(raw.get("parameters")))
+    except TimeoutNotSatisfiable as exc:
+        # TRAPI 2.0 gives 409 to a conflict between the client's parameters
+        # and the server's capabilities.
+        raise HTTPException(409, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -517,10 +565,26 @@ def node_degree(curie: str):
 # ---------------------------------------------------------------------------
 
 
+#: Documented for both TRAPI query endpoints: a client's parameters.timeout
+#: can conflict with what this server is able to do.
+_CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
+    409: {
+        "description": "There is a conflict between client-given TRAPI "
+        "parameters and server capabilities."
+    }
+}
+
+
 @APP.post(
     "/query",
     response_model=TRAPIResponse if _validate else None,
-    responses={200: {"model": TRAPIResponse}},
+    # TRAPI 2.0 dropped `nullable` throughout, so an absent optional property
+    # must be absent rather than null.  Without this, strict mode would emit
+    # `"description": null` and a `parameters` object padded out with nulls,
+    # neither of which validates -- and neither of which the default
+    # (non-validating) path produces.
+    response_model_exclude_none=True,
+    responses={200: {"model": TRAPIResponse}, **_CONFLICT_RESPONSE},
 )
 def sync_lookup(
     request: dict = Body(...),
@@ -529,10 +593,11 @@ def sync_lookup(
         description="Emit per-stage timings into message.logs as ProfileStage / ProfileSummary entries",
     ),
 ):
-    """Execute a TRAPI query against the knowledge graph.
+    """Execute a TRAPI 2.0 query against the knowledge graph.
 
     Supports the 'lookup' workflow operation. All request configuration other
-    than ``profile`` is read from the body's ``parameters`` object.
+    than ``profile`` is read from the body's ``parameters`` object, including
+    TRAPI's own ``timeout``, ``log_level`` and ``bypass_cache``.
 
     The body is taken as a raw dict and not run through Pydantic validation
     unless ``validate_responses`` is enabled -- see ``_request_dict``.
@@ -542,17 +607,14 @@ def sync_lookup(
         raise HTTPException(503, "Graph not loaded")
 
     raw = _request_dict(request, TRAPIQuery)
-    params = raw.get("parameters", {})
+    params = raw.get("parameters") or {}
 
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
     if params.get("rehydrate") is not None:
         enrich_knowledge_graph(raw, GRAPH)
-        return _trapi_response({"message": raw["message"]})
+        return _trapi_response(finalize_response({"message": raw["message"]}, raw))
 
-    normalize_query_graph(raw["message"]["query_graph"])
-    validate_set_interpretation(raw["message"]["query_graph"])
-    validate_edge_node_references(raw["message"]["query_graph"])
-    log_level = raw.pop("log_level", None)
+    deadline = _prepare_query(raw)
 
     sc = params.get("subclass", True)
     subclass_depth = params.get("subclass_depth", 1)
@@ -568,9 +630,10 @@ def sync_lookup(
         subclass=sc,
         subclass_depth=subclass_depth,
         filter_config=filter_config,
-        log_level=log_level,
+        log_level=params.get("log_level"),
         dehydrated=dehydrated_param,
         profile=profile_param,
+        deadline=deadline,
     )
     if annotator_config:
         annotate_response(response, GRAPH, annotator_config)
@@ -587,6 +650,7 @@ def _async_lookup(
     query: dict,
     trace_headers: Optional[dict] = None,
     profile: bool = False,
+    deadline: Optional[Deadline] = None,
 ):
     """Execute lookup and POST results to callback URL.
 
@@ -595,20 +659,21 @@ def _async_lookup(
     callback POST stays linked to the originating trace.  The background task
     runs in a worker thread that does not inherit the request's contextvars,
     so the headers must be passed explicitly.  ``profile`` arrives from the
-    request's URL query parameter (it is no longer a body field).
+    request's URL query parameter (it is no longer a body field).  ``deadline``
+    likewise carries the client's ``parameters.timeout`` budget, measured from
+    when the request was accepted.
     """
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
-    params = query.get("parameters", {})
+    params = query.get("parameters") or {}
 
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
     if params.get("rehydrate") is not None:
         enrich_knowledge_graph(query, GRAPH)
-        response = {"message": query["message"]}
+        response = finalize_response({"message": query["message"]}, query)
     else:
         subclass = params.get("subclass", True)
         subclass_depth = params.get("subclass_depth", 1)
-        log_level = query.pop("log_level", None)
         dehydrated = params.get("dehydrated")
         filter_config = params.get("filter_config")
         annotator_config = params.get("annotator_config") or {}
@@ -619,9 +684,10 @@ def _async_lookup(
             subclass=subclass,
             subclass_depth=subclass_depth,
             filter_config=filter_config,
-            log_level=log_level,
+            log_level=params.get("log_level"),
             dehydrated=dehydrated,
             profile=profile,
+            deadline=deadline,
         )
         if annotator_config:
             annotate_response(response, GRAPH, annotator_config)
@@ -642,7 +708,23 @@ def _async_lookup(
         logger.exception("Callback to %s failed", callback_url)
 
 
-@APP.post("/asyncquery")
+def _async_accepted(callback: str) -> dict:
+    """Build the TRAPI AsyncQueryResponse for an accepted job.
+
+    TRAPI 2.0 requires ``job_id``; gandalf runs the query in this process and
+    POSTs the result to the callback rather than exposing an
+    ``/asyncquery_status`` endpoint, so the id identifies the job in this
+    server's logs.
+    """
+    return {
+        "status": "Accepted",
+        "description": "Query has been queued.",
+        "job_id": request_id_var.get("") or str(uuid.uuid4())[:8],
+        "callback": callback,
+    }
+
+
+@APP.post("/asyncquery", responses=_CONFLICT_RESPONSE)
 def async_query(
     background_tasks: BackgroundTasks,
     query: dict = Body(...),
@@ -671,13 +753,13 @@ def async_query(
     trace_headers: dict[str, str] = {}
     # Rehydration: skip lookup/workflow validation, only enrich the supplied
     # knowledge graph in the background and POST it to the callback.
-    if raw.get("parameters", {}).get("rehydrate") is not None:
+    if (raw.get("parameters") or {}).get("rehydrate") is not None:
         otel.inject_headers(trace_headers)
         logger.info("Doing async rehydration for %s", callback)
         background_tasks.add_task(
-            _async_lookup, callback, raw, trace_headers, bool(profile)
+            _async_lookup, callback, raw, trace_headers, bool(profile), None
         )
-        return {"status": "accepted", "callback": callback}
+        return _async_accepted(callback)
 
     # parse requested workflow (already a list of dicts in raw form)
     workflow_dicts = raw.get("workflow") or [{"id": "lookup", "parameters": None}]
@@ -694,16 +776,14 @@ def async_query(
         results = raw.get("message", {}).get("results", [])
         if max_results < len(results):
             raw["message"]["results"] = results[:max_results]
-        return _trapi_response(raw)
+        return _trapi_response(finalize_response({"message": raw["message"]}, raw))
     if workflow_dicts[0].get("id") != "lookup":
         raise HTTPException(400, "operations must have id 'lookup'")
 
     if (raw.get("set_interpretation") or "BATCH") == "MANY":
         raise HTTPException(422, "set_interpretation MANY not supported.")
 
-    normalize_query_graph(raw["message"]["query_graph"])
-    validate_set_interpretation(raw["message"]["query_graph"])
-    validate_edge_node_references(raw["message"]["query_graph"])
+    deadline = _prepare_query(raw)
 
     # Capture the active OTel trace context now (while still inside the
     # request span) so the background callback can propagate it to the
@@ -713,10 +793,10 @@ def async_query(
 
     logger.info("Doing async lookup for %s", callback)
     background_tasks.add_task(
-        _async_lookup, callback, raw, trace_headers, bool(profile)
+        _async_lookup, callback, raw, trace_headers, bool(profile), deadline
     )
 
-    return {"status": "accepted", "callback": callback}
+    return _async_accepted(callback)
 
 
 def _custom_openapi() -> dict:

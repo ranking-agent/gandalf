@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 # Fields that are structural (not stored as properties)
+#
+# ``knowledge_level`` and ``agent_type`` are structural under TRAPI 2.0, which
+# promotes them from edge attributes to required top-level Edge properties.
+# Keeping them out of the attribute list means an edge reports each exactly
+# once, in the place the schema puts it.
 _CORE_FIELDS = {
     "id",
     "category",
@@ -33,6 +38,8 @@ _CORE_FIELDS = {
     "sources",
     "primary_knowledge_source",
     "aggregator_knowledge_source",
+    "knowledge_level",
+    "agent_type",
 }
 
 # Node fields that become top-level TRAPI Node properties (not attributes).
@@ -287,14 +294,19 @@ def normalize_edge(raw: dict) -> dict:
     """Restructure a raw KGX edge dict into gandalf's normalized edge form.
 
     Produces the contract documented in ``gandalf.sources.base`` (subject,
-    object, predicate, id, plus the normalized sources/qualifiers/attributes
-    lists). Pure: does not mutate ``raw``.
+    object, predicate, id, knowledge_level, agent_type, plus the normalized
+    sources/qualifiers/attributes lists). ``knowledge_level`` and
+    ``agent_type`` pass through as ``None`` when the raw record omits them;
+    the loader substitutes the Biolink ``not_provided`` value. Pure: does not
+    mutate ``raw``.
     """
     return {
         "subject": raw["subject"],
         "object": raw["object"],
         "predicate": raw["predicate"],
         "id": raw.get("id"),
+        "knowledge_level": raw.get("knowledge_level"),
+        "agent_type": raw.get("agent_type"),
         "sources": _extract_sources(raw),
         "qualifiers": _extract_qualifiers(raw),
         "attributes": _extract_attributes(raw),

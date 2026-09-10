@@ -219,7 +219,7 @@ class TestRehydration:
             body["callback"] = callback_url
             resp = client.post("/asyncquery", json=body)
             assert resp.status_code == 200, resp.text
-            assert resp.json()["status"] == "accepted"
+            assert resp.json()["status"] == "Accepted"
 
             assert _wait_for(lambda: len(received) > 0), "callback never received POST"
             posted = received[0]
