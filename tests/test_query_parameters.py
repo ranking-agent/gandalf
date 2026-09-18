@@ -66,13 +66,17 @@ class TestQueryParametersModel:
 
     def test_parameters_absent_dumps_clean(self):
         q = TRAPIQuery(**_ONE_HOP)
-        raw = q.model_dump(exclude_none=True)
-        assert "parameters" not in raw
+        assert "parameters" not in q.to_dict()
 
     def test_parameters_present_round_trips(self):
+        """The server repeats the parameters it was *given*, nothing more.
+
+        ``to_dict()`` excludes unset defaults as well as nulls, so TOM's
+        ``bypass_cache=False`` default is not added to a request that never
+        mentioned it.
+        """
         q = TRAPIQuery(**_ONE_HOP, parameters={"subclass": True})
-        raw = q.model_dump(exclude_none=True)
-        assert raw["parameters"] == {"subclass": True}
+        assert q.to_dict()["parameters"] == {"subclass": True}
 
     def test_async_accepts_parameters(self):
         q = AsyncTRAPIQuery(
@@ -219,7 +223,7 @@ class TestRehydration:
             body["callback"] = callback_url
             resp = client.post("/asyncquery", json=body)
             assert resp.status_code == 200, resp.text
-            assert resp.json()["status"] == "accepted"
+            assert resp.json()["status"] == "Accepted"
 
             assert _wait_for(lambda: len(received) > 0), "callback never received POST"
             posted = received[0]
@@ -284,6 +288,36 @@ class TestResponseFastPath:
         assert resp.status_code == 200, resp.text
         assert "knowledge_graph" in resp.json()["message"]
         assert calls == [], "fast path must not validate the request via Pydantic"
+
+    def test_query_builds_no_tom_models_on_the_fast_path(self, server, monkeypatch):
+        """No TRAPI object model is constructed for a response by default.
+
+        The models exist for the request boundary, the OpenAPI schema and the
+        conformance tests.  Materializing one per result measures ~4.4x the
+        CPU and ~2.2x the peak RSS of building dicts and calling orjson, so
+        the response path must stay on plain dicts unless
+        ``validate_responses`` is set.
+        """
+        import translator_tom
+
+        gandalf_server, client = server
+
+        calls = []
+        for model_name in ("Response", "Message", "Result", "Edge", "Node"):
+            model = getattr(translator_tom, model_name)
+            for method in ("model_validate", "model_construct"):
+                orig = getattr(model, method)
+
+                def spy(*args, _name=model_name, _m=method, _orig=orig, **kwargs):
+                    calls.append(f"{_name}.{_m}")
+                    return _orig(*args, **kwargs)
+
+                monkeypatch.setattr(model, method, spy)
+
+        resp = client.post("/query", json=_ONE_HOP)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["message"]["results"]
+        assert calls == [], f"fast path constructed TRAPI models: {calls}"
 
     def test_openapi_documents_request_bodies(self, server):
         """Even though the handlers take a raw dict, the OpenAPI schema must

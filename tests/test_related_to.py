@@ -41,8 +41,8 @@ class TestRelatedToPredicateExpansion:
         results = response["message"]["results"]
 
         assert len(results) >= 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "CHEBI:6801"
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "MONDO:0005148"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "CHEBI:6801"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "MONDO:0005148"
 
     def test_related_to_both_pinned_inverse_direction(self, graph, bmt):
         """related_to should match edges stored in the REVERSE direction.
@@ -75,8 +75,8 @@ class TestRelatedToPredicateExpansion:
         # Before the fix this returned 0 results because inverse edges
         # were not checked when related_to was used
         assert len(results) >= 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "MONDO:0005148"
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "CHEBI:6801"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "MONDO:0005148"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "CHEBI:6801"
 
     def test_related_to_pinned_start_unpinned_end(self, graph, bmt):
         """related_to with pinned start should find ALL neighbors (both directions).
@@ -108,7 +108,7 @@ class TestRelatedToPredicateExpansion:
         response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
-        result_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        result_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
 
         # Forward (outgoing) edges from PPARG:
         #   PPARG --gene_associated_with_condition--> MONDO:0005148
@@ -156,7 +156,7 @@ class TestRelatedToPredicateExpansion:
         response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
 
-        result_ids = {r["node_bindings"]["n0"][0]["id"] for r in results}
+        result_ids = {r["node_bindings"]["n0"]["ids"][0] for r in results}
 
         # Forward (incoming edges to MONDO:0005148, i.e. subjects of edges
         # pointing at it):
@@ -214,11 +214,11 @@ class TestRelatedToPredicateExpansion:
         response_none = lookup(graph, query_none, bmt=bmt)
 
         ids_related = {
-            r["node_bindings"]["n1"][0]["id"]
+            r["node_bindings"]["n1"]["ids"][0]
             for r in response_related["message"]["results"]
         }
         ids_none = {
-            r["node_bindings"]["n1"][0]["id"]
+            r["node_bindings"]["n1"]["ids"][0]
             for r in response_none["message"]["results"]
         }
 
@@ -260,7 +260,7 @@ class TestRelatedToPredicateExpansion:
         results = response["message"]["results"]
 
         # Should find at least PPARG as the intermediate node
-        intermediate_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        intermediate_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert (
             "NCBIGene:5468" in intermediate_ids
         ), "Should find PPARG via inverse lookup on first hop"
@@ -324,10 +324,10 @@ class TestRelatedToPredicateExpansion:
         response_b = lookup(graph, query_b, bmt=bmt)
 
         intermediates_a = {
-            r["node_bindings"]["n1"][0]["id"] for r in response_a["message"]["results"]
+            r["node_bindings"]["n1"]["ids"][0] for r in response_a["message"]["results"]
         }
         intermediates_b = {
-            r["node_bindings"]["n1"][0]["id"] for r in response_b["message"]["results"]
+            r["node_bindings"]["n1"]["ids"][0] for r in response_b["message"]["results"]
         }
 
         assert intermediates_a == intermediates_b, (
@@ -402,11 +402,11 @@ class TestRelatedToPredicateExpansion:
         response_rev = lookup(graph, query_reversed, bmt=bmt)
 
         intermediates_fwd = {
-            r["node_bindings"]["n1"][0]["id"]
+            r["node_bindings"]["n1"]["ids"][0]
             for r in response_fwd["message"]["results"]
         }
         intermediates_rev = {
-            r["node_bindings"]["n1"][0]["id"]
+            r["node_bindings"]["n1"]["ids"][0]
             for r in response_rev["message"]["results"]
         }
 

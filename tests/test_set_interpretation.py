@@ -104,7 +104,7 @@ class TestBatchMode:
         # Metformin affects 4 genes: PPARG, INSR, GCK, TNF
         assert len(results) == 4
         for r in results:
-            assert len(r["node_bindings"]["n1"]) == 1
+            assert len(r["node_bindings"]["n1"]["ids"]) == 1
 
     def test_batch_explicit_same_as_default(self, graph, bmt):
         """Explicit BATCH produces same results as default."""
@@ -132,7 +132,7 @@ class TestBatchMode:
         results = response["message"]["results"]
         assert len(results) == 4
         for r in results:
-            assert len(r["node_bindings"]["n1"]) == 1
+            assert len(r["node_bindings"]["n1"]["ids"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +172,9 @@ class TestAllMode:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        n1_bindings = results[0]["node_bindings"]["n1"]
+        n1_bindings = results[0]["node_bindings"]["n1"]["ids"]
         assert len(n1_bindings) == 2
-        bound_ids = {b["id"] for b in n1_bindings}
+        bound_ids = set(n1_bindings)
         assert bound_ids == {"NCBIGene:5468", "NCBIGene:3643"}
 
     def test_all_mode_missing_id_returns_no_results(self, graph, bmt):
@@ -228,7 +228,7 @@ class TestAllMode:
         response = lookup(graph, query, bmt=bmt, subclass=False)
         results = response["message"]["results"]
         assert len(results) == 1
-        assert len(results[0]["node_bindings"]["n1"]) == 1
+        assert len(results[0]["node_bindings"]["n1"]["ids"]) == 1
 
     def test_all_mode_kg_contains_all_ids(self, graph, bmt):
         """ALL mode should include all bound IDs in the knowledge graph."""
@@ -293,8 +293,8 @@ class TestAllMode:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        n1_bindings = results[0]["node_bindings"]["n1"]
-        bound_ids = {b["id"] for b in n1_bindings}
+        n1_bindings = results[0]["node_bindings"]["n1"]["ids"]
+        bound_ids = set(n1_bindings)
         assert bound_ids == {"NCBIGene:5468", "NCBIGene:3643"}
 
 
@@ -336,8 +336,8 @@ class TestCollateMode:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        n1_bindings = results[0]["node_bindings"]["n1"]
-        bound_ids = {b["id"] for b in n1_bindings}
+        n1_bindings = results[0]["node_bindings"]["n1"]["ids"]
+        bound_ids = set(n1_bindings)
         assert bound_ids == {
             "NCBIGene:5468",
             "NCBIGene:3643",
@@ -414,7 +414,7 @@ class TestCollateMode:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        n1_bindings = results[0]["node_bindings"]["n1"]
-        bound_ids = {b["id"] for b in n1_bindings}
+        n1_bindings = results[0]["node_bindings"]["n1"]["ids"]
+        bound_ids = set(n1_bindings)
         # PPARG, INSR, GCK all connect Metformin to T2D
         assert bound_ids == {"NCBIGene:5468", "NCBIGene:3643", "NCBIGene:2645"}

@@ -5,7 +5,10 @@ import logging
 import sys
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, cast, get_args
+
+from translator_tom import LogLevel
+from translator_tom.model_dicts import LogEntryDict
 
 # Context variable for per-request ID propagation.
 request_id_var: ContextVar[str] = ContextVar("request_id", default="")
@@ -29,7 +32,9 @@ class _JSONFormatter(logging.Formatter):
         return json.dumps(entry)
 
 
-_TRAPI_LEVELS = {"ERROR", "WARNING", "INFO", "DEBUG"}
+#: The levels TRAPI's LogLevel admits, taken from the model rather than
+#: restated, so a spec change arrives with the dependency.
+_TRAPI_LEVELS: frozenset[str] = frozenset(get_args(LogLevel))
 
 
 def log_timestamp() -> str:
@@ -63,19 +68,23 @@ class TRAPILogCollector(logging.Handler):
 
     def __init__(self, level: int = logging.DEBUG):
         super().__init__(level)
-        self._entries: list[dict] = []
+        self._entries: list[LogEntryDict] = []
 
     def emit(self, record: logging.LogRecord) -> None:
+        entry: LogEntryDict = {
+            "timestamp": log_timestamp(),
+            "message": record.getMessage(),
+        }
+        # LogEntry.level is a TRAPI LogLevel enum, and TRAPI 2.0 admits no
+        # nulls, so a record logged at a level outside that enum (CRITICAL,
+        # or a custom level) carries no level rather than a null one.
         level_name = record.levelname
-        self._entries.append(
-            {
-                "timestamp": log_timestamp(),
-                "level": level_name if level_name in _TRAPI_LEVELS else None,
-                "message": record.getMessage(),
-            }
-        )
+        if level_name in _TRAPI_LEVELS:
+            # The membership test above is the narrowing mypy cannot see.
+            entry["level"] = cast("LogLevel", level_name)
+        self._entries.append(entry)
 
-    def get_logs(self) -> list[dict]:
+    def get_logs(self) -> list[LogEntryDict]:
         """Return collected log entries in chronological order."""
         return list(self._entries)
 

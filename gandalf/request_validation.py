@@ -5,10 +5,49 @@ kept separate from ``gandalf.server`` so they can be imported without
 triggering module-level graph loading.
 """
 
+from typing import Any, Optional
+
 from fastapi import HTTPException
+from translator_tom.model_dicts import MessageDict, QueryGraphDict
+
+#: Query-graph properties that TRAPI 2.0 gives a ``minItems`` of 1, so an
+#: empty value has to be dropped rather than echoed back.  Everything else is
+#: only stripped when it is ``None``.
+_EMPTY_FORBIDDEN_QUERY_GRAPH_PROPERTIES = frozenset(
+    {
+        "ids",  # QNode.ids
+        "categories",  # QNode.categories
+        "member_ids",  # QNode.member_ids
+        "constraints",  # QNode.constraints / QPath.constraints
+        "predicates",  # QEdge.predicates / QPath.predicates
+    }
+)
+
+#: The same, one level down inside a QEdge's ``constraints`` object.
+_EMPTY_FORBIDDEN_CONSTRAINTS_PROPERTIES = frozenset({"attributes", "qualifiers"})
 
 
-def normalize_query_graph(query_graph: dict) -> None:
+def _strip_empty(element: Any, empty_forbidden: frozenset) -> None:
+    """Drop ``None`` values from *element*, and empty ones where 2.0 forbids them.
+
+    Takes the element as ``Any`` because it walks keys dynamically: a TypedDict
+    cannot be subscripted, or deleted from, with a non-literal key.
+
+    Args:
+        element: A query-graph element -- QNode, QEdge, QPath or a QEdge's
+            constraints object (mutated in place).
+        empty_forbidden: Property names whose empty value is also invalid.
+    """
+    properties: dict[str, Any] = element
+    for key in [
+        k
+        for k, v in properties.items()
+        if v is None or (k in empty_forbidden and not v)
+    ]:
+        del properties[key]
+
+
+def normalize_query_graph(query_graph: QueryGraphDict) -> None:
     """Drop optional fields whose value is ``None`` from a query graph in place.
 
     On the default (non-validating) request path the raw client body is used
@@ -29,18 +68,37 @@ def normalize_query_graph(query_graph: dict) -> None:
     edge. This mirrors ``model_dump(exclude_none=True)`` but only walks the
     (small) query graph rather than the full request body, so it does not
     reintroduce the per-request cost the fast path was added to avoid.
+
+    Empty lists are stripped for the same reason plus a second one: the query
+    graph is echoed back in the response, and TRAPI 2.0 gives every one of
+    these properties a ``minItems`` of 1, so ``"categories": []`` on the way
+    in would be an invalid ``message.query_graph`` on the way out.
     """
-    for container in (query_graph.get("nodes"), query_graph.get("edges")):
+    containers = (
+        query_graph.get("nodes"),
+        query_graph.get("edges"),
+        query_graph.get("paths"),
+    )
+    for container in containers:
         if not isinstance(container, dict):
             continue
         for element in container.values():
             if not isinstance(element, dict):
                 continue
-            for key in [k for k, v in element.items() if v is None]:
-                del element[key]
+            _strip_empty(element, _EMPTY_FORBIDDEN_QUERY_GRAPH_PROPERTIES)
+            # A QEdge's TRAPI 2.0 constraints object needs the same treatment:
+            # ``{"constraints": {"qualifiers": null}}`` must read as "no
+            # qualifier constraint", not as a null the parser has to defend
+            # against, and an empty ``constraints`` object is invalid too
+            # (minProperties 1).
+            constraints = element.get("constraints")
+            if isinstance(constraints, dict):
+                _strip_empty(constraints, _EMPTY_FORBIDDEN_CONSTRAINTS_PROPERTIES)
+                if not constraints:
+                    del element["constraints"]
 
 
-def validate_set_interpretation(query_graph: dict) -> None:
+def validate_set_interpretation(query_graph: QueryGraphDict) -> None:
     """Validate node-level ``set_interpretation`` values.
 
     Raises ``HTTPException(422)`` for unsupported or invalid configurations:
@@ -70,7 +128,95 @@ def validate_set_interpretation(query_graph: dict) -> None:
             )
 
 
-def validate_edge_node_references(query_graph: dict) -> None:
+# TRAPI 1.x request fields that 2.0 replaced.  Each maps to the 2.0 spelling
+# so the error can name the fix.
+_RETIRED_QEDGE_FIELDS = {
+    "qualifier_constraints": "constraints.qualifiers",
+    "attribute_constraints": "constraints.attributes",
+}
+_RETIRED_QPATH_CONSTRAINT_FIELDS = {
+    "intermediate_categories": "required_intermediate_categories",
+}
+
+
+def reject_retired_trapi_fields(query_graph: QueryGraphDict) -> None:
+    """Reject TRAPI 1.x query-graph fields that 2.0 renamed.
+
+    The 2.0 schema sets ``additionalProperties: true`` on QEdge, so a stray
+    ``qualifier_constraints`` would simply be ignored -- and a client that
+    asked for filtering would silently get unfiltered results back, which is
+    worse than an error.  Name the 2.0 replacement instead.
+
+    Raises ``HTTPException(400)`` for the first retired field found.
+    """
+    for qedge_id, qedge in (query_graph.get("edges") or {}).items():
+        if not isinstance(qedge, dict):
+            continue
+        for retired, replacement in _RETIRED_QEDGE_FIELDS.items():
+            if retired in qedge:
+                raise HTTPException(
+                    400,
+                    f"edge '{qedge_id}' uses '{retired}', which TRAPI 2.0 "
+                    f"replaced with '{replacement}'",
+                )
+
+    for qpath_id, qpath in (query_graph.get("paths") or {}).items():
+        if not isinstance(qpath, dict):
+            continue
+        for constraint in qpath.get("constraints") or []:
+            if not isinstance(constraint, dict):
+                continue
+            for retired, replacement in _RETIRED_QPATH_CONSTRAINT_FIELDS.items():
+                if retired in constraint:
+                    raise HTTPException(
+                        400,
+                        f"path '{qpath_id}' uses '{retired}', which TRAPI 2.0 "
+                        f"replaced with '{replacement}'",
+                    )
+
+
+def require_query_graph(message: Optional[MessageDict]) -> QueryGraphDict:
+    """Return the request's query graph, or reject the request.
+
+    TRAPI 2.0 gives ``Message`` no required properties, so a body of
+    ``{"message": {}}`` is valid TRAPI that this server still cannot answer.
+    Without this check it reaches ``raw["message"]["query_graph"]`` and raises
+    ``KeyError`` behind an opaque 500.
+
+    Raises ``HTTPException(400)`` when there is no query graph to execute.
+    """
+    # The default request path does not validate the body, so these runtime
+    # checks guard against a shape the annotation promises but a client may
+    # not have sent.
+    query_graph = message.get("query_graph") if isinstance(message, dict) else None
+    if not isinstance(query_graph, dict) or not query_graph:  # type: ignore[unreachable]
+        raise HTTPException(
+            400, "message must include a 'query_graph' with nodes and edges"
+        )
+    return query_graph
+
+
+def validate_query_graph_is_executable(query_graph: QueryGraphDict) -> None:
+    """Require a non-empty ``edges`` map on the query graph.
+
+    Gandalf answers lookup queries; it does not execute Pathfinder ``paths``
+    (``x-trapi.pathfinderquery`` is false).  Without this check a query graph
+    carrying no ``edges`` key reaches the planner and raises ``KeyError``
+    behind an opaque 500, and one carrying an empty ``edges`` map returns 0
+    results with an invalid ``message.query_graph`` echoed back --
+    ``QueryGraph.edges`` has a ``minProperties`` of 1.
+
+    Raises ``HTTPException(400)`` when there is nothing to execute.
+    """
+    if not query_graph.get("edges"):
+        raise HTTPException(
+            400,
+            "query_graph must include a non-empty 'edges' map; this server "
+            "executes lookup queries and does not support Pathfinder 'paths'",
+        )
+
+
+def validate_edge_node_references(query_graph: QueryGraphDict) -> None:
     """Validate that every qedge references nodes that exist in the graph.
 
     The query planner indexes into ``query_graph["nodes"]`` using each

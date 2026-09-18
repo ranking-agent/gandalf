@@ -108,63 +108,51 @@ class QualifierExpander:
     def expand_qualifier_constraints(
         self, qualifier_constraints: list[dict]
     ) -> list[dict]:
-        """Expand qualifier constraints to include descendant values.
+        """Expand a QEdge's qualifier constraints to include descendant values.
 
-        This transforms each qualifier in a qualifier_set by expanding its value
-        to include descendant values. The result uses a special format where each
-        qualifier has "qualifier_values" (plural) containing all acceptable values.
+        A TRAPI 2.0 ``QualifierSetConstraint`` maps each ``qualifier_type_id``
+        to a single required ``qualifier_value``.  This widens each of those
+        values to the list of values that should also match — the value itself
+        plus its Biolink descendants — which
+        :func:`~gandalf.search.qualifiers.edge_matches_qualifier_constraints`
+        reads as "any of these".
 
-        The matching semantics remain:
-        - OR between qualifier_sets (edge matches if ANY set matches)
-        - AND within each qualifier_set (edge must match ALL qualifiers in a set)
-        - OR between expanded values (edge matches if it has ANY of the descendant values)
+        The matching semantics are unchanged:
+
+        - OR between constraints (edge matches if ANY constraint matches)
+        - AND within a constraint (edge must carry every type-value pair)
+        - OR between the expanded values of one type
 
         Args:
-            qualifier_constraints: List of qualifier constraint dicts, each with
-                                   a 'qualifier_set' containing qualifiers to match
+            qualifier_constraints: The QEdge's ``constraints.qualifiers`` list,
+                each entry a ``{qualifier_type_id: qualifier_value}`` mapping.
 
         Returns:
-            Expanded qualifier constraints with "qualifier_values" lists
+            The same list of mappings with each value replaced by its list of
+            acceptable values.
         """
         if not qualifier_constraints:
             return qualifier_constraints
 
         expanded_constraints = []
         for constraint in qualifier_constraints:
-            qualifier_set = constraint.get("qualifier_set", [])
-            if not qualifier_set:
-                # Empty qualifier_set matches any edge, keep as-is
-                expanded_constraints.append(constraint)
-                continue
-
-            # Expand each qualifier in the set
-            expanded_qualifiers = []
-            for qualifier in qualifier_set:
-                type_id = qualifier.get("qualifier_type_id")
-                value = qualifier.get("qualifier_value")
-
-                if not type_id or not value:
-                    # Keep original if missing fields
-                    expanded_qualifiers.append(qualifier)
+            expanded: dict[str, list[str]] = {}
+            for type_id, value in constraint.items():
+                if not type_id or not isinstance(value, str) or not value:
+                    # Nothing to expand; keep whatever was sent so the matcher
+                    # can judge it on its own terms.
+                    expanded[type_id] = value
                     continue
 
-                # Get descendant values (includes original). The qualified_predicate
-                # qualifier takes predicate CURIEs as values, so expand it through
-                # the predicate hierarchy; all other qualifiers use enum values.
+                # The qualified_predicate qualifier takes predicate CURIEs as
+                # values, so expand it through the predicate hierarchy; all
+                # other qualifiers use enum values.
                 if type_id == self.QUALIFIED_PREDICATE:
-                    descendant_values = self.get_predicate_value_descendants(value)
+                    expanded[type_id] = self.get_predicate_value_descendants(value)
                 else:
-                    descendant_values = self.get_value_descendants(value)
+                    expanded[type_id] = self.get_value_descendants(value)
 
-                # Create expanded qualifier with list of acceptable values
-                expanded_qualifiers.append(
-                    {
-                        "qualifier_type_id": type_id,
-                        "qualifier_values": descendant_values,  # plural - list of values
-                    }
-                )
-
-            expanded_constraints.append({"qualifier_set": expanded_qualifiers})
+            expanded_constraints.append(expanded)
 
         return expanded_constraints
 

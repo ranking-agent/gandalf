@@ -77,9 +77,9 @@ class TestDirectEdgeCoexistsWithSubclass:
         assert len(results) == 1
 
         bound_ids = {
-            eb["id"]
+            eid
             for result in results
-            for eb in result["analyses"][0]["edge_bindings"]["e0"]
+            for eid in result["analyses"][0]["edge_bindings"]["e0"]["ids"]
         }
 
         direct_bound = [

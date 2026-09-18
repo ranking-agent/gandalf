@@ -491,7 +491,7 @@ class TestNodeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_node_constraint_less_than_ic(self, graph, bmt):
@@ -532,7 +532,7 @@ class TestNodeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:2645"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:2645"
 
     def test_node_constraint_not_negation(self, graph, bmt):
         """Negated node constraint should exclude matching nodes.
@@ -573,7 +573,7 @@ class TestNodeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n0"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n0"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:3643", "NCBIGene:2645"}
 
     def test_empty_constraints_no_filtering(self, graph, bmt):
@@ -649,7 +649,7 @@ class TestNodeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643"}
 
     def test_node_constraint_filters_all_returns_empty(self, graph, bmt):
@@ -688,48 +688,52 @@ class TestNodeConstraintsIntegration:
 
 
 # ---------------------------------------------------------------------------
-# Integration tests: edge attribute_constraints filtering through lookup
+# Integration tests: QEdge constraints.attributes filtering through lookup
 # ---------------------------------------------------------------------------
 
 
-class TestEdgeAttributeConstraintsIntegration:
-    """Test edge attribute_constraints in full TRAPI queries."""
-
-    def test_edge_constraint_knowledge_level_matches_all(self, graph, bmt):
-        """All edges have knowledge_level=knowledge_assertion.
-
-        Constraining to that value should keep all results unchanged.
-        Metformin --affects--> Gene normally returns 4 genes.
-        """
-        query = {
-            "message": {
-                "query_graph": {
-                    "nodes": {
-                        "n0": {"ids": ["CHEBI:6801"]},
-                        "n1": {"categories": ["biolink:Gene"]},
-                    },
-                    "edges": {
-                        "e0": {
-                            "subject": "n0",
-                            "object": "n1",
-                            "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:knowledge_level",
-                                    "name": "knowledge level",
-                                    "operator": "==",
-                                    "value": "knowledge_assertion",
-                                }
-                            ],
-                        },
+def _edge_attribute_query(attributes: list) -> dict:
+    """A CHEBI:6801 --affects--> Gene query with edge attribute constraints."""
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["CHEBI:6801"]},
+                    "n1": {"categories": ["biolink:Gene"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:affects"],
+                        "constraints": {"attributes": attributes},
                     },
                 },
             },
-        }
+        },
+    }
+
+
+class TestEdgeAttributeConstraintsIntegration:
+    """Test QEdge constraints.attributes in full TRAPI queries."""
+
+    def test_edge_constraint_publications_keeps_only_cited_edge(self, graph, bmt):
+        """An attribute constraint on publications filters to the citing edge."""
+        query = _edge_attribute_query(
+            [
+                {
+                    "id": "biolink:publications",
+                    "operator": "==",
+                    "value": "PMID:23456789",
+                }
+            ]
+        )
 
         response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
-        assert len(results) == 4
+        assert {r["node_bindings"]["n1"]["ids"][0] for r in results} == {
+            "NCBIGene:5468"
+        }
 
     def test_edge_constraint_knowledge_level_no_match(self, graph, bmt):
         """No edges have knowledge_level=prediction, so all should be filtered out."""
@@ -745,14 +749,16 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:knowledge_level",
-                                    "name": "knowledge level",
-                                    "operator": "==",
-                                    "value": "prediction",
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:knowledge_level",
+                                        "name": "knowledge level",
+                                        "operator": "==",
+                                        "value": "prediction",
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -785,14 +791,16 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:publications",
-                                    "name": "publications",
-                                    "operator": "matches",
-                                    "value": "23456789",
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:publications",
+                                        "name": "publications",
+                                        "operator": "matches",
+                                        "value": "23456789",
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -803,44 +811,31 @@ class TestEdgeAttributeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468"}
 
     def test_edge_constraint_not_negation(self, graph, bmt):
         """Negated edge constraint should exclude matching edges.
 
-        NOT knowledge_level == knowledge_assertion → no edges pass → 0 results.
+        Every ``CHEBI:6801 --affects--> Gene`` fixture edge cites exactly one
+        PMID, so excluding PPARG's leaves the other three genes.
         """
-        query = {
-            "message": {
-                "query_graph": {
-                    "nodes": {
-                        "n0": {"ids": ["CHEBI:6801"]},
-                        "n1": {"categories": ["biolink:Gene"]},
-                    },
-                    "edges": {
-                        "e0": {
-                            "subject": "n0",
-                            "object": "n1",
-                            "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:knowledge_level",
-                                    "name": "knowledge level",
-                                    "operator": "==",
-                                    "value": "knowledge_assertion",
-                                    "not": True,
-                                }
-                            ],
-                        },
-                    },
-                },
-            },
-        }
+        query = _edge_attribute_query(
+            [
+                {
+                    "id": "biolink:publications",
+                    "operator": "==",
+                    "value": "PMID:23456789",
+                    "not": True,
+                }
+            ]
+        )
 
         response = lookup(graph, query, bmt=bmt)
-        results = response["message"]["results"]
-        assert len(results) == 0
+        gene_ids = {
+            r["node_bindings"]["n1"]["ids"][0] for r in response["message"]["results"]
+        }
+        assert gene_ids == {"NCBIGene:3643", "NCBIGene:2645", "NCBIGene:7124"}
 
     def test_edge_constraint_nonexistent_attribute(self, graph, bmt):
         """Constraining on an attribute that doesn't exist should filter all edges."""
@@ -856,14 +851,16 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:fake_attribute",
-                                    "name": "fake",
-                                    "operator": "==",
-                                    "value": "anything",
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:fake_attribute",
+                                        "name": "fake",
+                                        "operator": "==",
+                                        "value": "anything",
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -875,7 +872,7 @@ class TestEdgeAttributeConstraintsIntegration:
         assert len(results) == 0
 
     def test_edge_constraint_empty_list_no_filtering(self, graph, bmt):
-        """Empty attribute_constraints list should not filter anything."""
+        """An empty constraints.attributes list should not filter anything."""
         query = {
             "message": {
                 "query_graph": {
@@ -888,7 +885,7 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [],
+                            "constraints": {"attributes": []},
                         },
                     },
                 },
@@ -900,7 +897,7 @@ class TestEdgeAttributeConstraintsIntegration:
         assert len(results) == 4
 
     def test_edge_and_node_constraints_combined(self, graph, bmt):
-        """Both node constraints and edge attribute_constraints applied together.
+        """Both node constraints and edge constraints.attributes applied together.
 
         Metformin --affects--> Gene:
           Node constraint: IC > 90 → keeps PPARG(92.3) and TNF(94.5)
@@ -930,14 +927,16 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:publications",
-                                    "name": "publications",
-                                    "operator": "matches",
-                                    "value": "23456789",
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:publications",
+                                        "name": "publications",
+                                        "operator": "matches",
+                                        "value": "23456789",
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -948,11 +947,11 @@ class TestEdgeAttributeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468"}
 
     def test_edge_constraint_backward_search(self, graph, bmt):
-        """Edge attribute_constraints work in backward search (start unpinned).
+        """Edge constraints.attributes work in backward search (start unpinned).
 
         Gene --gene_associated_with_condition--> T2D:
           PPARG edge: pub PMID:34567890
@@ -973,14 +972,16 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:gene_associated_with_condition"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:publications",
-                                    "name": "publications",
-                                    "operator": "matches",
-                                    "value": "34567890",
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:publications",
+                                        "name": "publications",
+                                        "operator": "matches",
+                                        "value": "34567890",
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -991,10 +992,10 @@ class TestEdgeAttributeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:5468"
 
     def test_edge_constraint_both_pinned(self, graph, bmt):
-        """Edge attribute_constraints work when both ends are pinned.
+        """Edge constraints.attributes work when both ends are pinned.
 
         Metformin --treats--> T2D has 2 edges:
           drugcentral: pub PMID:12345678
@@ -1015,14 +1016,16 @@ class TestEdgeAttributeConstraintsIntegration:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:treats"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:publications",
-                                    "name": "publications",
-                                    "operator": "matches",
-                                    "value": "55555555",
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:publications",
+                                        "name": "publications",
+                                        "operator": "matches",
+                                        "value": "55555555",
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -1078,14 +1081,16 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:p_value",
-                                    "name": "p-value",
-                                    "operator": "<",
-                                    "value": 0.01,
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:p_value",
+                                        "name": "p-value",
+                                        "operator": "<",
+                                        "value": 0.01,
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -1096,7 +1101,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_evidence_count_greater_than(self, graph, bmt):
@@ -1113,14 +1118,16 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:evidence_count",
-                                    "name": "evidence count",
-                                    "operator": ">",
-                                    "value": 10,
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:evidence_count",
+                                        "name": "evidence count",
+                                        "operator": ">",
+                                        "value": 10,
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -1131,7 +1138,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_p_value_and_evidence_count_combined(self, graph, bmt):
@@ -1155,20 +1162,22 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:p_value",
-                                    "name": "p-value",
-                                    "operator": "<",
-                                    "value": 0.05,
-                                },
-                                {
-                                    "id": "biolink:evidence_count",
-                                    "name": "evidence count",
-                                    "operator": ">",
-                                    "value": 4,
-                                },
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:p_value",
+                                        "name": "p-value",
+                                        "operator": "<",
+                                        "value": 0.05,
+                                    },
+                                    {
+                                        "id": "biolink:evidence_count",
+                                        "name": "evidence count",
+                                        "operator": ">",
+                                        "value": 4,
+                                    },
+                                ]
+                            },
                         },
                     },
                 },
@@ -1179,7 +1188,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 3
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643", "NCBIGene:7124"}
 
     def test_very_strict_p_value_filters_all(self, graph, bmt):
@@ -1196,14 +1205,16 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:p_value",
-                                    "name": "p-value",
-                                    "operator": "<",
-                                    "value": 0.0001,
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:p_value",
+                                        "name": "p-value",
+                                        "operator": "<",
+                                        "value": 0.0001,
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -1228,14 +1239,16 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:evidence_count",
-                                    "name": "evidence count",
-                                    "operator": "==",
-                                    "value": 20,
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:evidence_count",
+                                        "name": "evidence count",
+                                        "operator": "==",
+                                        "value": 20,
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -1246,7 +1259,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:7124"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:7124"
 
     def test_p_value_backward_search(self, graph, bmt):
         """Numeric edge constraints work in backward search.
@@ -1270,14 +1283,16 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:gene_associated_with_condition"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:p_value",
-                                    "name": "p-value",
-                                    "operator": "<",
-                                    "value": 0.05,
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:p_value",
+                                        "name": "p-value",
+                                        "operator": "<",
+                                        "value": 0.05,
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -1288,7 +1303,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:5468"
 
     def test_evidence_count_two_hop_with_edge_constraint(self, graph, bmt):
         """Edge constraints on a two-hop query filter the constrained hop only.
@@ -1315,14 +1330,16 @@ class TestNumericEdgeConstraints:
                             "subject": "n1",
                             "object": "n2",
                             "predicates": ["biolink:gene_associated_with_condition"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:evidence_count",
-                                    "name": "evidence count",
-                                    "operator": ">",
-                                    "value": 10,
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:evidence_count",
+                                        "name": "evidence count",
+                                        "operator": ">",
+                                        "value": 10,
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -1333,7 +1350,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
 
     def test_node_and_numeric_edge_constraints_combined(self, graph, bmt):
         """Combine node IC constraint with numeric edge constraint.
@@ -1365,14 +1382,16 @@ class TestNumericEdgeConstraints:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": [
-                                {
-                                    "id": "biolink:p_value",
-                                    "name": "p-value",
-                                    "operator": "<",
-                                    "value": 0.001,
-                                }
-                            ],
+                            "constraints": {
+                                "attributes": [
+                                    {
+                                        "id": "biolink:p_value",
+                                        "name": "p-value",
+                                        "operator": "<",
+                                        "value": 0.001,
+                                    }
+                                ]
+                            },
                         },
                     },
                 },
@@ -1383,7 +1402,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:7124"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:7124"
 
 
 # ---------------------------------------------------------------------------
@@ -1602,9 +1621,11 @@ def _pmid_query(subject, obj, predicate, value, negated=False, operator="=="):
                         "subject": "n0",
                         "object": "n1",
                         "predicates": [predicate],
-                        "attribute_constraints": _pub_constraint(
-                            value, operator=operator, negated=negated
-                        ),
+                        "constraints": {
+                            "attributes": _pub_constraint(
+                                value, operator=operator, negated=negated
+                            )
+                        },
                     },
                 },
             },
@@ -1631,7 +1652,7 @@ class TestPubMedEdgeFiltering:
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
 
     def test_several_pmids_keep_every_cited_edge(self, graph, bmt):
         query = _pmid_query(
@@ -1642,7 +1663,7 @@ class TestPubMedEdgeFiltering:
         )
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_bare_accession_is_accepted(self, graph, bmt):
@@ -1655,7 +1676,7 @@ class TestPubMedEdgeFiltering:
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
 
     def test_unknown_pmid_yields_no_results(self, graph, bmt):
         query = _pmid_query(
@@ -1676,7 +1697,7 @@ class TestPubMedEdgeFiltering:
         )
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert "NCBIGene:5468" not in gene_ids
         assert gene_ids == {"NCBIGene:3643", "NCBIGene:2645", "NCBIGene:7124"}
 
@@ -1691,7 +1712,7 @@ class TestPubMedEdgeFiltering:
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:5468"
 
     def test_both_pinned_selects_one_of_two_parallel_edges(self, graph, bmt):
         """Metformin --treats--> T2D has a drugcentral edge (PMID:12345678)
@@ -1733,13 +1754,17 @@ class TestPubMedEdgeFiltering:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": _pub_constraint("PMID:23456789"),
+                            "constraints": {
+                                "attributes": _pub_constraint("PMID:23456789")
+                            },
                         },
                         "e1": {
                             "subject": "n1",
                             "object": "n2",
                             "predicates": ["biolink:gene_associated_with_condition"],
-                            "attribute_constraints": _pub_constraint("PMID:34567890"),
+                            "constraints": {
+                                "attributes": _pub_constraint("PMID:34567890")
+                            },
                         },
                     },
                 },
@@ -1748,7 +1773,7 @@ class TestPubMedEdgeFiltering:
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
 
     def test_two_hop_query_with_conflicting_pmids_yields_nothing(self, graph, bmt):
         """The second hop's PMID belongs to a different gene's edge."""
@@ -1765,14 +1790,18 @@ class TestPubMedEdgeFiltering:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "attribute_constraints": _pub_constraint("PMID:23456789"),
+                            "constraints": {
+                                "attributes": _pub_constraint("PMID:23456789")
+                            },
                         },
                         "e1": {
                             "subject": "n1",
                             "object": "n2",
                             "predicates": ["biolink:gene_associated_with_condition"],
                             # PMID:45678901 is on the NCBIGene:3643 edge.
-                            "attribute_constraints": _pub_constraint("PMID:45678901"),
+                            "constraints": {
+                                "attributes": _pub_constraint("PMID:45678901")
+                            },
                         },
                     },
                 },

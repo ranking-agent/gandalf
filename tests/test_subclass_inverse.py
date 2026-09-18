@@ -37,14 +37,12 @@ def _assert_all_results_connected(response):
     kg_edges = response["message"]["knowledge_graph"]["edges"]
     for ri, result in enumerate(response["message"]["results"]):
         bound_node_ids = set()
-        for bindings in result["node_bindings"].values():
-            for b in bindings:
-                bound_node_ids.add(b["id"])
+        for binding in result["node_bindings"].values():
+            bound_node_ids.update(binding["ids"])
 
         for analysis in result.get("analyses", []):
-            for qeid, ebindings in analysis.get("edge_bindings", {}).items():
-                for eb in ebindings:
-                    eid = eb["id"]
+            for qeid, ebinding in analysis.get("edge_bindings", {}).items():
+                for eid in ebinding["ids"]:
                     kg_edge = kg_edges.get(eid)
                     assert (
                         kg_edge is not None
@@ -300,8 +298,8 @@ class TestSubclassInverseEdgeDirection:
 
         # Node bindings should use queried IDs
         for result in results:
-            assert result["node_bindings"]["n0"][0]["id"] == "CHEBI:6801"
-            assert result["node_bindings"]["n2"][0]["id"] == "MONDO:0005015"
+            assert result["node_bindings"]["n0"]["ids"][0] == "CHEBI:6801"
+            assert result["node_bindings"]["n2"]["ids"][0] == "MONDO:0005015"
 
     def test_all_kg_edge_endpoints_in_kg_nodes(self, graph, bmt):
         """Every KG edge's subject and object must exist in KG nodes."""

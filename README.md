@@ -15,7 +15,8 @@ A high-performance Python library and [Translator](https://ncats.nih.gov/transla
 - **Subclass expansion** via Biolink Model Toolkit with configurable depth
 - **Batch property enrichment** — enrich only final paths, not intermediate results
 - **Diagnostic tools** to understand path counts and explosion
-- **TRAPI 1.5 compatible** REST API with Plater-compatible endpoints
+- **TRAPI 2.0 compatible** REST API with Plater-compatible endpoints, modelled
+  with [`translator_tom`](https://github.com/NCATSTranslator/TRAPIObjectModeling)
 - **Async query support** with callback URLs
 - **Dehydrated mode** for lightweight responses that skip edge and node attribute enrichment
 - **OpenTelemetry tracing** with Jaeger integration
@@ -69,6 +70,23 @@ graph = build_graph_from_jsonl(
 graph.save_mmap("data/processed/gandalf_mmap")
 ```
 
+> **Upgrading to TRAPI 2.0 requires a rebuild.** Some of what 2.0 mandates is
+> baked into the serialized graph, so a graph built by an earlier version
+> cannot serve a conformant response. `CSRGraph.load_mmap` refuses such a
+> graph outright with a `GraphFormatError` naming the rebuild, rather than
+> starting up and serving edges with no `knowledge_level` / `agent_type`.
+>
+> Baked in at build time (a rebuild is the only way to change these):
+> `knowledge_level` / `agent_type` on every edge, `Node.name` omitted when
+> unknown, `Node.categories` defaulted to `biolink:NamedThing`,
+> `RetrievalSource.upstream_resource_ids` omitted when empty, and the
+> persisted `meta_kg.json` / `sri_testing_data.json`.
+>
+> Everything else 2.0 changed is computed per query and takes effect on
+> deploy: binding shapes, `QEdge.constraints`, the `parameters` object and its
+> timeout, the response envelope, and the remaining null / empty-container
+> rules.
+
 ### Query paths (TRAPI format)
 
 ```python
@@ -102,15 +120,10 @@ response = lookup(
 print(f"Found {len(response['message']['results'])} paths")
 ```
 
-### Filtering edges by attribute (including PubMed IDs)
+### Constraining query edges
 
-Any query edge accepts TRAPI `attribute_constraints`, evaluated against the
-edge's attributes; query nodes accept the same shape under `constraints`.
-Multiple constraints are ANDed, and `"not": true` negates one.
-
-Attribute values are often lists — `publications` above all — and every
-operator except `===` is applied to each member, so `==` reads as "contains".
-Filtering an edge down to specific PubMed IDs is therefore plain equality:
+TRAPI 2.0 gathers every constraint on a query edge into one `constraints`
+object. All constraints given must hold:
 
 ```python
 "edges": {
@@ -118,15 +131,63 @@ Filtering an edge down to specific PubMed IDs is therefore plain equality:
         "subject": "n0",
         "object": "n1",
         "predicates": ["biolink:affects"],
-        "attribute_constraints": [
-            {
-                "id": "biolink:publications",
-                "name": "publications",
-                "operator": "==",
-                "value": ["PMID:23456789", "PMID:11111111"],
-            }
-        ],
+        "constraints": {
+            "knowledge_level": {
+                "behavior": "ALLOW",
+                "values": ["knowledge_assertion"],
+            },
+            "agent_type": {"behavior": "DENY", "values": ["text_mining_agent"]},
+            "sources": {
+                "behavior": "ALLOW",
+                "values": ["infores:ctd"],
+                "primary_only": True,
+            },
+            "qualifiers": [
+                {"biolink:object_aspect_qualifier": "activity"},
+            ],
+            "attributes": [
+                {"id": "biolink:publications", "operator": "==", "value": [...]},
+            ],
+        },
     }
+}
+```
+
+- `knowledge_level` / `agent_type` — allow or deny Biolink values on the bound
+  edges. `ALLOW` needs at least one listed value to be present; `DENY` needs
+  none of them to be.
+- `sources` — the same allow/deny over the infores CURIEs in an edge's
+  `sources`. `primary_only` narrows the check to the source whose role is
+  `primary_knowledge_source`, so a constraint can ignore aggregators.
+- `qualifiers` — a list of qualifier mappings. AND within one mapping, OR
+  between them. Values expand through the Biolink hierarchy, so a query for a
+  parent value also matches edges carrying a child value.
+- `attributes` — attribute constraints, evaluated against the edge's
+  attributes. Query nodes accept the same list directly under `constraints`.
+  `"not": true` negates one.
+
+Migrating from TRAPI 1.x: `qualifier_constraints` is now
+`constraints.qualifiers` (and its `qualifier_set` list of
+`qualifier_type_id`/`qualifier_value` pairs collapses into a single mapping),
+and `attribute_constraints` is now `constraints.attributes`. Gandalf rejects
+the old field names with a 400 rather than ignoring them, so a stale client
+never silently receives unfiltered results.
+
+#### Filtering edges by PubMed ID
+
+Attribute values are often lists — `publications` above all — and every
+operator except `===` is applied to each member, so `==` reads as "contains".
+Filtering an edge down to specific PubMed IDs is therefore plain equality:
+
+```python
+"constraints": {
+    "attributes": [
+        {
+            "id": "biolink:publications",
+            "operator": "==",
+            "value": ["PMID:23456789", "PMID:11111111"],
+        }
+    ]
 }
 ```
 
@@ -179,13 +240,17 @@ gunicorn gandalf.server:APP -c gunicorn.conf.py
 Both `/query` and `/asyncquery` accept a single optional query parameter:
 - `?profile=true` — Emit per-stage timing diagnostics into `message.logs`
 
-All other request configuration lives under the body's `parameters` object:
+All other request configuration lives under the body's `parameters` object,
+which TRAPI 2.0 defines for query-time settings that do not change what a query
+means. The server repeats it back in the response, as the spec requires.
 
 ```json
 {
   "message": { "query_graph": { ... } },
-  "log_level": "INFO",
   "parameters": {
+    "timeout": 60,
+    "log_level": "INFO",
+    "bypass_cache": false,
     "subclass": true,
     "subclass_depth": 1,
     "dehydrated": false,
@@ -195,9 +260,37 @@ All other request configuration lives under the body's `parameters` object:
 }
 ```
 
+Responses never serialize a null, and never serialize an empty container for a
+property whose schema forbids one (`Edge.qualifiers`,
+`RetrievalSource.upstream_resource_ids`, `message.auxiliary_graphs`, `logs`, …)
+— TRAPI 2.0 is OpenAPI 3.1 and dropped `nullable`, so an absent value is an
+absent property. `message.results` is deliberately still `[]` when a query
+matched nothing, which is what 2.0 asks for.
+
+TRAPI's own parameters:
+
+- `timeout` (number): Seconds the client is willing to wait. When the budget is
+  spent the query stops and the response carries a `Timeout` status with the
+  logs from the work done. A negative value disables the server's default
+  timeout (`GANDALF_QUERY_TIMEOUT`). A value below `GANDALF_MIN_QUERY_TIMEOUT`
+  is refused up front with HTTP 409, since the server knows it cannot answer
+  that fast.
+- `log_level` (string): Least critical level of logs to return — `ERROR`,
+  `WARNING`, `INFO` or `DEBUG`. (This moved here from the request's top level
+  in TRAPI 2.0.)
+- `bypass_cache` (bool): Accepted and has no effect — gandalf answers from its
+  own graph and holds no query cache.
+
+Gandalf's own parameters:
+
 - `subclass` (bool): Enable biolink subclass inference (default `true`)
 - `subclass_depth` (int): Maximum `subclass_of` hops (default `1`)
-- `dehydrated` (bool): Skip edge attribute enrichment for faster, lighter responses (auto-enabled for very large result sets)
+- `dehydrated` (bool): Return the smallest useful response — edges carry only
+  subject, object, predicate, `knowledge_level` and `agent_type`, with no
+  attributes and no `sources` (auto-enabled for very large result sets).
+  TRAPI 2.0 requires `sources`, so a dehydrated response is deliberately not
+  schema-valid: the mode trades conformance for size, and rehydrating one
+  (see `rehydrate`) restores a conformant response
 - `rehydrate` (bool): When true, the server skips the graph lookup and **only** enriches the `knowledge_graph` already supplied in `message` — used to re-enrich a previously dehydrated response
 - `filter_config` (object): Plugin-defined node filter settings (each NodeFilter plugin reads its own key)
 - `annotator_config` (object): Per-request opt-in response-annotator settings (each key activates one annotator plugin)
@@ -241,6 +334,15 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_LARGE_RESULT_THRESHOLD` | `50000` | Path count threshold for auto-dehydrated responses |
 | `GANDALF_MAX_PATH_LIMIT` | `0` | Max intermediate paths during joins (0 = unlimited) |
 | `GANDALF_DEBUG_PATHS_TSV` | _(empty)_ | File path to write debug TSV of reconstructed paths |
+
+### TRAPI
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GANDALF_QUERY_TIMEOUT` | `0` | Server default for `parameters.timeout`, in seconds (0 = no timeout) |
+| `GANDALF_MIN_QUERY_TIMEOUT` | `1.0` | Shortest `parameters.timeout` the server accepts; below this it answers HTTP 409 |
+| `GANDALF_DATA_RELEASE_VERSIONS` | _(empty)_ | JSON object of source data versions reported as `Response.data_release_versions`, e.g. `{"translator_kg": "2026_06_21"}` |
+| `GANDALF_BIOLINK_VERSION` | `4.3.2` | Biolink Model version reported and used for predicate/qualifier expansion |
 
 ### Server Identity
 

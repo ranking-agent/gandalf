@@ -137,16 +137,64 @@ class TestEnrichEdges:
             assert "sources" in edge, f"Edge {edge_id} missing 'sources'"
             assert isinstance(edge["sources"], list)
 
-    def test_edges_have_qualifiers(self, graph, bmt):
-        """Edges should have a 'qualifiers' list after enrichment."""
+    def test_unqualified_edges_carry_no_qualifiers_property(self, graph, bmt):
+        """Edge.qualifiers has a minItems of 1, so an empty list is invalid.
+
+        The one-hop treats edges carry no qualifiers, so they must come back
+        with no ``qualifiers`` property at all rather than an empty one.
+        """
         response = lookup(graph, _one_hop_query(), bmt=bmt)
-        msg = response["message"]
 
+        enrich_knowledge_graph(response, graph)
+
+        edges = response["message"]["knowledge_graph"]["edges"]
+        assert edges
+        for edge_id, edge in edges.items():
+            assert "qualifiers" not in edge, f"Edge {edge_id} has empty 'qualifiers'"
+
+    def test_edges_have_knowledge_level_and_agent_type(self, graph, bmt):
+        """Rehydrating a dehydrated edge restores both required 2.0 properties.
+
+        Note ``enrich_knowledge_graph`` takes the whole response (it reads
+        ``message.knowledge_graph``), which is how the server calls it.
+        """
+        response = lookup(graph, _one_hop_query(), bmt=bmt, dehydrated=True)
+        edges = response["message"]["knowledge_graph"]["edges"]
+
+        # Drop them, as a client stripping a response down would.
+        for edge in edges.values():
+            edge.pop("knowledge_level", None)
+            edge.pop("agent_type", None)
+
+        enrich_knowledge_graph(response, graph)
+
+        assert edges
+        for edge_id, edge in edges.items():
+            assert edge["knowledge_level"] == "knowledge_assertion", edge_id
+            assert edge["agent_type"] == "manual_agent", edge_id
+
+    def test_unresolvable_edge_still_gets_knowledge_level_and_agent_type(
+        self, graph, bmt
+    ):
+        """An edge the graph cannot resolve still reports valid 2.0 values."""
+        msg = {
+            "message": {
+                "knowledge_graph": {
+                    "nodes": {},
+                    "edges": {
+                        "unknown": {
+                            "subject": "NOPE:1",
+                            "object": "NOPE:2",
+                            "predicate": "biolink:related_to",
+                        }
+                    },
+                }
+            }
+        }
         enrich_knowledge_graph(msg, graph)
-
-        for edge_id, edge in msg["knowledge_graph"]["edges"].items():
-            assert "qualifiers" in edge, f"Edge {edge_id} missing 'qualifiers'"
-            assert isinstance(edge["qualifiers"], list)
+        edge = msg["message"]["knowledge_graph"]["edges"]["unknown"]
+        assert edge["knowledge_level"] == "not_provided"
+        assert edge["agent_type"] == "not_provided"
 
     def test_edges_have_publications_in_attributes(self, graph, bmt):
         """Edge publications should appear as TRAPI attributes after enrichment."""
@@ -222,16 +270,11 @@ class TestEnrichEdgesWithQualifiers:
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "qualifier_constraints": [
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "activity",
-                                        }
-                                    ]
-                                }
-                            ],
+                            "constraints": {
+                                "qualifiers": [
+                                    {"biolink:object_aspect_qualifier": "activity"}
+                                ]
+                            },
                         },
                     },
                 },
@@ -239,15 +282,17 @@ class TestEnrichEdgesWithQualifiers:
         }
 
         response = lookup(graph, query, bmt=bmt)
-        msg = response["message"]
 
-        enrich_knowledge_graph(msg, graph)
+        enrich_knowledge_graph(response, graph)
 
-        # All edges should have sources, qualifiers, etc.
-        for edge_id, edge in msg["knowledge_graph"]["edges"].items():
+        edges = response["message"]["knowledge_graph"]["edges"]
+        assert edges
+        for edge_id, edge in edges.items():
             assert "sources" in edge
-            assert "qualifiers" in edge
             assert "attributes" in edge
+            # These edges are qualified, so the property is present and
+            # non-empty (TRAPI 2.0 gives Edge.qualifiers a minItems of 1).
+            assert edge["qualifiers"], edge_id
 
 
 class TestEnrichEmptyMessage:

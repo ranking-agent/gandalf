@@ -12,11 +12,20 @@ LMDB cold-path store.
 
 from __future__ import annotations
 
-from gandalf.graph import CSRGraph
+from translator_tom.model_dicts import EdgeDict, NodeDict, QueryDict, ResponseDict
+
+from gandalf.graph import NOT_PROVIDED, CSRGraph
 from gandalf.profiler import current_profiler
+from gandalf.trapi import (
+    drop_null_properties,
+    ensure_node_category,
+    prune_edge,
+)
 
 
-def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
+def enrich_knowledge_graph(
+    message: QueryDict | ResponseDict, graph: CSRGraph
+) -> QueryDict | ResponseDict:
     """Attach all available properties to knowledge-graph nodes and edges.
 
     The function mutates *message* in place **and** returns it for
@@ -28,12 +37,18 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
         * ``attributes`` — TRAPI Attribute objects (defaults to ``[]``)
 
     Edge properties added (when present in the graph):
-        * ``sources``       — from the in-memory dedup store (hot path)
-        * ``qualifiers``    — from the in-memory dedup store (hot path)
-        * ``attributes``    — from LMDB (cold path; includes publications)
+        * ``sources``         — from the in-memory dedup store (hot path)
+        * ``qualifiers``      — from the in-memory dedup store (hot path)
+        * ``knowledge_level`` — from the in-memory dedup store (hot path)
+        * ``agent_type``      — from the in-memory dedup store (hot path)
+        * ``attributes``      — from LMDB (cold path; includes publications)
+
+    Takes the whole request or response -- the object with a ``message``, not
+    the message itself -- because the ``rehydrate`` endpoint hands it the
+    client's request.
 
     Args:
-        message: A TRAPI ``message`` dict that contains at least
+        message: A TRAPI Query or Response dict that contains at least
             ``message["knowledge_graph"]["nodes"]`` and
             ``message["knowledge_graph"]["edges"]``.
         graph: The :class:`CSRGraph` instance that was used to produce the
@@ -61,31 +76,40 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
 # ------------------------------------------------------------------
 
 
-def _enrich_nodes(nodes: dict, graph: CSRGraph) -> None:
+def _enrich_nodes(nodes: dict[str, NodeDict], graph: CSRGraph) -> None:
     """Fill in missing properties for every node in the knowledge graph."""
     for node_id, node in nodes.items():
+        # A client can hand back a node with a property present but null, or
+        # with an empty categories list.  TRAPI 2.0 admits neither, and both
+        # have to read as "absent" so the stored value fills them rather than
+        # passing the client's value through.  (categories is a required
+        # property, so an empty one is overwritten rather than deleted.)
+        drop_null_properties(node)
+        wants_categories = not node.get("categories")
+
         node_idx = graph.get_node_idx(node_id)
-        if node_idx is None:
-            # Node not in graph (e.g. synthetic inferred node) — skip
-            continue
+        # A node the graph does not know (e.g. a synthetic inferred node) has
+        # nothing to fill from, but still has to be served validly.
+        stored = graph.get_all_node_properties(node_idx) if node_idx is not None else {}
 
-        stored = graph.get_all_node_properties(node_idx)
-        if not stored:
-            continue
+        if stored:
+            # Populate fields that are absent from the KG node
+            if "name" not in node and "name" in stored:
+                node["name"] = stored["name"]
 
-        # Populate fields that are absent from the KG node
-        if "name" not in node and "name" in stored:
-            node["name"] = stored["name"]
+            if wants_categories and stored.get("categories"):
+                node["categories"] = stored["categories"]
 
-        if "categories" not in node and "categories" in stored:
-            node["categories"] = stored["categories"]
+            # Attributes should always be a list
+            if "attributes" not in node:
+                node["attributes"] = stored.get("attributes", [])
 
-        # Attributes should always be a list
-        if "attributes" not in node:
-            node["attributes"] = stored.get("attributes", [])
+        # categories is required with a minItems of 1, so it cannot be left
+        # empty even when the graph had nothing more specific to offer.
+        ensure_node_category(node)
 
 
-def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
+def _enrich_edges(edges: dict[str, EdgeDict], graph: CSRGraph) -> None:
     """Fill in missing properties for every edge in the knowledge graph.
 
     To resolve edge properties we need the forward-CSR edge index.  We
@@ -121,12 +145,20 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
 
     # Now enrich each edge
     for edge_uuid, edge in edges.items():
+        # As for nodes: a client-supplied null must read as absent.
+        drop_null_properties(edge)
         fwd_idx = edge_idx_map.get(edge_uuid)
         if fwd_idx is None:
-            # Could not resolve — ensure defaults are present
+            # Could not resolve — ensure defaults are present.  TRAPI 2.0
+            # requires knowledge_level and agent_type on every Edge, so an
+            # unresolvable edge still gets the Biolink "not_provided" value.
             edge.setdefault("sources", [])
-            edge.setdefault("qualifiers", [])
             edge.setdefault("attributes", [])
+            edge.setdefault("knowledge_level", NOT_PROVIDED)
+            edge.setdefault("agent_type", NOT_PROVIDED)
+            # No qualifiers default: the property is optional in TRAPI 2.0 and
+            # an empty list is not a valid value for it.
+            prune_edge(edge)
             continue
 
         # Hot-path properties (in-memory dedup store)
@@ -136,11 +168,18 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
         if "qualifiers" not in edge:
             edge["qualifiers"] = graph.edge_properties.get_qualifiers(fwd_idx)
 
+        if "knowledge_level" not in edge or "agent_type" not in edge:
+            knowledge_level, agent_type = graph.edge_properties.get_kl_at(fwd_idx)
+            edge.setdefault("knowledge_level", knowledge_level)
+            edge.setdefault("agent_type", agent_type)
+
         # Cold-path properties (LMDB)
         detail = lmdb_results.get(fwd_idx, {})
 
         if "attributes" not in edge:
             edge["attributes"] = detail.get("attributes", [])
+
+        prune_edge(edge)
 
 
 def _find_fwd_edge_idx(

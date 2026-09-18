@@ -1,4 +1,11 @@
-"""Tests for qualifier constraint matching and expansion."""
+"""Tests for qualifier constraint matching and expansion.
+
+TRAPI 2.0 writes a QualifierSetConstraint as a plain mapping of
+``qualifier_type_id`` to the required ``qualifier_value``, and puts the list of
+them at ``QEdge.constraints.qualifiers``.
+"""
+
+import pytest
 
 from tests.search_fixtures import graph  # noqa: F401
 
@@ -6,300 +13,101 @@ from gandalf.search import lookup
 from gandalf.search.qualifiers import edge_matches_qualifier_constraints
 from gandalf.search.expanders import QualifierExpander
 
+ASPECT = "biolink:object_aspect_qualifier"
+DIRECTION = "biolink:object_direction_qualifier"
+QUALIFIED_PREDICATE = "biolink:qualified_predicate"
+
+
+def qualifiers(**by_type: str) -> list[dict]:
+    """Build an edge's TRAPI Qualifier list from ``short_name=value`` pairs."""
+    return [
+        {"qualifier_type_id": f"biolink:object_{name}_qualifier", "qualifier_value": v}
+        for name, v in by_type.items()
+    ]
+
 
 class TestQualifierConstraintMatching:
     """Unit tests for the edge_matches_qualifier_constraints helper function."""
 
-    def test_no_constraints_returns_true(self):
-        """No qualifier constraints should match any edge."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, None) is True
-        assert edge_matches_qualifier_constraints(edge_qualifiers, []) is True
+    @pytest.mark.parametrize("constraints", [None, [], [{}]])
+    def test_no_requirement_matches_any_edge(self, constraints):
+        """Absent, empty, and requirement-free constraint lists match anything."""
+        assert (
+            edge_matches_qualifier_constraints(
+                qualifiers(aspect="activity"), constraints
+            )
+            is True
+        )
 
-    def test_empty_qualifier_set_matches_any_edge(self):
-        """Empty qualifier_set should match any edge."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            }
-        ]
-        constraints = [{"qualifier_set": []}]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is True
+    @pytest.mark.parametrize(
+        "edge_qualifiers, constraints, expected",
+        [
+            # Single type-value pair
+            (qualifiers(aspect="activity"), [{ASPECT: "activity"}], True),
+            (qualifiers(aspect="activity"), [{ASPECT: "abundance"}], False),
+            # AND within one constraint
+            (
+                qualifiers(aspect="activity", direction="increased"),
+                [{ASPECT: "activity", DIRECTION: "increased"}],
+                True,
+            ),
+            (
+                qualifiers(aspect="activity"),
+                [{ASPECT: "activity", DIRECTION: "increased"}],
+                False,
+            ),
+            # OR between constraints
+            (
+                qualifiers(aspect="abundance"),
+                [{ASPECT: "activity"}, {ASPECT: "abundance"}],
+                True,
+            ),
+            # An edge carrying extra qualifiers still satisfies the constraint
+            (
+                qualifiers(aspect="activity", direction="increased"),
+                [{ASPECT: "activity"}],
+                True,
+            ),
+            # An edge with no qualifiers cannot satisfy a requirement
+            ([], [{ASPECT: "activity"}], False),
+        ],
+    )
+    def test_matching(self, edge_qualifiers, constraints, expected):
+        assert (
+            edge_matches_qualifier_constraints(edge_qualifiers, constraints) is expected
+        )
 
-    def test_single_qualifier_match(self):
-        """Edge with matching single qualifier should match."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            }
-        ]
+    @pytest.mark.parametrize(
+        "edge_value, accepted, expected",
+        [
+            ("activity", ["activity", "abundance"], True),
+            ("expression", ["activity", "abundance"], False),
+        ],
+    )
+    def test_expanded_values_match_any_member(self, edge_value, accepted, expected):
+        """A list value (what QualifierExpander produces) reads as "any of these"."""
+        assert (
+            edge_matches_qualifier_constraints(
+                qualifiers(aspect=edge_value), [{ASPECT: accepted}]
+            )
+            is expected
+        )
+
+    @pytest.mark.parametrize(
+        "direction, expected",
+        [("increased", True), ("unchanged", False)],
+    )
+    def test_expanded_values_still_and_within_a_constraint(self, direction, expected):
+        """Every type in a constraint must match, expanded values included."""
         constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    }
-                ]
-            }
+            {ASPECT: ["activity", "abundance"], DIRECTION: ["increased", "decreased"]}
         ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is True
-
-    def test_single_qualifier_no_match(self):
-        """Edge with non-matching qualifier should not match."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            }
-        ]
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "abundance",
-                    }
-                ]
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is False
-
-    def test_multiple_qualifiers_all_match(self):
-        """Edge with all required qualifiers should match (AND semantics within set)."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            },
-            {
-                "qualifier_type_id": "biolink:object_direction_qualifier",
-                "qualifier_value": "increased",
-            },
-        ]
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    },
-                    {
-                        "qualifier_type_id": "biolink:object_direction_qualifier",
-                        "qualifier_value": "increased",
-                    },
-                ]
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is True
-
-    def test_multiple_qualifiers_partial_match(self):
-        """Edge with only some required qualifiers should not match."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            },
-        ]
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    },
-                    {
-                        "qualifier_type_id": "biolink:object_direction_qualifier",
-                        "qualifier_value": "increased",
-                    },
-                ]
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is False
-
-    def test_or_semantics_between_qualifier_sets(self):
-        """Edge matching any qualifier_set should match (OR semantics between sets)."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "abundance",
-            },
-        ]
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    },
-                ]
-            },
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "abundance",
-                    },
-                ]
-            },
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is True
-
-    def test_edge_with_no_qualifiers(self):
-        """Edge with no qualifiers should not match constraints requiring qualifiers."""
-        edge_qualifiers = []
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    },
-                ]
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is False
-
-    def test_edge_with_extra_qualifiers_still_matches(self):
-        """Edge with extra qualifiers beyond required should still match."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            },
-            {
-                "qualifier_type_id": "biolink:object_direction_qualifier",
-                "qualifier_value": "increased",
-            },
-            {
-                "qualifier_type_id": "biolink:qualified_predicate",
-                "qualifier_value": "biolink:causes",
-            },
-        ]
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    },
-                ]
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is True
-
-    def test_expanded_format_single_value_match(self):
-        """Expanded format with qualifier_values (plural) should match if edge has any value."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            }
-        ]
-        # Expanded format: qualifier_values (plural) with list of acceptable values
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_values": [
-                            "activity",
-                            "abundance",
-                        ],  # Edge has "activity"
-                    }
-                ]
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is True
-
-    def test_expanded_format_no_match(self):
-        """Expanded format should not match if edge value is not in the list."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "expression",
-            }
-        ]
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_values": [
-                            "activity",
-                            "abundance",
-                        ],  # "expression" not in list
-                    }
-                ]
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is False
-
-    def test_expanded_format_multiple_types_all_match(self):
-        """Expanded format with multiple qualifier types - all must match (AND semantics)."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            },
-            {
-                "qualifier_type_id": "biolink:object_direction_qualifier",
-                "qualifier_value": "increased",
-            },
-        ]
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_values": ["activity", "abundance"],
-                    },
-                    {
-                        "qualifier_type_id": "biolink:object_direction_qualifier",
-                        "qualifier_values": ["increased", "decreased"],
-                    },
-                ]
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is True
-
-    def test_expanded_format_multiple_types_partial_match(self):
-        """Expanded format with multiple qualifier types - partial match should fail."""
-        edge_qualifiers = [
-            {
-                "qualifier_type_id": "biolink:object_aspect_qualifier",
-                "qualifier_value": "activity",
-            },
-            {
-                "qualifier_type_id": "biolink:object_direction_qualifier",
-                "qualifier_value": "unchanged",
-            },
-        ]
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_values": ["activity", "abundance"],  # Matches
-                    },
-                    {
-                        "qualifier_type_id": "biolink:object_direction_qualifier",
-                        "qualifier_values": [
-                            "increased",
-                            "decreased",
-                        ],  # "unchanged" not in list
-                    },
-                ]
-            }
-        ]
-        assert edge_matches_qualifier_constraints(edge_qualifiers, constraints) is False
+        assert (
+            edge_matches_qualifier_constraints(
+                qualifiers(aspect="activity", direction=direction), constraints
+            )
+            is expected
+        )
 
 
 class TestQualifierExpander:
@@ -331,36 +139,17 @@ class TestQualifierExpander:
         result = expander.expand_qualifier_constraints(None)
         assert result is None
 
-    def test_expand_qualifier_constraints_empty_qualifier_set(self, bmt):
-        """Empty qualifier_set should be preserved."""
+    def test_expand_requirement_free_constraint(self, bmt):
+        """A constraint that names no qualifier is preserved as-is."""
         expander = QualifierExpander(bmt)
-        constraints = [{"qualifier_set": []}]
-        result = expander.expand_qualifier_constraints(constraints)
-        assert len(result) == 1
-        assert result[0]["qualifier_set"] == []
+        assert expander.expand_qualifier_constraints([{}]) == [{}]
 
-    def test_expand_qualifier_constraints_creates_qualifier_values(self, bmt):
-        """Expansion should create qualifier_values (plural) format."""
+    def test_expand_turns_values_into_value_lists(self, bmt):
+        """Expansion replaces each value with the list of acceptable values."""
         expander = QualifierExpander(bmt)
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    }
-                ]
-            }
-        ]
-        result = expander.expand_qualifier_constraints(constraints)
+        result = expander.expand_qualifier_constraints([{ASPECT: "activity"}])
         assert len(result) == 1
-        assert len(result[0]["qualifier_set"]) == 1
-        expanded_qualifier = result[0]["qualifier_set"][0]
-        assert (
-            expanded_qualifier["qualifier_type_id"] == "biolink:object_aspect_qualifier"
-        )
-        assert "qualifier_values" in expanded_qualifier
-        assert "activity" in expanded_qualifier["qualifier_values"]
+        assert "activity" in result[0][ASPECT]
 
     def test_expand_qualified_predicate_uses_predicate_hierarchy(self, bmt):
         """qualified_predicate values expand through the predicate hierarchy.
@@ -372,20 +161,10 @@ class TestQualifierExpander:
         expanded via get_descendants rather than enum permissible values.
         """
         expander = QualifierExpander(bmt)
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:qualified_predicate",
-                        "qualifier_value": "biolink:contributes_to",
-                    }
-                ]
-            }
-        ]
-        result = expander.expand_qualifier_constraints(constraints)
-        expanded_qualifier = result[0]["qualifier_set"][0]
-        assert expanded_qualifier["qualifier_type_id"] == "biolink:qualified_predicate"
-        values = expanded_qualifier["qualifier_values"]
+        result = expander.expand_qualifier_constraints(
+            [{QUALIFIED_PREDICATE: "biolink:contributes_to"}]
+        )
+        values = result[0][QUALIFIED_PREDICATE]
         # Original value plus its predicate descendant
         assert "biolink:contributes_to" in values
         assert "biolink:causes" in values
@@ -398,43 +177,17 @@ class TestQualifierExpander:
         values, not predicate descendants.
         """
         expander = QualifierExpander(bmt)
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    }
-                ]
-            }
-        ]
-        result = expander.expand_qualifier_constraints(constraints)
-        values = result[0]["qualifier_set"][0]["qualifier_values"]
+        result = expander.expand_qualifier_constraints([{ASPECT: "activity"}])
+        values = result[0][ASPECT]
         assert "activity" in values
         assert "biolink:causes" not in values
 
     def test_expand_qualifier_constraints_preserves_or_semantics(self, bmt):
-        """Multiple qualifier_sets should be preserved (OR semantics)."""
+        """Multiple constraints should be preserved (OR semantics)."""
         expander = QualifierExpander(bmt)
-        constraints = [
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "activity",
-                    }
-                ]
-            },
-            {
-                "qualifier_set": [
-                    {
-                        "qualifier_type_id": "biolink:object_aspect_qualifier",
-                        "qualifier_value": "abundance",
-                    }
-                ]
-            },
-        ]
-        result = expander.expand_qualifier_constraints(constraints)
+        result = expander.expand_qualifier_constraints(
+            [{ASPECT: "activity"}, {ASPECT: "abundance"}]
+        )
         assert len(result) == 2
 
     def test_caching_works(self, bmt):
@@ -449,241 +202,73 @@ class TestQualifierExpander:
         assert ("_all_", "activity") in expander._descendants_cache
 
 
+def affects_genes_query(qualifier_constraints=None) -> dict:
+    """A CHEBI:6801 --affects--> Gene query, optionally qualifier-constrained."""
+    qedge = {
+        "subject": "n0",
+        "object": "n1",
+        "predicates": ["biolink:affects"],
+    }
+    if qualifier_constraints is not None:
+        qedge["constraints"] = {"qualifiers": qualifier_constraints}
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["CHEBI:6801"]},
+                    "n1": {"categories": ["biolink:Gene"]},
+                },
+                "edges": {"e0": qedge},
+            },
+        },
+    }
+
+
 class TestLookupWithQualifierConstraints:
-    """Tests for lookup function with qualifier constraints."""
+    """Tests for lookup function with QEdge constraints.qualifiers."""
 
-    def test_qualifier_constraint_filters_edges(self, graph, bmt):
-        """Qualifier constraints should filter to only matching edges."""
-        query = {
-            "message": {
-                "query_graph": {
-                    "nodes": {
-                        "n0": {"ids": ["CHEBI:6801"]},
-                        "n1": {"categories": ["biolink:Gene"]},
-                    },
-                    "edges": {
-                        "e0": {
-                            "subject": "n0",
-                            "object": "n1",
-                            "predicates": ["biolink:affects"],
-                            "qualifier_constraints": [
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "activity",
-                                        },
-                                        {
-                                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                                            "qualifier_value": "increased",
-                                        },
-                                    ]
-                                }
-                            ],
-                        },
-                    },
-                },
-            },
-        }
-
-        response = lookup(graph, query, bmt=bmt)
+    @pytest.mark.parametrize(
+        "qualifier_constraints, expected_genes",
+        [
+            # Only INSR has activity+increased
+            (
+                [{ASPECT: "activity", DIRECTION: "increased"}],
+                {"NCBIGene:3643"},
+            ),
+            # Only GCK has activity+decreased
+            (
+                [{ASPECT: "activity", DIRECTION: "decreased"}],
+                {"NCBIGene:2645"},
+            ),
+            # Only TNF has abundance+increased
+            (
+                [{ASPECT: "abundance", DIRECTION: "increased"}],
+                {"NCBIGene:7124"},
+            ),
+            # OR between constraints: INSR (activity+increased) and TNF (abundance)
+            (
+                [{ASPECT: "activity", DIRECTION: "increased"}, {ASPECT: "abundance"}],
+                {"NCBIGene:3643", "NCBIGene:7124"},
+            ),
+            # No edge carries an expression aspect
+            ([{ASPECT: "expression"}], set()),
+        ],
+    )
+    def test_qualifier_constraint_filters_edges(
+        self, graph, bmt, qualifier_constraints, expected_genes
+    ):
+        """constraints.qualifiers should filter to only matching edges."""
+        response = lookup(graph, affects_genes_query(qualifier_constraints), bmt=bmt)
         results = response["message"]["results"]
 
-        # Only NCBIGene:3643 (INSR) has qualifiers matching activity+increased
-        assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:3643"
-
-    def test_qualifier_constraint_decreased_direction(self, graph, bmt):
-        """Query for edges with decreased direction qualifier."""
-        query = {
-            "message": {
-                "query_graph": {
-                    "nodes": {
-                        "n0": {"ids": ["CHEBI:6801"]},
-                        "n1": {"categories": ["biolink:Gene"]},
-                    },
-                    "edges": {
-                        "e0": {
-                            "subject": "n0",
-                            "object": "n1",
-                            "predicates": ["biolink:affects"],
-                            "qualifier_constraints": [
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "activity",
-                                        },
-                                        {
-                                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                                            "qualifier_value": "decreased",
-                                        },
-                                    ]
-                                }
-                            ],
-                        },
-                    },
-                },
-            },
-        }
-
-        response = lookup(graph, query, bmt=bmt)
-        results = response["message"]["results"]
-
-        # Only NCBIGene:2645 (GCK) has qualifiers matching activity+decreased
-        assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:2645"
-
-    def test_qualifier_constraint_abundance_aspect(self, graph, bmt):
-        """Query for edges with abundance aspect qualifier."""
-        query = {
-            "message": {
-                "query_graph": {
-                    "nodes": {
-                        "n0": {"ids": ["CHEBI:6801"]},
-                        "n1": {"categories": ["biolink:Gene"]},
-                    },
-                    "edges": {
-                        "e0": {
-                            "subject": "n0",
-                            "object": "n1",
-                            "predicates": ["biolink:affects"],
-                            "qualifier_constraints": [
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "abundance",
-                                        },
-                                        {
-                                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                                            "qualifier_value": "increased",
-                                        },
-                                    ]
-                                }
-                            ],
-                        },
-                    },
-                },
-            },
-        }
-
-        response = lookup(graph, query, bmt=bmt)
-        results = response["message"]["results"]
-
-        # Only NCBIGene:7124 (TNF) has abundance increased qualifiers
-        assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:7124"
-
-    def test_qualifier_constraint_or_semantics(self, graph, bmt):
-        """Multiple qualifier sets should use OR semantics."""
-        query = {
-            "message": {
-                "query_graph": {
-                    "nodes": {
-                        "n0": {"ids": ["CHEBI:6801"]},
-                        "n1": {"categories": ["biolink:Gene"]},
-                    },
-                    "edges": {
-                        "e0": {
-                            "subject": "n0",
-                            "object": "n1",
-                            "predicates": ["biolink:affects"],
-                            "qualifier_constraints": [
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "activity",
-                                        },
-                                        {
-                                            "qualifier_type_id": "biolink:object_direction_qualifier",
-                                            "qualifier_value": "increased",
-                                        },
-                                    ]
-                                },
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "abundance",
-                                        },
-                                    ]
-                                },
-                            ],
-                        },
-                    },
-                },
-            },
-        }
-
-        response = lookup(graph, query, bmt=bmt)
-        results = response["message"]["results"]
-
-        # Should match both INSR (activity+increased) and TNF (abundance)
-        assert len(results) == 2
-        result_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
-        assert result_ids == {"NCBIGene:3643", "NCBIGene:7124"}
+        assert {r["node_bindings"]["n1"]["ids"][0] for r in results} == expected_genes
+        assert len(results) == len(expected_genes)
 
     def test_no_qualifier_constraints_returns_all(self, graph, bmt):
         """Without qualifier constraints, all edges should match."""
-        query = {
-            "message": {
-                "query_graph": {
-                    "nodes": {
-                        "n0": {"ids": ["CHEBI:6801"]},
-                        "n1": {"categories": ["biolink:Gene"]},
-                    },
-                    "edges": {
-                        "e0": {
-                            "subject": "n0",
-                            "object": "n1",
-                            "predicates": ["biolink:affects"],
-                        },
-                    },
-                },
-            },
-        }
-
-        response = lookup(graph, query, bmt=bmt)
-        results = response["message"]["results"]
+        response = lookup(graph, affects_genes_query(), bmt=bmt)
 
         # Should return all 4 affects edges to genes:
-        # PPARG (no qualifiers), INSR (activity+increased), GCK (activity+decreased), TNF (abundance+increased)
-        assert len(results) == 4
-
-    def test_qualifier_constraint_no_matches(self, graph, bmt):
-        """Query with non-matching qualifier constraints should return 0 results."""
-        query = {
-            "message": {
-                "query_graph": {
-                    "nodes": {
-                        "n0": {"ids": ["CHEBI:6801"]},
-                        "n1": {"categories": ["biolink:Gene"]},
-                    },
-                    "edges": {
-                        "e0": {
-                            "subject": "n0",
-                            "object": "n1",
-                            "predicates": ["biolink:affects"],
-                            "qualifier_constraints": [
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "expression",
-                                        },
-                                    ]
-                                }
-                            ],
-                        },
-                    },
-                },
-            },
-        }
-
-        response = lookup(graph, query, bmt=bmt)
-        results = response["message"]["results"]
-
-        # No edges have expression qualifier
-        assert len(results) == 0
+        # PPARG (no qualifiers), INSR (activity+increased),
+        # GCK (activity+decreased), TNF (abundance+increased)
+        assert len(response["message"]["results"]) == 4

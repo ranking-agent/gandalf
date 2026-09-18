@@ -42,7 +42,7 @@ class TestMaxNodeDegree:
 
         # Only TNF (degree=1) should pass the filter
         assert len(results) == 1
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:7124"}
 
     def test_max_node_degree_allows_nodes_at_threshold(self, graph, bmt):
@@ -155,7 +155,7 @@ class TestMinInformationContent:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_min_ic_absent_means_no_filtering(self, graph, bmt):
@@ -289,7 +289,7 @@ class TestMinInformationContent:
         results = response_filtered["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:5468"
 
 
 class TestCombinedFilters:
@@ -335,5 +335,5 @@ class TestCombinedFilters:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
+        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
         assert gene_ids == {"NCBIGene:7124"}

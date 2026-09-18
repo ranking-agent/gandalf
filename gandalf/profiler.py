@@ -12,6 +12,8 @@ pay only an attribute lookup + no-op generator when profiling is off.
 
 from __future__ import annotations
 
+from translator_tom.model_dicts import LogEntryDict
+
 import json
 import logging
 import time
@@ -49,7 +51,7 @@ class NullProfiler:
     def lmdb_call(self, kind: str, n_keys: int) -> Iterator[None]:
         yield
 
-    def to_log_entries(self) -> list[dict]:
+    def to_log_entries(self) -> list[LogEntryDict]:
         return []
 
     def to_dict(self) -> dict:
@@ -147,7 +149,7 @@ class Profiler:
         self.finalize()
         return self._root
 
-    def to_log_entries(self) -> list[dict]:
+    def to_log_entries(self) -> list[LogEntryDict]:
         """Render the profile as TRAPI LogEntry dicts.
 
         Emits one ``DEBUG`` entry per stage with ``code: ProfileStage`` and
@@ -156,7 +158,7 @@ class Profiler:
         """
         self.finalize()
         ts = log_timestamp()
-        entries: list[dict] = []
+        entries: list[LogEntryDict] = []
 
         def _walk(node: dict, path: tuple[str, ...]) -> None:
             cur_path = path + (node["name"],)

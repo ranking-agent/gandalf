@@ -158,16 +158,11 @@ class GandalfUser(HttpUser):
                             "subject": "n0",
                             "object": "n1",
                             "predicates": ["biolink:affects"],
-                            "qualifier_constraints": [
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "activity",
-                                        }
-                                    ]
-                                }
-                            ],
+                            "constraints": {
+                                "qualifiers": [
+                                    {"biolink:object_aspect_qualifier": "activity"}
+                                ]
+                            },
                         }
                     },
                 }

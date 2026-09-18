@@ -53,6 +53,8 @@ _DEFAULT_MIN_COOCCURRENCE = 50
 _DEFAULT_TIMEOUT_S = 5.0
 _DEFAULT_INFORES = "infores:literature_cooccurrence"
 _PREDICATE = "biolink:occurs_together_in_literature_with"
+_KNOWLEDGE_LEVEL = "statistical_association"
+_AGENT_TYPE = "text_mining_agent"
 _NODE_ATTRIBUTE_TYPE = "biolink:occurrences_in_literature"
 
 
@@ -175,6 +177,10 @@ def _insert_pair_edges(
             "subject": subject,
             "object": obj,
             "predicate": _PREDICATE,
+            # Required on every TRAPI 2.0 Edge.  Co-occurrence is a count
+            # derived from mining the literature, not an asserted claim.
+            "knowledge_level": _KNOWLEDGE_LEVEL,
+            "agent_type": _AGENT_TYPE,
             "sources": [
                 {
                     "resource_id": infores_id,

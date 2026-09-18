@@ -110,7 +110,7 @@ class TestLookupResponseStructure:
         # Results should be aggregated: 1 result with all 3 edges in bindings
         results = response["message"]["results"]
         assert len(results) == 1
-        edge_bindings = results[0]["analyses"][0]["edge_bindings"]["e0"]
+        edge_bindings = results[0]["analyses"][0]["edge_bindings"]["e0"]["ids"]
         assert len(edge_bindings) == 4
 
     def test_results_have_node_and_edge_bindings(self, graph, bmt):
@@ -147,8 +147,8 @@ class TestLookupResponseStructure:
         # Check edge bindings map to query graph edges
         assert "e0" in result["analyses"][0]["edge_bindings"]
 
-        # Edge bindings should be a list containing multiple edges
-        edge_bindings = result["analyses"][0]["edge_bindings"]["e0"]
+        # A TRAPI 2.0 EdgeBinding lists every bound edge in its ids array
+        edge_bindings = result["analyses"][0]["edge_bindings"]["e0"]["ids"]
         assert isinstance(edge_bindings, list)
         assert (
             len(edge_bindings) == 4
@@ -193,7 +193,7 @@ class TestMetforminType2DiabetesEdges:
         assert "biolink:treats" in predicates
 
         # Verify edge bindings contain all 4 edges
-        edge_bindings = results[0]["analyses"][0]["edge_bindings"]["e0"]
+        edge_bindings = results[0]["analyses"][0]["edge_bindings"]["e0"]["ids"]
         assert len(edge_bindings) == 4
 
     def test_metformin_ameliorates_type2_diabetes(self, graph, bmt):
@@ -294,7 +294,7 @@ class TestMetforminType2DiabetesEdges:
         }
 
         # Verify edge bindings contain all 4 edges
-        edge_bindings = results[0]["analyses"][0]["edge_bindings"]["e0"]
+        edge_bindings = results[0]["analyses"][0]["edge_bindings"]["e0"]["ids"]
         assert len(edge_bindings) == 4
 
 
@@ -418,10 +418,19 @@ class TestTRAPILogs:
         }
 
     def test_response_has_logs_field(self, graph, bmt):
-        """Response should have a 'logs' key at the root level."""
-        response = lookup(graph, self._make_query(), bmt=bmt)
-        assert "logs" in response
+        """Collected log entries appear under a 'logs' key at the root level."""
+        response = lookup(graph, self._make_query(), bmt=bmt, log_level="DEBUG")
         assert isinstance(response["logs"], list)
+        assert len(response["logs"]) > 0
+
+    def test_response_omits_empty_logs(self, graph, bmt):
+        """A response with nothing to log carries no 'logs' key.
+
+        TRAPI 2.0 gives Response.logs a minItems of 1, so an empty list is not
+        a valid value for the property -- it has to be absent instead.
+        """
+        response = lookup(graph, self._make_query(), bmt=bmt, log_level="ERROR")
+        assert "logs" not in response
 
     def test_log_entries_have_required_fields(self, graph, bmt):
         """Each log entry should have 'timestamp' and 'message' fields."""
@@ -462,11 +471,14 @@ class TestTRAPILogs:
         """The log_level parameter should control which logs are captured."""
         debug_response = lookup(graph, self._make_query(), bmt=bmt, log_level="DEBUG")
         error_response = lookup(graph, self._make_query(), bmt=bmt, log_level="ERROR")
-        # DEBUG level captures more logs than ERROR level
-        assert len(debug_response["logs"]) > len(error_response["logs"])
+        # DEBUG level captures more logs than ERROR level, which captures none
+        # at all -- so the key is dropped entirely (TRAPI 2.0 minItems: 1).
+        assert len(debug_response["logs"]) > len(error_response.get("logs", []))
 
     def test_empty_results_still_have_logs(self, graph, bmt):
         """Queries that return no results should still include logs."""
+        # (log_level is set below so entries are captured regardless of the
+        # ambient logging configuration.)
         query = {
             "message": {
                 "query_graph": {
@@ -484,6 +496,6 @@ class TestTRAPILogs:
                 },
             },
         }
-        response = lookup(graph, query, bmt=bmt)
-        assert "logs" in response
+        response = lookup(graph, query, bmt=bmt, log_level="DEBUG")
         assert isinstance(response["logs"], list)
+        assert len(response["logs"]) > 0

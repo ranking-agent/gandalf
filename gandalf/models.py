@@ -1,216 +1,58 @@
-"""Pydantic models for GANDALF API request validation and response documentation.
+"""Pydantic request models and gandalf's own (non-TRAPI) response models.
 
-Provides TRAPI-compatible request/response models with OpenAPI examples
-for the Swagger UI documentation.
+Everything TRAPI-shaped comes from ``translator_tom``, the Translator-wide
+TRAPI object model: it is the same model the rest of Translator validates
+against, its docstrings are the spec's own descriptions, and it tracks the
+spec so gandalf does not have to re-derive it.  What lives here is only the
+two things TOM cannot know about:
+
+* ``QueryParameters`` -- gandalf's own query-time settings (``subclass``,
+  ``dehydrated``, ...).  TRAPI 2.0 gives the ``parameters`` object
+  ``additionalProperties: true`` precisely so a server can carry its own, so
+  this subclasses TOM's ``QueryParameters`` rather than replacing it, and the
+  standard ``timeout`` / ``log_level`` / ``bypass_cache`` come from there.
+* The Plater-compatible endpoints (``/node_degree``, ``/edges``, ``/metadata``,
+  ...), which are gandalf extensions and not TRAPI at all.
+
+The OpenAPI examples for ``/query`` and ``/asyncquery`` also live here, since
+they are gandalf's documentation rather than the spec's.
+
+The TRAPI models themselves are not re-exported: import them from
+``translator_tom`` (``from translator_tom import Edge, QNode, Response``) so
+there is one name for each concept across Translator rather than a gandalf
+alias for it.
+
+Response construction deliberately does *not* go through TOM's models: gandalf
+assembles plain dicts and serializes them with orjson, which measures ~4x
+faster and ~2x lighter than materializing a TOM model per result.  The
+TypedDicts in ``translator_tom.model_dicts`` give those dicts static types at
+no runtime cost instead -- see ``gandalf.trapi``.
 """
 
-from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
+from translator_tom import AsyncQuery, Query, Response
+from translator_tom import QueryParameters as TRAPIQueryParameters
 
-# ---------------------------------------------------------------------------
-# TRAPI log components
-# ---------------------------------------------------------------------------
-
-
-class LogLevel(str, Enum):
-    """TRAPI log severity levels."""
-
-    ERROR = "ERROR"
-    WARNING = "WARNING"
-    INFO = "INFO"
-    DEBUG = "DEBUG"
-
-
-class SetInterpretation(str, Enum):
-    """TRAPI set interpretation modes for QNode IDs."""
-
-    BATCH = "BATCH"
-    ALL = "ALL"
-    MANY = "MANY"
-    COLLATE = "COLLATE"
-
-
-class LogEntry(BaseModel):
-    """A single TRAPI log entry conforming to the Translator Reasoner API spec."""
-
-    timestamp: str = Field(
-        ...,
-        description="ISO 8601 timestamp, UTC with millisecond precision and an "
-        "explicit offset (e.g. 2026-08-24T19:42:44.661+00:00)",
-    )
-    level: Optional[str] = Field(None, description="Log severity level")
-    code: Optional[str] = Field(None, description="Standardized short code")
-    message: str = Field(..., description="Human-readable log message")
-
-    model_config = ConfigDict(extra="allow")
+__all__ = [
+    "QueryParameters",
+    "TRAPIQuery",
+    "AsyncTRAPIQuery",
+    "TRAPIResponse",
+    "NodeResponse",
+    "NodeDegreeResponse",
+    "EdgeItem",
+    "EdgesResponse",
+    "EdgesCountResponse",
+    "EdgeSummaryItem",
+    "EdgeSummaryResponse",
+    "MetadataResponse",
+]
 
 
 # ---------------------------------------------------------------------------
-# Query graph components (request validation)
-# ---------------------------------------------------------------------------
-
-
-class QNode(BaseModel):
-    """A node in the TRAPI query graph.
-
-    At least one of ``ids`` or ``categories`` should typically be provided.
-    A node with ``ids`` is "pinned" to specific entities; one with only
-    ``categories`` matches any entity of that type.
-    """
-
-    ids: Optional[List[str]] = Field(
-        None, description="CURIE identifiers to pin this node to specific entities"
-    )
-    categories: Optional[List[str]] = Field(
-        None,
-        description="Biolink categories to restrict the node type "
-        "(e.g. 'biolink:Gene')",
-    )
-    constraints: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Attribute constraints for filtering nodes"
-    )
-    is_set: Optional[bool] = Field(
-        None,
-        description="Deprecated: use set_interpretation instead. "
-        "Whether this node represents a set of entities",
-    )
-    set_interpretation: Optional[SetInterpretation] = Field(
-        None,
-        description="Indicates how multiple CURIEs in the ids property are "
-        "interpreted. BATCH (default): each CURIE is treated independently. "
-        "ALL: all CURIEs must appear in each Result. "
-        "MANY: member CURIEs form sets in Results (not supported). "
-        "COLLATE: multiple matching nodes are combined into a single Result "
-        "(only valid for unpinned nodes without ids).",
-    )
-    member_ids: Optional[List[str]] = Field(
-        None,
-        description="CURIE identifiers for set members "
-        "(used with MANY/ALL set_interpretation)",
-    )
-
-    model_config = ConfigDict(extra="allow")
-
-
-class QEdge(BaseModel):
-    """An edge in the TRAPI query graph.
-
-    Connects two nodes (``subject`` → ``object``) with optional predicate
-    and qualifier filters.
-    """
-
-    subject: str = Field(..., description="Key of the subject node in the query graph")
-    object: str = Field(..., description="Key of the object node in the query graph")
-    predicates: Optional[List[str]] = Field(
-        None,
-        description="Biolink predicates to filter edges " "(e.g. 'biolink:treats')",
-    )
-    qualifier_constraints: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Qualifier constraints for edge filtering"
-    )
-    attribute_constraints: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Attribute constraints for edge filtering"
-    )
-
-    model_config = ConfigDict(extra="allow")
-
-
-class QPathConstraint(BaseModel):
-    """A constraint applied to a Pathfinder query path.
-
-    Constrains intermediate nodes on the path between the path's
-    subject and object endpoints (e.g. by biolink category).
-    """
-
-    intermediate_categories: Optional[List[str]] = Field(
-        None,
-        description="Biolink categories that must appear at intermediate "
-        "nodes along the path (e.g. 'biolink:Gene')",
-    )
-
-    model_config = ConfigDict(extra="allow")
-
-
-class QPath(BaseModel):
-    """A path in the TRAPI Pathfinder query graph.
-
-    Represents an arbitrary-length connection between two pinned nodes
-    (``subject`` → ``object``). Unlike a QEdge, which describes a single
-    direct edge, a QPath asks the knowledge graph to discover intermediate
-    nodes and edges that link the endpoints. Optional ``predicates`` and
-    ``constraints`` restrict which paths qualify.
-    """
-
-    subject: str = Field(..., description="Key of the subject node in the query graph")
-    object: str = Field(..., description="Key of the object node in the query graph")
-    predicates: Optional[List[str]] = Field(
-        None,
-        description="Biolink predicates that may appear on edges along "
-        "the path (e.g. 'biolink:related_to')",
-    )
-    constraints: Optional[List[QPathConstraint]] = Field(
-        None,
-        description="Constraints applied to intermediate nodes along the path",
-    )
-
-    model_config = ConfigDict(extra="allow")
-
-
-class QueryGraph(BaseModel):
-    """TRAPI query graph containing nodes plus edges and/or paths to match.
-
-    Supports both the standard one/multi-hop query form (``nodes`` +
-    ``edges``) and the Pathfinder query form (``nodes`` + ``paths``), as
-    well as hybrid graphs that mix both. ``nodes`` is always required;
-    at least one of ``edges`` or ``paths`` must be supplied.
-    """
-
-    nodes: Dict[str, QNode] = Field(
-        ..., description="Named query nodes keyed by identifier (e.g. 'n0', 'n1')"
-    )
-    edges: Optional[Dict[str, QEdge]] = Field(
-        None,
-        description="Named query edges keyed by identifier (e.g. 'e0', 'e1'). "
-        "Required for standard TRAPI queries; may be omitted in Pathfinder "
-        "queries that supply ``paths`` instead.",
-    )
-    paths: Optional[Dict[str, QPath]] = Field(
-        None,
-        description="Named query paths keyed by identifier (e.g. 'p0', 'p1') "
-        "for TRAPI Pathfinder queries. Each path connects two pinned nodes "
-        "with optional predicate filters and intermediate-node constraints.",
-    )
-
-    @model_validator(mode="after")
-    def _require_edges_or_paths(self) -> "QueryGraph":
-        if not self.edges and not self.paths:
-            raise ValueError(
-                "query_graph must include 'edges' (standard query) or "
-                "'paths' (Pathfinder query); at least one is required."
-            )
-        return self
-
-
-class Message(BaseModel):
-    """TRAPI message containing the query graph and optional results."""
-
-    query_graph: QueryGraph = Field(
-        ..., description="The query graph specifying the pattern to match"
-    )
-    results: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Result bindings (populated in responses)"
-    )
-    knowledge_graph: Optional[Dict[str, Any]] = Field(
-        None, description="Knowledge graph subgraph (populated in responses)"
-    )
-
-    model_config = ConfigDict(extra="allow")
-
-
-# ---------------------------------------------------------------------------
-# POST /query — request model
+# OpenAPI examples for the TRAPI endpoints
 # ---------------------------------------------------------------------------
 
 _QUERY_EXAMPLE_ONEHOP: dict = {
@@ -267,16 +109,17 @@ _QUERY_EXAMPLE_QUALIFIERS: dict = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:affects"],
-                    "qualifier_constraints": [
-                        {
-                            "qualifier_set": [
-                                {
-                                    "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                    "qualifier_value": "activity",
-                                }
-                            ]
-                        }
-                    ],
+                    "constraints": {
+                        "qualifiers": [{"biolink:object_aspect_qualifier": "activity"}],
+                        "knowledge_level": {
+                            "behavior": "ALLOW",
+                            "values": ["knowledge_assertion"],
+                        },
+                        "agent_type": {
+                            "behavior": "DENY",
+                            "values": ["text_mining_agent"],
+                        },
+                    },
                 }
             },
         }
@@ -295,7 +138,9 @@ _QUERY_EXAMPLE_PATHFINDER: dict = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:related_to"],
-                    "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
+                    "constraints": [
+                        {"required_intermediate_categories": ["biolink:Gene"]}
+                    ],
                 }
             },
         }
@@ -318,8 +163,9 @@ _QUERY_EXAMPLE_WITH_PARAMS: dict = {
             },
         }
     },
-    "log_level": "DEBUG",
     "parameters": {
+        "log_level": "DEBUG",
+        "timeout": 60,
         "subclass": True,
         "subclass_depth": 1,
         "dehydrated": False,
@@ -329,10 +175,13 @@ _QUERY_EXAMPLE_WITH_PARAMS: dict = {
 }
 
 
-class QueryParameters(BaseModel):
-    """Nested request configuration for ``/query`` and ``/asyncquery``.
+class QueryParameters(TRAPIQueryParameters):
+    """TRAPI ``parameters`` for ``/query`` and ``/asyncquery``.
 
-    All fields are optional; absent fields fall back to server defaults.
+    Inherits the standard TRAPI members (``timeout``, ``log_level``,
+    ``bypass_cache``) from ``translator_tom`` and adds gandalf's own under the
+    schema's ``additionalProperties``.  All are optional; absent fields fall
+    back to server defaults.
     """
 
     subclass: Optional[bool] = Field(
@@ -365,55 +214,17 @@ class QueryParameters(BaseModel):
         "dict) is the plugin's per-request settings. Unknown keys are ignored.",
     )
 
-    model_config = ConfigDict(extra="allow")
 
-
-class TRAPIQuery(BaseModel):
+class TRAPIQuery(Query):
     """Request body for ``POST /query``.
 
-    Contains a TRAPI message with a query graph specifying the pattern
-    to match against the knowledge graph.
-
-    Examples:
-        One-hop query (drug → gene)::
-
-            {
-                "message": {
-                    "query_graph": {
-                        "nodes": {
-                            "n0": {"ids": ["CHEBI:6801"]},
-                            "n1": {"categories": ["biolink:Gene"]}
-                        },
-                        "edges": {
-                            "e0": {
-                                "subject": "n0",
-                                "object": "n1",
-                                "predicates": ["biolink:affects"]
-                            }
-                        }
-                    }
-                }
-            }
+    TOM's ``Query`` with gandalf's ``parameters`` and the examples that
+    document this server's endpoint.
     """
 
-    message: Message = Field(
-        ..., description="TRAPI message containing the query graph"
-    )
-    log_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = (
-        Field(
-            None,
-            description="Set logging level for this request "
-            "(e.g. 'DEBUG' to see serialization timings)",
-        )
-    )
-    parameters: Optional[QueryParameters] = Field(
-        None,
-        description="Nested request configuration: subclass, subclass_depth, "
-        "dehydrated, rehydrate, filter_config, annotator_config.",
-    )
+    parameters: Optional[QueryParameters] = None
 
     model_config = ConfigDict(
-        extra="allow",
         json_schema_extra={
             "examples": [
                 _QUERY_EXAMPLE_ONEHOP,
@@ -426,74 +237,21 @@ class TRAPIQuery(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
-# POST /asyncquery — request model
-# ---------------------------------------------------------------------------
-
-
-class WorkflowStep(BaseModel):
-    """A single TRAPI workflow operation."""
-
-    id: str = Field(..., description="Workflow operation identifier (e.g. 'lookup')")
-    parameters: Optional[Dict[str, Any]] = Field(
-        None, description="Operation-specific parameters"
-    )
-
-
-class AsyncTRAPIQuery(BaseModel):
+class AsyncTRAPIQuery(AsyncQuery):
     """Request body for ``POST /asyncquery``.
 
-    Contains a callback URL, a TRAPI message, and an optional workflow
-    specification.
+    TOM's ``AsyncQuery`` (a ``Query`` plus the required ``callback``) with
+    gandalf's ``parameters``.
     """
 
-    callback: str = Field(
-        ..., description="URL to POST results to when the query completes"
-    )
-    message: Message = Field(
-        ..., description="TRAPI message containing the query graph"
-    )
-    workflow: Optional[List[WorkflowStep]] = Field(
-        None,
-        description="Workflow operations (defaults to [{'id': 'lookup'}])",
-    )
-    set_interpretation: Optional[str] = Field(
-        None, description="Set interpretation mode (only 'BATCH' is supported)"
-    )
-    log_level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = (
-        Field(
-            None,
-            description="Set logging level for this request "
-            "(e.g. 'DEBUG' to see detailed query processing)",
-        )
-    )
-    parameters: Optional[QueryParameters] = Field(
-        None,
-        description="Nested request configuration: subclass, subclass_depth, "
-        "dehydrated, rehydrate, filter_config, annotator_config.",
-    )
+    parameters: Optional[QueryParameters] = None
 
     model_config = ConfigDict(
-        extra="allow",
         json_schema_extra={
             "examples": [
                 {
                     "callback": "https://example.com/callback",
-                    "message": {
-                        "query_graph": {
-                            "nodes": {
-                                "n0": {"ids": ["CHEBI:6801"]},
-                                "n1": {"categories": ["biolink:Gene"]},
-                            },
-                            "edges": {
-                                "e0": {
-                                    "subject": "n0",
-                                    "object": "n1",
-                                    "predicates": ["biolink:affects"],
-                                }
-                            },
-                        }
-                    },
+                    **_QUERY_EXAMPLE_ONEHOP,
                     "workflow": [{"id": "lookup"}],
                     "parameters": {"subclass": True},
                 }
@@ -502,24 +260,19 @@ class AsyncTRAPIQuery(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
-# Response models (for Swagger documentation)
-# ---------------------------------------------------------------------------
+class TRAPIResponse(Response):
+    """Response from ``POST /query``: TOM's TRAPI 2.0 ``Response``.
 
-
-class TRAPIResponse(BaseModel):
-    """Response from ``POST /query``.
-
-    Contains the original query graph, a knowledge graph subgraph with
-    matching nodes and edges, and result bindings.
+    Declared as the route's ``response_model`` so the OpenAPI document shows
+    the real TRAPI response shape.  It is only *constructed* when
+    ``validate_responses`` is enabled, which is a dev/testing switch -- see
+    ``gandalf.server._trapi_response``.
     """
 
-    message: Dict[str, Any] = Field(
-        ...,
-        description="TRAPI message with query_graph, knowledge_graph, and results",
-    )
 
-    model_config = ConfigDict(extra="allow")
+# ---------------------------------------------------------------------------
+# Gandalf's own (Plater-compatible) response models
+# ---------------------------------------------------------------------------
 
 
 class NodeResponse(BaseModel):

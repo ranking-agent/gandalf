@@ -1,4 +1,5 @@
 bmt>=1.4.8
+translator_tom>=2.1.0
 fastapi>=0.100.0
 httpx>=0.24.0
 lmdb>=1.4.0

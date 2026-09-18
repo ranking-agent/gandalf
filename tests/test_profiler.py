@@ -173,10 +173,10 @@ class TestProfilerInLookup:
             baseline["message"]["results"]
         )
         baseline_ids = sorted(
-            r["node_bindings"]["n1"][0]["id"] for r in baseline["message"]["results"]
+            r["node_bindings"]["n1"]["ids"][0] for r in baseline["message"]["results"]
         )
         profiled_ids = sorted(
-            r["node_bindings"]["n1"][0]["id"] for r in profiled["message"]["results"]
+            r["node_bindings"]["n1"]["ids"][0] for r in profiled["message"]["results"]
         )
         assert baseline_ids == profiled_ids
 

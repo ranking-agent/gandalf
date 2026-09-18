@@ -1,7 +1,16 @@
-"""Tests for GANDALF Pydantic request/response models."""
+"""Tests for GANDALF's request models and its own (non-TRAPI) response models.
+
+The TRAPI models come from ``translator_tom``; what is tested here is that
+gandalf's endpoint models -- TOM's ``Query`` / ``AsyncQuery`` plus gandalf's
+``parameters`` -- accept and reject the right bodies, that the documented
+OpenAPI examples are valid TRAPI, and that the Plater-compatible response
+models behave.
+"""
 
 import pytest
 from pydantic import ValidationError
+
+from translator_tom import Message, PathConstraint, QNode, QPath, QueryGraph
 
 from gandalf.models import (
     AsyncTRAPIQuery,
@@ -9,18 +18,10 @@ from gandalf.models import (
     EdgesCountResponse,
     EdgesResponse,
     EdgeSummaryResponse,
-    Message,
     MetadataResponse,
     NodeResponse,
-    QEdge,
-    QNode,
-    QPath,
-    QPathConstraint,
-    QueryGraph,
-    SetInterpretation,
     TRAPIQuery,
     TRAPIResponse,
-    WorkflowStep,
 )
 
 # ---------------------------------------------------------------------------
@@ -92,17 +93,27 @@ class TestTRAPIQuery:
         with pytest.raises(ValidationError, match="message"):
             TRAPIQuery()
 
-    def test_missing_query_graph_raises(self):
-        with pytest.raises(ValidationError, match="query_graph"):
-            TRAPIQuery(message={})
-
     def test_missing_nodes_raises(self):
         with pytest.raises(ValidationError, match="nodes"):
             TRAPIQuery(message={"query_graph": {"edges": {}}})
 
-    def test_missing_edges_and_paths_raises(self):
-        with pytest.raises(ValidationError, match="edges"):
-            TRAPIQuery(message={"query_graph": {"nodes": {}}})
+    def test_message_without_a_query_graph_is_valid_trapi(self):
+        """TRAPI 2.0 gives Message no required properties.
+
+        Such a body is valid TRAPI that this server cannot answer, so it is
+        rejected at the endpoint instead -- see
+        ``tests/test_trapi_2_0.py::TestNonExecutableQueryGraphRejected``.
+        """
+        assert TRAPIQuery(message={}).message.query_graph is None
+
+    def test_query_graph_without_edges_is_valid_trapi(self):
+        """2.0 makes QueryGraph.edges optional (Pathfinder queries use paths).
+
+        Gandalf rejects an unexecutable one at the endpoint, not here.
+        """
+        query = TRAPIQuery(message={"query_graph": {"nodes": {"n0": {}}}})
+        assert query.message.query_graph is not None
+        assert query.message.query_graph.edges is None
 
     def test_edge_missing_subject_raises(self):
         with pytest.raises(ValidationError, match="subject"):
@@ -138,17 +149,18 @@ class TestTRAPIQuery:
         assert q.parameters is None
 
     def test_log_level_valid_values(self):
-        for level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-            q = TRAPIQuery(**ONEHOP_QUERY, log_level=level)
-            assert q.log_level == level
+        """TRAPI 2.0 moved log_level into the parameters object."""
+        for level in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            q = TRAPIQuery(**ONEHOP_QUERY, parameters={"log_level": level})
+            assert q.parameters.log_level == level
 
     def test_log_level_invalid_value_raises(self):
         with pytest.raises(ValidationError, match="log_level"):
-            TRAPIQuery(**ONEHOP_QUERY, log_level="TRACE")
+            TRAPIQuery(**ONEHOP_QUERY, parameters={"log_level": "TRACE"})
 
     def test_log_level_defaults_none(self):
-        q = TRAPIQuery(**ONEHOP_QUERY)
-        assert q.log_level is None
+        q = TRAPIQuery(**ONEHOP_QUERY, parameters={})
+        assert q.parameters.log_level is None
 
     def test_extra_fields_allowed(self):
         data = {**ONEHOP_QUERY, "some_custom_field": "value"}
@@ -167,24 +179,21 @@ class TestTRAPIQuery:
                         "e0": {
                             "subject": "n0",
                             "object": "n1",
-                            "qualifier_constraints": [
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "activity",
-                                        }
-                                    ]
-                                }
-                            ],
+                            "constraints": {
+                                "qualifiers": [
+                                    {"biolink:object_aspect_qualifier": "activity"}
+                                ]
+                            },
                         }
                     },
                 }
             }
         }
         q = TRAPIQuery(**data)
-        qc = q.message.query_graph.edges["e0"].qualifier_constraints
-        assert len(qc) == 1
+        constraints = q.message.query_graph.edges["e0"].constraints
+        assert constraints.qualifiers == [
+            {"biolink:object_aspect_qualifier": "activity"}
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +213,9 @@ PATHFINDER_QUERY = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:related_to"],
-                    "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
+                    "constraints": [
+                        {"required_intermediate_categories": ["biolink:Gene"]}
+                    ],
                 }
             },
         }
@@ -223,7 +234,7 @@ class TestPathfinderQuery:
         assert path.subject == "n0"
         assert path.object == "n1"
         assert path.predicates == ["biolink:related_to"]
-        assert path.constraints[0].intermediate_categories == ["biolink:Gene"]
+        assert path.constraints[0].required_intermediate_categories == ["biolink:Gene"]
 
     def test_path_missing_subject_raises(self):
         with pytest.raises(ValidationError, match="subject"):
@@ -274,23 +285,25 @@ class TestPathfinderQuery:
         qg = raw["message"]["query_graph"]
         assert "edges" not in qg
         assert qg["paths"]["p0"]["subject"] == "n0"
-        assert qg["paths"]["p0"]["constraints"][0]["intermediate_categories"] == [
-            "biolink:Gene"
-        ]
+        assert qg["paths"]["p0"]["constraints"][0][
+            "required_intermediate_categories"
+        ] == ["biolink:Gene"]
 
     def test_qpath_direct_construction(self):
         p = QPath(
             subject="n0",
             object="n1",
             predicates=["biolink:treats"],
-            constraints=[QPathConstraint(intermediate_categories=["biolink:Gene"])],
+            constraints=[
+                PathConstraint(required_intermediate_categories=["biolink:Gene"])
+            ],
         )
         assert p.subject == "n0"
-        assert p.constraints[0].intermediate_categories == ["biolink:Gene"]
+        assert p.constraints[0].required_intermediate_categories == ["biolink:Gene"]
 
-    def test_query_graph_requires_edges_or_paths(self):
-        with pytest.raises(ValidationError, match="edges"):
-            QueryGraph(nodes={"n0": QNode()})
+    def test_query_graph_accepts_nodes_alone(self):
+        """Valid TRAPI 2.0; gandalf's executability check lives in the server."""
+        assert QueryGraph(nodes={"n0": QNode()}).edges is None
 
 
 # ---------------------------------------------------------------------------
@@ -377,23 +390,27 @@ class TestAsyncTRAPIQuery:
 
 
 class TestQNodeSetInterpretation:
-    """Tests for QNode set_interpretation and member_ids fields."""
+    """Tests for QNode set_interpretation and member_ids fields.
+
+    TOM models ``set_interpretation`` as a ``Literal``, so a parsed value is a
+    plain string rather than an enum member.
+    """
 
     def test_valid_batch(self):
         node = QNode(ids=["A"], set_interpretation="BATCH")
-        assert node.set_interpretation == SetInterpretation.BATCH
+        assert node.set_interpretation == "BATCH"
 
     def test_valid_all(self):
         node = QNode(ids=["A", "B"], set_interpretation="ALL")
-        assert node.set_interpretation == SetInterpretation.ALL
+        assert node.set_interpretation == "ALL"
 
     def test_valid_many(self):
         node = QNode(set_interpretation="MANY", member_ids=["A", "B"])
-        assert node.set_interpretation == SetInterpretation.MANY
+        assert node.set_interpretation == "MANY"
 
     def test_valid_collate(self):
         node = QNode(categories=["biolink:Gene"], set_interpretation="COLLATE")
-        assert node.set_interpretation == SetInterpretation.COLLATE
+        assert node.set_interpretation == "COLLATE"
 
     def test_invalid_value_raises(self):
         with pytest.raises(ValidationError):
@@ -502,8 +519,9 @@ class TestResponseModels:
         assert r.node_count == 1000
 
     def test_trapi_response(self):
-        r = TRAPIResponse(message={"query_graph": {}, "results": []})
-        assert "query_graph" in r.message
+        r = TRAPIResponse(message={"query_graph": {"nodes": {"n0": {}}}, "results": []})
+        assert r.message.query_graph is not None
+        assert r.message.results == []
 
 
 # ---------------------------------------------------------------------------
