@@ -11,6 +11,13 @@ That second check is the one that matters here.  TOM serializes with
 empty value where the model's default is "absent" comes back *different* --
 which is exactly the class of bug (``qualifiers: []``,
 ``upstream_resource_ids: []``, ``name: null``) that a shape-only check misses.
+
+Dehydrated responses are deliberately excluded.  That mode exists to make the
+payload as small as possible and omits ``Edge.sources``, which TRAPI 2.0
+requires, so such a response is knowingly not schema-valid: validating it
+would only assert a thing gandalf has chosen not to do.  What *is* pinned
+below is the shape of that choice, so the omission stays deliberate rather
+than drifting -- see :class:`gandalf.trapi.InFlightEdge`.
 """
 
 import orjson
@@ -64,7 +71,6 @@ def assert_valid_trapi(response: dict) -> None:
 
 
 class TestResponsesAreValidTRAPI:
-    @pytest.mark.parametrize("dehydrated", [False, True])
     @pytest.mark.parametrize(
         "query_kwargs",
         [
@@ -87,10 +93,8 @@ class TestResponsesAreValidTRAPI:
         ],
         ids=["unpinned", "pinned-both-ends", "qualified", "allow-deny"],
     )
-    def test_lookup_response(self, graph, bmt, query_kwargs, dehydrated):  # noqa: F811
-        response = lookup(
-            graph, one_hop(**query_kwargs), bmt=bmt, dehydrated=dehydrated
-        )
+    def test_lookup_response(self, graph, bmt, query_kwargs):  # noqa: F811
+        response = lookup(graph, one_hop(**query_kwargs), bmt=bmt, dehydrated=False)
         assert response["message"]["results"]
         assert_valid_trapi(response)
 
@@ -199,3 +203,64 @@ class TestRequestsValidateAgainstTOM:
         assert examples
         for example in examples:
             AsyncTRAPIQuery.from_dict(example)
+
+
+class TestDehydratedResponsesTradeConformanceForSize:
+    """Dehydrated mode is smaller than TRAPI allows, on purpose.
+
+    It is the one response shape gandalf does not hold to the schema, so the
+    exact shape of the exception is asserted here: anything more than this
+    omitted, or anything omitted that should not be, is a change of contract
+    rather than a bug fix.
+    """
+
+    def test_edges_omit_sources_and_attributes(self, graph, bmt):  # noqa: F811
+        edges = lookup(graph, one_hop(), bmt=bmt, dehydrated=True)["message"][
+            "knowledge_graph"
+        ]["edges"]
+        assert edges
+        for edge_id, edge in edges.items():
+            assert set(edge) == {
+                "subject",
+                "object",
+                "predicate",
+                "knowledge_level",
+                "agent_type",
+            }, edge_id
+
+    def test_that_is_the_only_reason_they_are_invalid(self, graph, bmt):  # noqa: F811
+        """Nothing else about a dehydrated response is non-conformant.
+
+        Put the missing sources back and it validates, which keeps the
+        exception to the one property rather than a general licence.
+        """
+        response = lookup(graph, one_hop(), bmt=bmt, dehydrated=True)
+        for edge in response["message"]["knowledge_graph"]["edges"].values():
+            edge["sources"] = [
+                {
+                    "resource_id": "infores:ctd",
+                    "resource_role": "primary_knowledge_source",
+                }
+            ]
+        assert_valid_trapi(response)
+
+    def test_dehydrated_is_materially_smaller(self, graph, bmt):  # noqa: F811
+        dehydrated = lookup(graph, one_hop(), bmt=bmt, dehydrated=True)
+        full = lookup(graph, one_hop(), bmt=bmt, dehydrated=False)
+        assert len(orjson.dumps(dehydrated)) < len(orjson.dumps(full)) / 2
+
+    def test_no_nulls_even_when_dehydrated(self, graph, bmt):  # noqa: F811
+        """Smaller is not licence to emit a null: those are never valid."""
+        response = lookup(graph, one_hop(), bmt=bmt, dehydrated=True)
+
+        def nulls(value, path=""):
+            if value is None:
+                yield path or "<root>"
+            elif isinstance(value, dict):
+                for key, sub in value.items():
+                    yield from nulls(sub, f"{path}/{key}")
+            elif isinstance(value, list):
+                for i, sub in enumerate(value):
+                    yield from nulls(sub, f"{path}/{i}")
+
+        assert list(nulls(response)) == []

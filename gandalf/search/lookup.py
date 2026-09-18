@@ -814,22 +814,20 @@ def _build_response(
 
                     edge_props: InFlightEdge
                     if lightweight:
-                        # sources is a required Edge property, and like
-                        # knowledge_level / agent_type it comes from the
-                        # in-memory dedup store as a shared pool reference --
-                        # so a dehydrated edge can carry it without touching
-                        # LMDB.  Only the cold-path attributes are skipped.
+                        # A dehydrated edge carries the smallest useful shape:
+                        # no cold-path attributes, and no sources either, even
+                        # though TRAPI 2.0 requires them and they are cheap to
+                        # read.  Sources are the largest thing left on an edge
+                        # once attributes are gone (~200 bytes each), and this
+                        # mode exists to keep the payload minimal -- so a
+                        # dehydrated response is knowingly not schema-valid.
+                        # See InFlightEdge for the contract.
                         edge_props = {
                             "predicate": predicate,
                             "subject": subj_id,
                             "object": obj_id,
                             "knowledge_level": knowledge_level,
                             "agent_type": agent_type,
-                            "sources": (
-                                graph.edge_properties.get_sources(fwd_eidx)
-                                if fwd_eidx >= 0
-                                else []
-                            ),
                         }
                     else:
                         if fwd_eidx < 0:

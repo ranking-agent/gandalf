@@ -285,7 +285,12 @@ Gandalf's own parameters:
 
 - `subclass` (bool): Enable biolink subclass inference (default `true`)
 - `subclass_depth` (int): Maximum `subclass_of` hops (default `1`)
-- `dehydrated` (bool): Skip edge attribute enrichment for faster, lighter responses (auto-enabled for very large result sets)
+- `dehydrated` (bool): Return the smallest useful response — edges carry only
+  subject, object, predicate, `knowledge_level` and `agent_type`, with no
+  attributes and no `sources` (auto-enabled for very large result sets).
+  TRAPI 2.0 requires `sources`, so a dehydrated response is deliberately not
+  schema-valid: the mode trades conformance for size, and rehydrating one
+  (see `rehydrate`) restores a conformant response
 - `rehydrate` (bool): When true, the server skips the graph lookup and **only** enriches the `knowledge_graph` already supplied in `message` — used to re-enrich a previously dehydrated response
 - `filter_config` (object): Plugin-defined node filter settings (each NodeFilter plugin reads its own key)
 - `annotator_config` (object): Per-request opt-in response-annotator settings (each key activates one annotator plugin)

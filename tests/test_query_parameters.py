@@ -289,6 +289,36 @@ class TestResponseFastPath:
         assert "knowledge_graph" in resp.json()["message"]
         assert calls == [], "fast path must not validate the request via Pydantic"
 
+    def test_query_builds_no_tom_models_on_the_fast_path(self, server, monkeypatch):
+        """No TRAPI object model is constructed for a response by default.
+
+        The models exist for the request boundary, the OpenAPI schema and the
+        conformance tests.  Materializing one per result measures ~4.4x the
+        CPU and ~2.2x the peak RSS of building dicts and calling orjson, so
+        the response path must stay on plain dicts unless
+        ``validate_responses`` is set.
+        """
+        import translator_tom
+
+        gandalf_server, client = server
+
+        calls = []
+        for model_name in ("Response", "Message", "Result", "Edge", "Node"):
+            model = getattr(translator_tom, model_name)
+            for method in ("model_validate", "model_construct"):
+                orig = getattr(model, method)
+
+                def spy(*args, _name=model_name, _m=method, _orig=orig, **kwargs):
+                    calls.append(f"{_name}.{_m}")
+                    return _orig(*args, **kwargs)
+
+                monkeypatch.setattr(model, method, spy)
+
+        resp = client.post("/query", json=_ONE_HOP)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["message"]["results"]
+        assert calls == [], f"fast path constructed TRAPI models: {calls}"
+
     def test_openapi_documents_request_bodies(self, server):
         """Even though the handlers take a raw dict, the OpenAPI schema must
         still document the TRAPI request shape via a clean component ref."""

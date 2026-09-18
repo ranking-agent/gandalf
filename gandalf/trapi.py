@@ -55,18 +55,21 @@ import time
 from typing import Any, Optional, cast
 
 import orjson
+from translator_tom import CURIE
 from translator_tom.model_dicts import (
+    AttributeDict,
     EdgeDict,
-    QueryDict,
-    QueryParametersDict,
     KnowledgeGraphDict,
     LogEntryDict,
     MessageDict,
     NodeDict,
+    QualifierDict,
+    QueryDict,
+    QueryParametersDict,
     ResponseDict,
     RetrievalSourceDict,
 )
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 from gandalf.biolink import NAMED_THING
 from gandalf.config import settings
@@ -256,17 +259,41 @@ def query_parameters(query: QueryDict) -> GandalfParametersDict:
     return cast("GandalfParametersDict", query.get("parameters") or {})
 
 
-class InFlightEdge(EdgeDict):
-    """An Edge mid-assembly, before its internal markers are stripped.
+class InFlightEdge(TypedDict):
+    """An Edge as gandalf assembles it, which is not always a full TRAPI Edge.
 
-    ``gandalf.search.lookup`` hangs three bookkeeping properties off an edge
-    while building a response -- the knowledge-graph id it should be filed
-    under, and the subject/object in *query* direction rather than stored
-    direction -- then pops them before serialization.  They are not TRAPI, so
-    they cannot live on :class:`~translator_tom.model_dicts.EdgeDict`; this
-    subclass keeps them typed rather than untyped.
+    Deliberately looser than :class:`~translator_tom.model_dicts.EdgeDict` in
+    one way, and wider in another:
+
+    * ``sources`` is optional here.  TRAPI 2.0 requires it on every Edge, but
+      a **dehydrated** response omits it -- along with the cold-path
+      ``attributes`` -- because that mode exists to make the payload as small
+      as possible, and ``sources`` is the largest thing left on an edge once
+      attributes are gone (~200 bytes each).  A dehydrated response is
+      therefore knowingly not schema-valid; see ``dehydrated`` in
+      :func:`gandalf.search.lookup.lookup`, and the note in
+      ``tests/test_trapi_conformance.py`` on why those responses are excluded
+      from conformance checks.
+    * Three bookkeeping properties hang off an edge while a response is built
+      -- the knowledge-graph id it should be filed under, and the
+      subject/object in *query* direction rather than the stored direction --
+      and are popped again before serialization.
+
+    Keeping the difference in a named type means the dehydrated contract is
+    written down in one place, and a typo in either branch that builds an edge
+    is still a type error.
     """
 
+    # TOM annotates this ``Biolink.Predicate``, which is an alias of CURIE
+    # assigned as a class attribute -- mypy will not take that as a type.
+    predicate: CURIE
+    subject: CURIE
+    object: CURIE
+    knowledge_level: str
+    agent_type: str
+    sources: NotRequired[list[RetrievalSourceDict]]
+    attributes: NotRequired[list[AttributeDict]]
+    qualifiers: NotRequired[list[QualifierDict]]
     _edge_id: NotRequired[str]
     _query_subject: NotRequired[str]
     _query_object: NotRequired[str]
@@ -280,7 +307,7 @@ class InFlightEdge(EdgeDict):
 EMPTY_FORBIDDEN_EDGE_PROPERTIES = ("qualifiers",)
 
 
-def prune_edge(edge: EdgeDict) -> EdgeDict:
+def prune_edge(edge: EdgeDict | InFlightEdge) -> EdgeDict | InFlightEdge:
     """Drop the properties of a served Edge that TRAPI 2.0 forbids empty.
 
     Called once per distinct knowledge-graph Edge rather than per result, and

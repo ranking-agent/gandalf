@@ -120,10 +120,30 @@ ways, and the split between them is deliberate:
    `InFlightEdge` (an Edge plus the `_edge_id` / `_query_*` markers stripped
    before serialization) and `GandalfParametersDict`.
 3. **Conformance tests** (`tests/test_trapi_conformance.py`): every response
-   shape is validated against TOM *and* checked to round-trip byte-identically
-   through `to_json()`.  The round-trip is the part that catches nulls and
-   empty containers, since TOM serializes with `exclude_none` +
-   `exclude_defaults`.
+   shape except dehydrated (see below) is validated against TOM *and* checked
+   to round-trip byte-identically through `to_json()`.  The round-trip is the
+   part that catches nulls and empty containers, since TOM serializes with
+   `exclude_none` + `exclude_defaults`.
+
+Pydantic validation is **off by default on both directions of every request**
+and runs only when `validate_responses` is set: `_request_dict` and
+`_trapi_response` are both gated on it, and the routes' `response_model` is
+bound to `None` without it.  Two tests in
+`tests/test_query_parameters.py::TestResponseFastPath` hold that line -- one
+asserts the request is never run through `TRAPIQuery.model_validate`, the
+other that no TOM model is constructed for a response at all.
+
+**Dehydrated responses are deliberately not conformant.**  That mode exists to
+make the payload as small as possible, and it omits `Edge.sources` as well as
+the cold-path `attributes` -- sources are the largest thing left on an edge
+once attributes are gone (~210 bytes, +36% on a dehydrated payload).  TRAPI 2.0
+requires `sources`, so a dehydrated response is knowingly not schema-valid and
+is excluded from the conformance tests; validating it would only assert
+something gandalf has chosen not to do.  `gandalf.trapi.InFlightEdge` is the
+type that records the exception (it makes `sources` optional), and
+`tests/test_trapi_conformance.py::TestDehydratedResponsesTradeConformanceForSize`
+pins the exact shape so the omission cannot quietly widen.  Everything else
+still holds there, nulls included.
 
 **Responses are deliberately NOT built as TOM models.**  Measured on 50k
 results: constructing TOM models and serializing is ~4.4x the CPU and ~2.2x
