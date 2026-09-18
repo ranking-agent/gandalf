@@ -9,10 +9,10 @@ from typing import Any, Optional
 
 import numpy as np
 
-from gandalf.biolink import NAMED_THING
 from gandalf.config import settings
 from gandalf.profiler import current_profiler
 from gandalf.search.path_arrays import PathArrays
+from gandalf.trapi import ensure_node_category
 
 logger = logging.getLogger(__name__)
 
@@ -351,7 +351,7 @@ def reconstruct_paths(
             if lightweight and bmt is not None:
                 node_props = {
                     "categories": _get_most_specific_category(
-                        all_props.get("categories") or [NAMED_THING], bmt
+                        all_props.get("categories", []), bmt
                     ),
                 }
                 name = all_props.get("name")
@@ -359,13 +359,11 @@ def reconstruct_paths(
                     node_props["name"] = name
             else:
                 node_props = all_props.copy()
-                if not node_props.get("categories"):
-                    node_props["categories"] = [NAMED_THING]
                 if node_props.get("name") is None:
                     node_props.pop("name", None)
                 if "attributes" not in node_props:
                     node_props["attributes"] = []
-            node_cache[node_idx] = node_props
+            node_cache[node_idx] = ensure_node_category(node_props)
             node_id_cache[node_idx] = id_batch.get(int(node_idx))
         prof.add_metric("unique_nodes", int(len(unique_node_indices)))
 

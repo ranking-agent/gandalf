@@ -55,6 +55,7 @@ from gandalf.request_validation import (
     normalize_query_graph,
     reject_retired_trapi_fields,
     validate_edge_node_references,
+    validate_query_graph_is_executable,
     validate_set_interpretation,
 )
 from gandalf.search.edge_constraints import ConstraintError, EdgeConstraints
@@ -147,7 +148,8 @@ def _prepare_query(raw: dict) -> Deadline:
         The :class:`~gandalf.trapi.Deadline` for this query.
 
     Raises:
-        HTTPException: 400 for a malformed query graph or constraints object,
+        HTTPException: 400 for a malformed or non-executable query graph, or a
+            malformed constraints object,
             409 when the requested ``parameters.timeout`` is below what this
             server can answer within, 422 for an unsupported
             ``set_interpretation``.
@@ -155,6 +157,7 @@ def _prepare_query(raw: dict) -> Deadline:
     query_graph = raw["message"]["query_graph"]
     normalize_query_graph(query_graph)
     reject_retired_trapi_fields(query_graph)
+    validate_query_graph_is_executable(query_graph)
     validate_set_interpretation(query_graph)
     validate_edge_node_references(query_graph)
 

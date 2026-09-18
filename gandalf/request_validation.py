@@ -165,6 +165,26 @@ def reject_retired_trapi_fields(query_graph: dict) -> None:
                     )
 
 
+def validate_query_graph_is_executable(query_graph: dict) -> None:
+    """Require a non-empty ``edges`` map on the query graph.
+
+    Gandalf answers lookup queries; it does not execute Pathfinder ``paths``
+    (``x-trapi.pathfinderquery`` is false).  Without this check a query graph
+    carrying no ``edges`` key reaches the planner and raises ``KeyError``
+    behind an opaque 500, and one carrying an empty ``edges`` map returns 0
+    results with an invalid ``message.query_graph`` echoed back --
+    ``QueryGraph.edges`` has a ``minProperties`` of 1.
+
+    Raises ``HTTPException(400)`` when there is nothing to execute.
+    """
+    if not query_graph.get("edges"):
+        raise HTTPException(
+            400,
+            "query_graph must include a non-empty 'edges' map; this server "
+            "executes lookup queries and does not support Pathfinder 'paths'",
+        )
+
+
 def validate_edge_node_references(query_graph: dict) -> None:
     """Validate that every qedge references nodes that exist in the graph.
 

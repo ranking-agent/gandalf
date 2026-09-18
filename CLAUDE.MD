@@ -150,7 +150,19 @@ the loader at build time, and in `reconstruct.py` / `trapi.prune_edge` /
 
 The 1.x spellings of renamed request fields are rejected with a 400 rather
 than ignored (see `gandalf/request_validation.py`): silently dropping a filter
-a client asked for is worse than an error.
+a client asked for is worse than an error.  So is a query graph with no
+`edges` to execute, which used to KeyError behind a 500.
+
+### Build-time vs query-time
+
+Some 2.0 requirements are satisfied in the serialized graph and only change
+on a rebuild: `knowledge_level`/`agent_type` interning, `Node.name` /
+`Node.categories` normalization, `RetrievalSource.upstream_resource_ids`
+pruning (done in the loader so it covers both graph sources), and the
+persisted `meta_kg.json` / `sri_testing_data.json`.  Everything else is
+computed per query.  When changing a serialization rule, check which side it
+lands on -- a fix applied only in the loader will not reach an already-built
+graph.
 
 ## API Endpoints
 

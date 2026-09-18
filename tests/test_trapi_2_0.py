@@ -759,3 +759,107 @@ class TestEmptyContainersOnlyWhereAllowed:
         from gandalf.trapi import prune_edge
 
         assert prune_edge({"attributes": []}) == {"attributes": []}
+
+
+class TestRehydrateKeepsClientValuesValid:
+    """The rehydrate path serves a knowledge graph the client handed back.
+
+    A property that arrives present-but-null, or with an empty value 2.0
+    forbids, must not pass through: it has to read as absent so the stored
+    value fills it.
+    """
+
+    def _rehydrate(self, graph, nodes, edges):  # noqa: F811
+        from gandalf.enrichment import enrich_knowledge_graph
+
+        message = {"message": {"knowledge_graph": {"nodes": nodes, "edges": edges}}}
+        enrich_knowledge_graph(message, graph)
+        return message["message"]["knowledge_graph"]
+
+    def test_client_null_name_is_replaced_by_the_stored_one(
+        self, graph, bmt
+    ):  # noqa: F811
+        kg = self._rehydrate(graph, {METFORMIN: {"name": None}}, {})
+        assert kg["nodes"][METFORMIN]["name"] == "Metformin"
+
+    def test_client_empty_categories_replaced_by_the_stored_ones(
+        self, graph, bmt  # noqa: F811
+    ):
+        kg = self._rehydrate(graph, {METFORMIN: {"categories": []}}, {})
+        assert kg["nodes"][METFORMIN]["categories"]
+        assert "biolink:Drug" in kg["nodes"][METFORMIN]["categories"]
+
+    def test_unknown_node_still_served_validly(self, graph, bmt):  # noqa: F811
+        """A node the graph does not know has nothing to fill from."""
+        kg = self._rehydrate(
+            graph, {"SYNTHETIC:1": {"name": None, "categories": []}}, {}
+        )
+        node = kg["nodes"]["SYNTHETIC:1"]
+        assert "name" not in node
+        assert node["categories"] == ["biolink:NamedThing"]
+
+    def test_client_null_edge_properties_are_filled_from_the_graph(
+        self, graph, bmt  # noqa: F811
+    ):
+        kg = self._rehydrate(
+            graph,
+            {},
+            {
+                "x": {
+                    "subject": METFORMIN,
+                    "object": "MONDO:0005148",
+                    "predicate": "biolink:treats",
+                    "attributes": None,
+                    "qualifiers": [],
+                }
+            },
+        )
+        edge = kg["edges"]["x"]
+        assert edge["attributes"] is not None
+        assert "qualifiers" not in edge
+        assert edge["sources"]
+
+    def test_no_nulls_survive_rehydration(self, graph, bmt):  # noqa: F811
+        kg = self._rehydrate(
+            graph,
+            {
+                METFORMIN: {"name": None, "categories": []},
+                "SYNTHETIC:1": {"name": None},
+            },
+            {
+                "x": {
+                    "subject": METFORMIN,
+                    "object": "MONDO:0005148",
+                    "predicate": "biolink:treats",
+                    "attributes": None,
+                }
+            },
+        )
+        assert list(_null_paths(kg)) == []
+
+
+class TestNonExecutableQueryGraphRejected:
+    """A query graph with nothing to execute is a 400, not a 500 or an echo.
+
+    QueryGraph.edges has a minProperties of 1, so an empty map could not be
+    echoed back validly anyway, and a missing one used to reach the planner
+    and raise KeyError behind an opaque 500.
+    """
+
+    @pytest.mark.parametrize(
+        "query_graph",
+        [
+            {"nodes": {"n0": {"ids": [METFORMIN]}}, "edges": {}},
+            {"nodes": {"n0": {"ids": [METFORMIN]}}},
+            {
+                "nodes": {"n0": {}, "n1": {}},
+                "paths": {"p0": {"subject": "n0", "object": "n1"}},
+            },
+        ],
+        ids=["empty-edges", "no-edges", "paths-only"],
+    )
+    def test_rejected_with_400(self, server, query_graph):
+        _, client = server
+        resp = client.post("/query", json={"message": {"query_graph": query_graph}})
+        assert resp.status_code == 400
+        assert "edges" in resp.json()["detail"]

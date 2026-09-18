@@ -69,6 +69,23 @@ graph = build_graph_from_jsonl(
 graph.save_mmap("data/processed/gandalf_mmap")
 ```
 
+> **Upgrading to TRAPI 2.0 requires a rebuild.** Some of what 2.0 mandates is
+> baked into the serialized graph, so a graph built by an earlier version
+> cannot serve a conformant response. `CSRGraph.load_mmap` refuses such a
+> graph outright with a `GraphFormatError` naming the rebuild, rather than
+> starting up and serving edges with no `knowledge_level` / `agent_type`.
+>
+> Baked in at build time (a rebuild is the only way to change these):
+> `knowledge_level` / `agent_type` on every edge, `Node.name` omitted when
+> unknown, `Node.categories` defaulted to `biolink:NamedThing`,
+> `RetrievalSource.upstream_resource_ids` omitted when empty, and the
+> persisted `meta_kg.json` / `sri_testing_data.json`.
+>
+> Everything else 2.0 changed is computed per query and takes effect on
+> deploy: binding shapes, `QEdge.constraints`, the `parameters` object and its
+> timeout, the response envelope, and the remaining null / empty-container
+> rules.
+
 ### Query paths (TRAPI format)
 
 ```python

@@ -14,7 +14,11 @@ from __future__ import annotations
 
 from gandalf.graph import NOT_PROVIDED, CSRGraph
 from gandalf.profiler import current_profiler
-from gandalf.trapi import prune_edge
+from gandalf.trapi import (
+    drop_null_properties,
+    ensure_node_category,
+    prune_edge,
+)
 
 
 def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
@@ -67,25 +71,34 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
 def _enrich_nodes(nodes: dict, graph: CSRGraph) -> None:
     """Fill in missing properties for every node in the knowledge graph."""
     for node_id, node in nodes.items():
+        # A client can hand back a node with a property present but null, or
+        # with an empty categories list.  TRAPI 2.0 admits neither, and both
+        # have to read as "absent" so the stored value fills them rather than
+        # passing the client's value through.
+        drop_null_properties(node)
+        if not node.get("categories", True):
+            del node["categories"]
+
         node_idx = graph.get_node_idx(node_id)
-        if node_idx is None:
-            # Node not in graph (e.g. synthetic inferred node) — skip
-            continue
+        # A node the graph does not know (e.g. a synthetic inferred node) has
+        # nothing to fill from, but still has to be served validly.
+        stored = graph.get_all_node_properties(node_idx) if node_idx is not None else {}
 
-        stored = graph.get_all_node_properties(node_idx)
-        if not stored:
-            continue
+        if stored:
+            # Populate fields that are absent from the KG node
+            if "name" not in node and "name" in stored:
+                node["name"] = stored["name"]
 
-        # Populate fields that are absent from the KG node
-        if "name" not in node and "name" in stored:
-            node["name"] = stored["name"]
+            if "categories" not in node and "categories" in stored:
+                node["categories"] = stored["categories"]
 
-        if "categories" not in node and "categories" in stored:
-            node["categories"] = stored["categories"]
+            # Attributes should always be a list
+            if "attributes" not in node:
+                node["attributes"] = stored.get("attributes", [])
 
-        # Attributes should always be a list
-        if "attributes" not in node:
-            node["attributes"] = stored.get("attributes", [])
+        # categories is required with a minItems of 1, so it cannot be left
+        # empty even when the graph had nothing more specific to offer.
+        ensure_node_category(node)
 
 
 def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
@@ -124,6 +137,8 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
 
     # Now enrich each edge
     for edge_uuid, edge in edges.items():
+        # As for nodes: a client-supplied null must read as absent.
+        drop_null_properties(edge)
         fwd_idx = edge_idx_map.get(edge_uuid)
         if fwd_idx is None:
             # Could not resolve — ensure defaults are present.  TRAPI 2.0

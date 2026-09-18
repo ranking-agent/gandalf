@@ -56,6 +56,7 @@ from typing import Any, Optional
 
 import orjson
 
+from gandalf.biolink import NAMED_THING
 from gandalf.config import settings
 
 logger = logging.getLogger(__name__)
@@ -242,6 +243,59 @@ def prune_edge(edge: dict) -> dict:
         if prop in edge and not edge[prop]:
             del edge[prop]
     return edge
+
+
+def drop_null_properties(obj: dict) -> dict:
+    """Drop every null-valued property from a node or edge, in place.
+
+    For objects assembled from client input -- the ``rehydrate`` path hands
+    back a knowledge graph the client supplied -- where a property may arrive
+    present-but-null.  TRAPI 2.0 admits no nulls, and a null also has to read
+    as "absent" so that enrichment fills it from the graph instead of passing
+    it through.
+
+    Not used on the search path, which builds its own nodes and edges and
+    never puts a null in one.
+
+    Args:
+        obj: A TRAPI Node or Edge dict (mutated in place).
+
+    Returns:
+        The same dict.
+
+    Examples:
+        >>> drop_null_properties({"name": None, "categories": ["biolink:Gene"]})
+        {'categories': ['biolink:Gene']}
+        >>> drop_null_properties({"attributes": []})
+        {'attributes': []}
+    """
+    for key in [k for k, v in obj.items() if v is None]:
+        del obj[key]
+    return obj
+
+
+def ensure_node_category(node: dict) -> dict:
+    """Give a Node the Biolink root class when nothing more specific is known.
+
+    ``Node.categories`` is required with a ``minItems`` of 1, so neither an
+    empty list nor an absent property is valid and the gap has to be filled
+    rather than dropped.
+
+    Args:
+        node: A TRAPI Node dict (mutated in place).
+
+    Returns:
+        The same dict.
+
+    Examples:
+        >>> ensure_node_category({"categories": []})
+        {'categories': ['biolink:NamedThing']}
+        >>> ensure_node_category({"categories": ["biolink:Gene"]})
+        {'categories': ['biolink:Gene']}
+    """
+    if not node.get("categories"):
+        node["categories"] = [NAMED_THING]
+    return node
 
 
 def prune_retrieval_sources(sources: list) -> list:
