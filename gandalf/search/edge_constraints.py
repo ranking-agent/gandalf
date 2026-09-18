@@ -31,6 +31,8 @@ constraint kinds the spec grows.
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from translator_tom.model_dicts import QEdgeDict
+
 from gandalf.search.attribute_constraints import matches_attribute_constraints
 from gandalf.search.qualifiers import edge_matches_qualifier_constraints
 
@@ -150,7 +152,7 @@ class EdgeConstraints:
     sources: Optional[SourcesConstraint] = None
 
     @classmethod
-    def parse(cls, qedge: dict) -> "EdgeConstraints":
+    def parse(cls, qedge: QEdgeDict) -> "EdgeConstraints":
         """Build the constraints for one QEdge from its ``constraints`` object.
 
         Args:
@@ -265,7 +267,7 @@ class EdgeConstraints:
         return True
 
 
-def _parse_list(raw: dict, field: str) -> list:
+def _parse_list(raw: Any, field: str) -> list:
     """Read a list-valued constraint, rejecting anything that is not a list."""
     value = raw.get(field)
     if value is None:
@@ -275,7 +277,7 @@ def _parse_list(raw: dict, field: str) -> list:
     return value
 
 
-def _parse_allow_deny(raw: dict, field: str) -> Optional[AllowDeny]:
+def _parse_allow_deny(raw: Any, field: str) -> Optional[AllowDeny]:
     """Read an allow/deny constraint, or None when the QEdge omits it."""
     value = raw.get(field)
     return None if value is None else AllowDeny.parse(value, field)

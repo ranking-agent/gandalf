@@ -6,10 +6,11 @@ GANDALF (Graph Analysis Navigator for Discovery And Link Finding) is a Python li
 
 ## Tech Stack
 
-- **Python 3.8+** (supports 3.8-3.12)
+- **Python 3.10+** (supports 3.10-3.12; the floor comes from `translator_tom`)
 - **FastAPI** - REST API server
 - **NumPy** - Sparse matrix operations
 - **BMT** (Biolink Model Toolkit) - Biolink ontology handling
+- **translator_tom** - the Translator-wide TRAPI object model (request models, OpenAPI schema, and TypedDicts for internal typing)
 - **pytest** - Testing framework
 - **black** - Code formatting
 
@@ -98,6 +99,41 @@ scripts/              # CLI entry points (gandalf-build, gandalf-query, gandalf-
 - **Bidirectional search**: Expands from both start and end nodes to minimize traversal
 - **Property storage**: Hash dicts keyed by `(src_idx, dst_idx, pred_idx)` tuples
 - **Node indexing**: Original string IDs mapped to integer indices for NumPy operations
+
+## The TRAPI object model (`translator_tom`)
+
+Everything TRAPI-shaped comes from `translator_tom` (TOM), the Translator-wide
+TRAPI object model, rather than being re-derived here.  It is used in three
+ways, and the split between them is deliberate:
+
+1. **Request models + OpenAPI** (`gandalf/models.py`): `TRAPIQuery` /
+   `AsyncTRAPIQuery` subclass TOM's `Query` / `AsyncQuery`, and
+   `QueryParameters` subclasses TOM's to add gandalf's own settings under the
+   `additionalProperties` that 2.0 gives that object.  A request body is small,
+   so full Pydantic validation there costs microseconds.
+2. **TypedDicts for internals** (`translator_tom.model_dicts`): gandalf keeps
+   building plain dicts and serializing them with orjson, but the dicts are
+   *typed*.  A `TypedDict` is free at runtime -- `cast` compiles to nothing --
+   so this is static checking at zero cost, and mypy (which CI runs) catches
+   binding-shape mistakes, nulls where 2.0 admits none, and misspelled
+   properties.  Two gandalf-specific subclasses live in `gandalf/trapi.py`:
+   `InFlightEdge` (an Edge plus the `_edge_id` / `_query_*` markers stripped
+   before serialization) and `GandalfParametersDict`.
+3. **Conformance tests** (`tests/test_trapi_conformance.py`): every response
+   shape is validated against TOM *and* checked to round-trip byte-identically
+   through `to_json()`.  The round-trip is the part that catches nulls and
+   empty containers, since TOM serializes with `exclude_none` +
+   `exclude_defaults`.
+
+**Responses are deliberately NOT built as TOM models.**  Measured on 50k
+results: constructing TOM models and serializing is ~4.4x the CPU and ~2.2x
+the peak RSS of building dicts and calling `orjson.dumps` (and going through
+`Response.from_dict` on an already-built dict is ~50x on serialization alone).
+Gandalf's `large_result_threshold` is 10M paths, and `server._trapi_response` /
+`_request_dict` exist precisely to keep per-result object materialization off
+the hot path.  Use the TypedDicts there instead.
+
+TOM requires Python >= 3.10, which is why gandalf's floor is 3.10.
 
 ## TRAPI version
 

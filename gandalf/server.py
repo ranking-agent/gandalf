@@ -8,7 +8,7 @@ import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import httpx
 import orjson
@@ -28,7 +28,6 @@ from fastapi.openapi.docs import (
     get_swagger_ui_html,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from gandalf import CSRGraph, annotate_response, enrich_knowledge_graph, lookup
@@ -36,6 +35,9 @@ from gandalf import otel
 from gandalf.biolink import make_toolkit
 from gandalf.compression import ZstdCompressionMiddleware
 from gandalf.logging_config import configure_logging, request_id_var
+from translator_tom import TOMBase
+from translator_tom.model_dicts import QueryDict
+
 from gandalf.models import (
     AsyncTRAPIQuery,
     EdgesResponse,
@@ -54,6 +56,7 @@ from gandalf.openapi import construct_open_api_schema
 from gandalf.request_validation import (
     normalize_query_graph,
     reject_retired_trapi_fields,
+    require_query_graph,
     validate_edge_node_references,
     validate_query_graph_is_executable,
     validate_set_interpretation,
@@ -63,6 +66,7 @@ from gandalf.trapi import (
     Deadline,
     TimeoutNotSatisfiable,
     finalize_response,
+    query_parameters,
     resolve_timeout,
 )
 
@@ -114,7 +118,7 @@ def _trapi_response(content: Any) -> Any:
     return CustomORJSONResponse(content)
 
 
-def _request_dict(body: dict, model: type[BaseModel]) -> dict:
+def _request_dict(body: dict, model: type[TOMBase]) -> QueryDict:
     """Return the request body as a plain dict for downstream handling.
 
     On the default (non-validating) path the JSON body -- already parsed into
@@ -125,17 +129,22 @@ def _request_dict(body: dict, model: type[BaseModel]) -> dict:
     access with defaults, so the model is not needed.
 
     When ``validate_responses`` is enabled (dev/testing) the body is validated
-    against *model* and normalized via ``model_dump(exclude_none=True)`` so
-    malformed requests are still rejected.  Gating inbound validation on the
-    same flag keeps a single switch for "strict" mode.
+    against *model* and normalized via TOM's own ``to_dict()`` so malformed
+    requests are still rejected.  Gating inbound validation on the same flag
+    keeps a single switch for "strict" mode.
+
+    ``to_dict()`` excludes both nulls and unset defaults, which matters for the
+    ``parameters`` echo: TRAPI 2.0 asks the server to repeat the parameters it
+    was *given*, and a plain ``exclude_none`` dump would add TOM's
+    ``bypass_cache=False`` default to a request that never mentioned it.
     """
     if _validate:
-        validated: dict = model.model_validate(body).model_dump(exclude_none=True)
-        return validated
-    return body
+        validated = model.model_validate(body).to_dict()
+        return cast("QueryDict", validated)
+    return cast("QueryDict", body)
 
 
-def _prepare_query(raw: dict) -> Deadline:
+def _prepare_query(raw: QueryDict) -> Deadline:
     """Validate a TRAPI request's query graph and read its query parameters.
 
     Shared by ``/query`` and ``/asyncquery`` so both reject the same malformed
@@ -154,7 +163,7 @@ def _prepare_query(raw: dict) -> Deadline:
             server can answer within, 422 for an unsupported
             ``set_interpretation``.
     """
-    query_graph = raw["message"]["query_graph"]
+    query_graph = require_query_graph(raw.get("message"))
     normalize_query_graph(query_graph)
     reject_retired_trapi_fields(query_graph)
     validate_query_graph_is_executable(query_graph)
@@ -610,7 +619,7 @@ def sync_lookup(
         raise HTTPException(503, "Graph not loaded")
 
     raw = _request_dict(request, TRAPIQuery)
-    params = raw.get("parameters") or {}
+    params = query_parameters(raw)
 
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
     if params.get("rehydrate") is not None:
@@ -650,7 +659,7 @@ def sync_lookup(
 
 def _async_lookup(
     callback_url: str,
-    query: dict,
+    query: QueryDict,
     trace_headers: Optional[dict] = None,
     profile: bool = False,
     deadline: Optional[Deadline] = None,
@@ -668,7 +677,7 @@ def _async_lookup(
     """
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
-    params = query.get("parameters") or {}
+    params = query_parameters(query)
 
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
     if params.get("rehydrate") is not None:
@@ -756,7 +765,7 @@ def async_query(
     trace_headers: dict[str, str] = {}
     # Rehydration: skip lookup/workflow validation, only enrich the supplied
     # knowledge graph in the background and POST it to the callback.
-    if (raw.get("parameters") or {}).get("rehydrate") is not None:
+    if query_parameters(raw).get("rehydrate") is not None:
         otel.inject_headers(trace_headers)
         logger.info("Doing async rehydration for %s", callback)
         background_tasks.add_task(
@@ -764,8 +773,12 @@ def async_query(
         )
         return _async_accepted(callback)
 
-    # parse requested workflow (already a list of dicts in raw form)
-    workflow_dicts = raw.get("workflow") or [{"id": "lookup", "parameters": None}]
+    # Parse the requested workflow.  TRAPI models Operation as a union of ~30
+    # per-operation types; this server implements two op ids, so the branch
+    # below reads them as plain dicts rather than discriminating that union.
+    workflow_dicts: list[dict[str, Any]] = cast(
+        "list[dict[str, Any]]", raw.get("workflow")
+    ) or [{"id": "lookup", "parameters": None}]
 
     if len(workflow_dicts) != 1:
         raise HTTPException(400, "workflow must contain exactly 1 operation")
@@ -776,9 +789,9 @@ def async_query(
             raise HTTPException(
                 400, "filter_results_top_n requires parameters.max_results"
             )
-        results = raw.get("message", {}).get("results", [])
-        if max_results < len(results):
-            raw["message"]["results"] = results[:max_results]
+        results = raw["message"].get("results") or []
+        if int(max_results) < len(results):
+            raw["message"]["results"] = results[: int(max_results)]
         return _trapi_response(finalize_response({"message": raw["message"]}, raw))
     if workflow_dicts[0].get("id") != "lookup":
         raise HTTPException(400, "operations must have id 'lookup'")

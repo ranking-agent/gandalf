@@ -66,13 +66,17 @@ class TestQueryParametersModel:
 
     def test_parameters_absent_dumps_clean(self):
         q = TRAPIQuery(**_ONE_HOP)
-        raw = q.model_dump(exclude_none=True)
-        assert "parameters" not in raw
+        assert "parameters" not in q.to_dict()
 
     def test_parameters_present_round_trips(self):
+        """The server repeats the parameters it was *given*, nothing more.
+
+        ``to_dict()`` excludes unset defaults as well as nulls, so TOM's
+        ``bypass_cache=False`` default is not added to a request that never
+        mentioned it.
+        """
         q = TRAPIQuery(**_ONE_HOP, parameters={"subclass": True})
-        raw = q.model_dump(exclude_none=True)
-        assert raw["parameters"] == {"subclass": True}
+        assert q.to_dict()["parameters"] == {"subclass": True}
 
     def test_async_accepts_parameters(self):
         q = AsyncTRAPIQuery(

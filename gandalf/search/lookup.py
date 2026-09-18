@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from collections import defaultdict
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 import numpy as np
 
@@ -25,8 +25,11 @@ from gandalf.profiler import (
 )
 from gandalf.graph import NOT_PROVIDED
 from gandalf.query_planner import get_next_qedge, remove_orphaned
+from translator_tom.model_dicts import QueryDict
+
 from gandalf.trapi import (
     Deadline,
+    InFlightEdge,
     QueryTimeout,
     finalize_response,
     prune_edge,
@@ -42,7 +45,7 @@ from gandalf.search.reconstruct import reconstruct_paths
 
 def lookup(
     graph,
-    query: dict,
+    query: QueryDict,
     bmt=None,
     subclass=True,
     subclass_depth=1,
@@ -809,22 +812,36 @@ def _build_response(
                     else:
                         knowledge_level = agent_type = NOT_PROVIDED
 
+                    edge_props: InFlightEdge
                     if lightweight:
+                        # sources is a required Edge property, and like
+                        # knowledge_level / agent_type it comes from the
+                        # in-memory dedup store as a shared pool reference --
+                        # so a dehydrated edge can carry it without touching
+                        # LMDB.  Only the cold-path attributes are skipped.
                         edge_props = {
                             "predicate": predicate,
                             "subject": subj_id,
                             "object": obj_id,
                             "knowledge_level": knowledge_level,
                             "agent_type": agent_type,
+                            "sources": (
+                                graph.edge_properties.get_sources(fwd_eidx)
+                                if fwd_eidx >= 0
+                                else []
+                            ),
                         }
                     else:
                         if fwd_eidx < 0:
-                            edge_props = {}
+                            edge_props = cast("InFlightEdge", {})
                         else:
-                            edge_props = graph.get_edge_properties_by_index(
-                                fwd_eidx,
-                                lmdb_detail=edge_detail_map.get(fwd_eidx, {}),
-                            ).copy()
+                            edge_props = cast(
+                                "InFlightEdge",
+                                graph.get_edge_properties_by_index(
+                                    fwd_eidx,
+                                    lmdb_detail=edge_detail_map.get(fwd_eidx, {}),
+                                ).copy(),
+                            )
                         edge_props["predicate"] = predicate
                         edge_props["subject"] = subj_id
                         edge_props["object"] = obj_id

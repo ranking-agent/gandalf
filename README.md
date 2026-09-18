@@ -15,7 +15,8 @@ A high-performance Python library and [Translator](https://ncats.nih.gov/transla
 - **Subclass expansion** via Biolink Model Toolkit with configurable depth
 - **Batch property enrichment** — enrich only final paths, not intermediate results
 - **Diagnostic tools** to understand path counts and explosion
-- **TRAPI 2.0 compatible** REST API with Plater-compatible endpoints
+- **TRAPI 2.0 compatible** REST API with Plater-compatible endpoints, modelled
+  with [`translator_tom`](https://github.com/NCATSTranslator/TRAPIObjectModeling)
 - **Async query support** with callback URLs
 - **Dehydrated mode** for lightweight responses that skip edge and node attribute enrichment
 - **OpenTelemetry tracing** with Jaeger integration

@@ -12,6 +12,8 @@ LMDB cold-path store.
 
 from __future__ import annotations
 
+from translator_tom.model_dicts import EdgeDict, NodeDict, QueryDict, ResponseDict
+
 from gandalf.graph import NOT_PROVIDED, CSRGraph
 from gandalf.profiler import current_profiler
 from gandalf.trapi import (
@@ -21,7 +23,9 @@ from gandalf.trapi import (
 )
 
 
-def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
+def enrich_knowledge_graph(
+    message: QueryDict | ResponseDict, graph: CSRGraph
+) -> QueryDict | ResponseDict:
     """Attach all available properties to knowledge-graph nodes and edges.
 
     The function mutates *message* in place **and** returns it for
@@ -39,8 +43,12 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
         * ``agent_type``      — from the in-memory dedup store (hot path)
         * ``attributes``      — from LMDB (cold path; includes publications)
 
+    Takes the whole request or response -- the object with a ``message``, not
+    the message itself -- because the ``rehydrate`` endpoint hands it the
+    client's request.
+
     Args:
-        message: A TRAPI ``message`` dict that contains at least
+        message: A TRAPI Query or Response dict that contains at least
             ``message["knowledge_graph"]["nodes"]`` and
             ``message["knowledge_graph"]["edges"]``.
         graph: The :class:`CSRGraph` instance that was used to produce the
@@ -68,16 +76,16 @@ def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
 # ------------------------------------------------------------------
 
 
-def _enrich_nodes(nodes: dict, graph: CSRGraph) -> None:
+def _enrich_nodes(nodes: dict[str, NodeDict], graph: CSRGraph) -> None:
     """Fill in missing properties for every node in the knowledge graph."""
     for node_id, node in nodes.items():
         # A client can hand back a node with a property present but null, or
         # with an empty categories list.  TRAPI 2.0 admits neither, and both
         # have to read as "absent" so the stored value fills them rather than
-        # passing the client's value through.
+        # passing the client's value through.  (categories is a required
+        # property, so an empty one is overwritten rather than deleted.)
         drop_null_properties(node)
-        if not node.get("categories", True):
-            del node["categories"]
+        wants_categories = not node.get("categories")
 
         node_idx = graph.get_node_idx(node_id)
         # A node the graph does not know (e.g. a synthetic inferred node) has
@@ -89,7 +97,7 @@ def _enrich_nodes(nodes: dict, graph: CSRGraph) -> None:
             if "name" not in node and "name" in stored:
                 node["name"] = stored["name"]
 
-            if "categories" not in node and "categories" in stored:
+            if wants_categories and stored.get("categories"):
                 node["categories"] = stored["categories"]
 
             # Attributes should always be a list
@@ -101,7 +109,7 @@ def _enrich_nodes(nodes: dict, graph: CSRGraph) -> None:
         ensure_node_category(node)
 
 
-def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
+def _enrich_edges(edges: dict[str, EdgeDict], graph: CSRGraph) -> None:
     """Fill in missing properties for every edge in the knowledge graph.
 
     To resolve edge properties we need the forward-CSR edge index.  We

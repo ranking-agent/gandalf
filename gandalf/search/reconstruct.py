@@ -5,9 +5,11 @@ import logging
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
+
+from translator_tom.model_dicts import NodeDict
 
 from gandalf.config import settings
 from gandalf.profiler import current_profiler
@@ -348,6 +350,7 @@ def reconstruct_paths(
             # every Node, so a missing name yields no "name" key and a node
             # with no stored category falls back to NamedThing.  (Node
             # attributes may legitimately be an empty list.)
+            node_props: NodeDict
             if lightweight and bmt is not None:
                 node_props = {
                     "categories": _get_most_specific_category(
@@ -358,7 +361,7 @@ def reconstruct_paths(
                 if name is not None:
                     node_props["name"] = name
             else:
-                node_props = all_props.copy()
+                node_props = cast("NodeDict", all_props.copy())
                 if node_props.get("name") is None:
                     node_props.pop("name", None)
                 if "attributes" not in node_props:

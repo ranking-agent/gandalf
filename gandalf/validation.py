@@ -6,9 +6,16 @@ query results are consistent with the actual graph data.
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from bmt.toolkit import Toolkit
+from translator_tom.model_dicts import (
+    EdgeBindingDict,
+    EdgeDict,
+    QueryGraphDict,
+    ResponseDict,
+    ResultDict,
+)
 
 from gandalf.biolink import make_toolkit
 from gandalf.graph import CSRGraph
@@ -180,7 +187,7 @@ def validate_edge_exists(
 
 def validate_trapi_response(
     graph: CSRGraph,
-    response: dict,
+    response: ResponseDict,
     check_inverse: bool = True,
 ) -> ValidationResult:
     """
@@ -520,7 +527,7 @@ def find_edge_in_graph(
 
 
 def _result_node_fingerprint(
-    result: dict,
+    result: ResultDict,
 ) -> frozenset[tuple[str, str]]:
     """Create a hashable fingerprint from a result's node bindings."""
     pairs: list[tuple[str, str]] = []
@@ -531,7 +538,7 @@ def _result_node_fingerprint(
 
 
 def _get_qgraph_path_order(
-    query_graph: dict,
+    query_graph: QueryGraphDict,
 ) -> tuple[list[str], list[str]]:
     """Determine a linear ordering of qnode and qedge IDs from the query graph.
 
@@ -580,8 +587,8 @@ def _get_qgraph_path_order(
 
 
 def _format_result_path(
-    result: dict,
-    kg_edges: dict,
+    result: ResultDict,
+    kg_edges: dict[str, EdgeDict],
     qnode_order: list[str],
     qedge_order: list[str],
 ) -> str:
@@ -624,15 +631,16 @@ def _format_result_path(
 
 def _format_edge_bindings(
     qedge_id: str,
-    edge_bindings: dict,
-    kg_edges: dict,
+    edge_bindings: dict[str, EdgeBindingDict],
+    kg_edges: dict[str, EdgeDict],
 ) -> str:
     """Format all edge bindings for a single qedge as a compact label.
 
     Multiple distinct predicate/qualifier combinations are separated by
     ``" | "``.
     """
-    bound_ids = (edge_bindings.get(qedge_id) or {}).get("ids") or []
+    binding = edge_bindings.get(qedge_id)
+    bound_ids = binding.get("ids") if binding else None
     if not bound_ids:
         return "?"
 
@@ -640,7 +648,7 @@ def _format_edge_bindings(
     seen: set[tuple[str, str]] = set()
 
     for edge_id in bound_ids:
-        edge = kg_edges.get(edge_id, {}) if edge_id else {}
+        edge: EdgeDict | dict[str, Any] = kg_edges.get(edge_id) or {}
 
         predicate = edge.get("predicate", "?")
         qualifiers = edge.get("qualifiers") or []

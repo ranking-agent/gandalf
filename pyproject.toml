@@ -7,7 +7,7 @@ name = "gandalf-csr"
 version = "1.0.2"
 description = "Fast path finding in large knowledge graphs"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Max Wang", email = "max@covar.com"}
@@ -16,12 +16,19 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
     "bmt>=1.4.8",
     "lmdb>=1.4.0",
     "msgpack>=1.0.0",
     "numpy>=1.20.0",
+    # The Translator-wide TRAPI object model: request models and the
+    # OpenAPI schema come from here, and its TypedDicts type gandalf's
+    # internals.  Requires Python 3.10, hence the floor above.
+    "translator_tom>=2.1.0",
 ]
 
 [project.optional-dependencies]

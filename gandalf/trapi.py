@@ -52,9 +52,21 @@ one either: each value is kept valid where it is produced.
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import orjson
+from translator_tom.model_dicts import (
+    EdgeDict,
+    QueryDict,
+    QueryParametersDict,
+    KnowledgeGraphDict,
+    LogEntryDict,
+    MessageDict,
+    NodeDict,
+    ResponseDict,
+    RetrievalSourceDict,
+)
+from typing_extensions import NotRequired
 
 from gandalf.biolink import NAMED_THING
 from gandalf.config import settings
@@ -78,7 +90,7 @@ class TimeoutNotSatisfiable(ValueError):
     """
 
 
-def resolve_timeout(parameters: Optional[dict]) -> Optional[float]:
+def resolve_timeout(parameters: Optional[QueryParametersDict]) -> Optional[float]:
     """Return the wall-clock budget in seconds for a query, or None for unlimited.
 
     Reads TRAPI 2.0's ``parameters.timeout``:
@@ -208,6 +220,58 @@ def data_release_versions() -> dict:
     return {str(name): str(version) for name, version in parsed.items()}
 
 
+class GandalfParametersDict(QueryParametersDict):
+    """TRAPI ``parameters`` plus gandalf's own, as a TypedDict.
+
+    The TypedDict counterpart of :class:`gandalf.models.QueryParameters`, for
+    the fast request path where the body stays a plain dict.  TRAPI 2.0 gives
+    the ``parameters`` object ``additionalProperties: true`` so a server can
+    carry its own settings there; typing them means a misspelled key or a
+    wrong value type is a type error rather than a silently ignored setting.
+    """
+
+    subclass: NotRequired[bool]
+    subclass_depth: NotRequired[int]
+    dehydrated: NotRequired[bool]
+    rehydrate: NotRequired[bool]
+    filter_config: NotRequired[dict[str, Any]]
+    annotator_config: NotRequired[dict[str, Any]]
+
+
+def query_parameters(query: QueryDict) -> GandalfParametersDict:
+    """Return a request's ``parameters``, or an empty object when absent.
+
+    Args:
+        query: A ``/query`` or ``/asyncquery`` body.
+
+    Returns:
+        The parameters, typed so gandalf's own settings are checked too.
+
+    Examples:
+        >>> query_parameters({"message": {}})
+        {}
+        >>> query_parameters({"message": {}, "parameters": {"subclass": False}})
+        {'subclass': False}
+    """
+    return cast("GandalfParametersDict", query.get("parameters") or {})
+
+
+class InFlightEdge(EdgeDict):
+    """An Edge mid-assembly, before its internal markers are stripped.
+
+    ``gandalf.search.lookup`` hangs three bookkeeping properties off an edge
+    while building a response -- the knowledge-graph id it should be filed
+    under, and the subject/object in *query* direction rather than stored
+    direction -- then pops them before serialization.  They are not TRAPI, so
+    they cannot live on :class:`~translator_tom.model_dicts.EdgeDict`; this
+    subclass keeps them typed rather than untyped.
+    """
+
+    _edge_id: NotRequired[str]
+    _query_subject: NotRequired[str]
+    _query_object: NotRequired[str]
+
+
 #: Served-``Edge`` properties that TRAPI 2.0 gives a ``minItems`` of 1 while
 #: leaving optional, so an empty value has to be omitted.  ``sources`` is
 #: excluded deliberately: it is required, so an empty one is a data problem
@@ -216,7 +280,7 @@ def data_release_versions() -> dict:
 EMPTY_FORBIDDEN_EDGE_PROPERTIES = ("qualifiers",)
 
 
-def prune_edge(edge: dict) -> dict:
+def prune_edge(edge: EdgeDict) -> EdgeDict:
     """Drop the properties of a served Edge that TRAPI 2.0 forbids empty.
 
     Called once per distinct knowledge-graph Edge rather than per result, and
@@ -239,13 +303,16 @@ def prune_edge(edge: dict) -> dict:
         >>> prune_edge({"attributes": []})
         {'attributes': []}
     """
+    # A TypedDict cannot be subscripted with a non-literal key, so the loop
+    # works through a plain-dict view of the same object.
+    properties = cast("dict[str, Any]", edge)
     for prop in EMPTY_FORBIDDEN_EDGE_PROPERTIES:
-        if prop in edge and not edge[prop]:
-            del edge[prop]
+        if prop in properties and not properties[prop]:
+            del properties[prop]
     return edge
 
 
-def drop_null_properties(obj: dict) -> dict:
+def drop_null_properties(obj: NodeDict | EdgeDict) -> NodeDict | EdgeDict:
     """Drop every null-valued property from a node or edge, in place.
 
     For objects assembled from client input -- the ``rehydrate`` path hands
@@ -269,12 +336,13 @@ def drop_null_properties(obj: dict) -> dict:
         >>> drop_null_properties({"attributes": []})
         {'attributes': []}
     """
-    for key in [k for k, v in obj.items() if v is None]:
-        del obj[key]
+    properties = cast("dict[str, Any]", obj)
+    for key in [k for k, v in properties.items() if v is None]:
+        del properties[key]
     return obj
 
 
-def ensure_node_category(node: dict) -> dict:
+def ensure_node_category(node: NodeDict) -> NodeDict:
     """Give a Node the Biolink root class when nothing more specific is known.
 
     ``Node.categories`` is required with a ``minItems`` of 1, so neither an
@@ -298,7 +366,9 @@ def ensure_node_category(node: dict) -> dict:
     return node
 
 
-def prune_retrieval_sources(sources: list) -> list:
+def prune_retrieval_sources(
+    sources: list[RetrievalSourceDict],
+) -> list[RetrievalSourceDict]:
     """Drop the properties of an Edge's RetrievalSources that 2.0 forbids empty.
 
     ``upstream_resource_ids`` has a ``minItems`` of 1, so a primary knowledge
@@ -326,18 +396,19 @@ def prune_retrieval_sources(sources: list) -> list:
         True
     """
     for source in sources:
+        properties = cast("dict[str, Any]", source)
         for prop in ("upstream_resource_ids", "source_record_urls"):
-            if prop in source and not source[prop]:
-                del source[prop]
+            if prop in properties and not properties[prop]:
+                del properties[prop]
     return sources
 
 
 def finalize_response(
-    response: dict,
-    request: Optional[dict] = None,
+    response: ResponseDict,
+    request: Optional[QueryDict] = None,
     status: str = "Success",
     description: Optional[str] = None,
-) -> dict:
+) -> ResponseDict:
     """Stamp the TRAPI 2.0 Response envelope onto a response dict, in place.
 
     Adds the version metadata every TRAPI Response should carry and echoes the
@@ -375,7 +446,7 @@ def finalize_response(
 
     # TRAPI 2.0: "The server MUST repeat the parameters it is given in its
     # Response."
-    parameters = (request or {}).get("parameters")
+    parameters = request.get("parameters") if request else None
     if parameters:
         response["parameters"] = parameters
 
@@ -391,7 +462,9 @@ def finalize_response(
     return response
 
 
-def timeout_response(query: dict, deadline: Deadline, logs: list) -> dict:
+def timeout_response(
+    query: QueryDict, deadline: Deadline, logs: list[LogEntryDict]
+) -> ResponseDict:
     """Build the Response for a query that ran out of time.
 
     TRAPI 2.0 lets a service that overruns ``parameters.timeout`` "consider the
@@ -411,12 +484,17 @@ def timeout_response(query: dict, deadline: Deadline, logs: list) -> dict:
         f"Query exceeded the requested timeout of {deadline.budget}s "
         f"after {deadline.elapsed:.1f}s."
     )
-    response: dict[str, Any] = {
-        "message": {
-            "query_graph": query.get("message", {}).get("query_graph"),
-            "knowledge_graph": {"nodes": {}, "edges": {}},
-            "results": [],
-        },
-        "logs": logs,
+    message: MessageDict = {
+        "knowledge_graph": KnowledgeGraphDict(nodes={}, edges={}),
+        "results": [],
     }
+    # Echo the query graph back when there is one.  Message.query_graph is a
+    # typed property, so a request without one must leave it absent rather
+    # than set it to null.
+    incoming = query.get("message")
+    query_graph = incoming.get("query_graph") if incoming else None
+    if query_graph is not None:
+        message["query_graph"] = query_graph
+
+    response: ResponseDict = {"message": message, "logs": logs}
     return finalize_response(response, query, status="Timeout", description=description)
