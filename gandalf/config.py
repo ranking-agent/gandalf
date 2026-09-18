@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # used by the tier 1 driver (BioPack/retriever) so qualifier/predicate
     # classification is identical across tiers. Empty uses BMT's built-in
     # default schema.
-    biolink_version: str = "4.3.2"
+    biolink_version: str = "4.4.2"
 
     # Heartbeat (Automat cluster registration)
     automat_host: str = ""  # e.g. "http://automat:8080"; empty = disabled
@@ -80,7 +80,7 @@ class Settings(BaseSettings):
 
     # Path reconstruction tunables (search/reconstruct.py)
     debug_paths_tsv: str = ""
-    large_result_threshold: int = 10000000
+    large_result_threshold: int = 10_000_000
     max_path_limit: int = 0
 
     # Default service URL for the literature_cooccurrence annotator plugin.
