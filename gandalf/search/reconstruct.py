@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from gandalf.biolink import NAMED_THING
 from gandalf.config import settings
 from gandalf.profiler import current_profiler
 from gandalf.search.path_arrays import PathArrays
@@ -343,20 +344,28 @@ def reconstruct_paths(
             # pop (not get) so each property dict is freed as it is consumed,
             # avoiding a transient 2x peak alongside node_cache.
             all_props = props_batch.pop(int(node_idx), {})
+            # TRAPI 2.0 admits no nulls and requires at least one category on
+            # every Node, so a missing name yields no "name" key and a node
+            # with no stored category falls back to NamedThing.  (Node
+            # attributes may legitimately be an empty list.)
             if lightweight and bmt is not None:
-                node_cache[node_idx] = {
-                    "name": all_props.get("name"),
+                node_props = {
                     "categories": _get_most_specific_category(
-                        all_props.get("categories", []), bmt
+                        all_props.get("categories") or [NAMED_THING], bmt
                     ),
                 }
+                name = all_props.get("name")
+                if name is not None:
+                    node_props["name"] = name
             else:
                 node_props = all_props.copy()
-                if "categories" not in node_props:
-                    node_props["categories"] = []
+                if not node_props.get("categories"):
+                    node_props["categories"] = [NAMED_THING]
+                if node_props.get("name") is None:
+                    node_props.pop("name", None)
                 if "attributes" not in node_props:
                     node_props["attributes"] = []
-                node_cache[node_idx] = node_props
+            node_cache[node_idx] = node_props
             node_id_cache[node_idx] = id_batch.get(int(node_idx))
         prof.add_metric("unique_nodes", int(len(unique_node_indices)))
 

@@ -7,6 +7,35 @@ triggering module-level graph loading.
 
 from fastapi import HTTPException
 
+#: Query-graph properties that TRAPI 2.0 gives a ``minItems`` of 1, so an
+#: empty value has to be dropped rather than echoed back.  Everything else is
+#: only stripped when it is ``None``.
+_EMPTY_FORBIDDEN_QUERY_GRAPH_PROPERTIES = frozenset(
+    {
+        "ids",  # QNode.ids
+        "categories",  # QNode.categories
+        "member_ids",  # QNode.member_ids
+        "constraints",  # QNode.constraints / QPath.constraints
+        "predicates",  # QEdge.predicates / QPath.predicates
+    }
+)
+
+#: The same, one level down inside a QEdge's ``constraints`` object.
+_EMPTY_FORBIDDEN_CONSTRAINTS_PROPERTIES = frozenset({"attributes", "qualifiers"})
+
+
+def _strip_empty(element: dict, empty_forbidden: frozenset) -> None:
+    """Drop ``None`` values from *element*, and empty ones where 2.0 forbids them.
+
+    Args:
+        element: A query-graph element (mutated in place).
+        empty_forbidden: Property names whose empty value is also invalid.
+    """
+    for key in [
+        k for k, v in element.items() if v is None or (k in empty_forbidden and not v)
+    ]:
+        del element[key]
+
 
 def normalize_query_graph(query_graph: dict) -> None:
     """Drop optional fields whose value is ``None`` from a query graph in place.
@@ -29,23 +58,32 @@ def normalize_query_graph(query_graph: dict) -> None:
     edge. This mirrors ``model_dump(exclude_none=True)`` but only walks the
     (small) query graph rather than the full request body, so it does not
     reintroduce the per-request cost the fast path was added to avoid.
+
+    Empty lists are stripped for the same reason plus a second one: the query
+    graph is echoed back in the response, and TRAPI 2.0 gives every one of
+    these properties a ``minItems`` of 1, so ``"categories": []`` on the way
+    in would be an invalid ``message.query_graph`` on the way out.
     """
-    for container in (query_graph.get("nodes"), query_graph.get("edges")):
+    containers = (
+        query_graph.get("nodes"),
+        query_graph.get("edges"),
+        query_graph.get("paths"),
+    )
+    for container in containers:
         if not isinstance(container, dict):
             continue
         for element in container.values():
             if not isinstance(element, dict):
                 continue
-            for key in [k for k, v in element.items() if v is None]:
-                del element[key]
+            _strip_empty(element, _EMPTY_FORBIDDEN_QUERY_GRAPH_PROPERTIES)
             # A QEdge's TRAPI 2.0 constraints object needs the same treatment:
             # ``{"constraints": {"qualifiers": null}}`` must read as "no
             # qualifier constraint", not as a null the parser has to defend
-            # against.
+            # against, and an empty ``constraints`` object is invalid too
+            # (minProperties 1).
             constraints = element.get("constraints")
             if isinstance(constraints, dict):
-                for key in [k for k, v in constraints.items() if v is None]:
-                    del constraints[key]
+                _strip_empty(constraints, _EMPTY_FORBIDDEN_CONSTRAINTS_PROPERTIES)
                 if not constraints:
                     del element["constraints"]
 

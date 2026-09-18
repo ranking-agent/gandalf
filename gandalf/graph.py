@@ -82,6 +82,33 @@ def _new_kl_at_index(pool: list, kl_at: tuple) -> int:
     return len(pool) - 1
 
 
+def _meta_attributes(attr_set) -> list:
+    """Build the MetaAttribute list for one meta-KG node category or edge triple.
+
+    ``attribute_source`` and ``constraint_name`` are both ``type: string`` in
+    TRAPI 2.0, which since 3.1 admits no null, so each is included only when
+    the scan actually found a value.
+
+    Args:
+        attr_set: Set of ``(attribute_type_id, attribute_source,
+            original_attribute_name)`` triples collected during the scan.
+
+    Returns:
+        MetaAttribute dicts, ordered for a stable meta-KG.
+    """
+    attributes = []
+    for type_id, source, orig_name in sorted(attr_set):
+        attribute = {
+            "attribute_type_id": type_id,
+            "original_attribute_names": [orig_name],
+            "constraint_use": False,
+        }
+        if source is not None:
+            attribute["attribute_source"] = source
+        attributes.append(attribute)
+    return attributes
+
+
 class EdgePropertyStore:
     """Memory-efficient storage for qualifier and source dedup via interning.
 
@@ -1092,17 +1119,7 @@ class CSRGraph:
 
         meta_nodes = {}
         for cat, prefixes in category_prefixes.items():
-            attrs = []
-            for type_id, source, orig_name in sorted(cat_attr_set.get(cat, set())):
-                attrs.append(
-                    {
-                        "attribute_type_id": type_id,
-                        "attribute_source": source,
-                        "original_attribute_names": [orig_name],
-                        "constraint_use": False,
-                        "constraint_name": None,
-                    }
-                )
+            attrs = _meta_attributes(cat_attr_set.get(cat, set()))
             meta_nodes[cat] = {
                 "id_prefixes": sorted(prefixes),
                 "attributes": attrs,
@@ -1170,19 +1187,7 @@ class CSRGraph:
         meta_edges = []
         for subj_cat, pred, obj_cat in sorted(triple_counts):
             triple_key = (subj_cat, pred, obj_cat)
-            attrs = []
-            for type_id, source, orig_name in sorted(
-                triple_attr_set.get(triple_key, set())
-            ):
-                attrs.append(
-                    {
-                        "attribute_type_id": type_id,
-                        "attribute_source": source,
-                        "original_attribute_names": [orig_name],
-                        "constraint_use": False,
-                        "constraint_name": None,
-                    }
-                )
+            attrs = _meta_attributes(triple_attr_set.get(triple_key, set()))
             # Add qualifier type IDs as attributes in the qualifiers list
             qualifiers = []
             for qtype in sorted(triple_qual_map.get(triple_key, {})):
@@ -1193,15 +1198,17 @@ class CSRGraph:
                     }
                 )
 
-            meta_edges.append(
-                {
-                    "subject": subj_cat,
-                    "predicate": pred,
-                    "object": obj_cat,
-                    "attributes": attrs,
-                    "qualifiers": qualifiers,
-                }
-            )
+            meta_edge = {
+                "subject": subj_cat,
+                "predicate": pred,
+                "object": obj_cat,
+                "attributes": attrs,
+            }
+            # MetaEdge.qualifiers has a minItems of 1, so a triple with no
+            # qualifiers carries no qualifiers property.
+            if qualifiers:
+                meta_edge["qualifiers"] = qualifiers
+            meta_edges.append(meta_edge)
 
         self.meta_kg = {"nodes": meta_nodes, "edges": meta_edges}
 

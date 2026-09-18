@@ -168,24 +168,21 @@ class TestTRAPIQuery:
                         "e0": {
                             "subject": "n0",
                             "object": "n1",
-                            "qualifier_constraints": [
-                                {
-                                    "qualifier_set": [
-                                        {
-                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
-                                            "qualifier_value": "activity",
-                                        }
-                                    ]
-                                }
-                            ],
+                            "constraints": {
+                                "qualifiers": [
+                                    {"biolink:object_aspect_qualifier": "activity"}
+                                ]
+                            },
                         }
                     },
                 }
             }
         }
         q = TRAPIQuery(**data)
-        qc = q.message.query_graph.edges["e0"].qualifier_constraints
-        assert len(qc) == 1
+        constraints = q.message.query_graph.edges["e0"].constraints
+        assert constraints.qualifiers == [
+            {"biolink:object_aspect_qualifier": "activity"}
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +202,9 @@ PATHFINDER_QUERY = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:related_to"],
-                    "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
+                    "constraints": [
+                        {"required_intermediate_categories": ["biolink:Gene"]}
+                    ],
                 }
             },
         }
@@ -224,7 +223,7 @@ class TestPathfinderQuery:
         assert path.subject == "n0"
         assert path.object == "n1"
         assert path.predicates == ["biolink:related_to"]
-        assert path.constraints[0].intermediate_categories == ["biolink:Gene"]
+        assert path.constraints[0].required_intermediate_categories == ["biolink:Gene"]
 
     def test_path_missing_subject_raises(self):
         with pytest.raises(ValidationError, match="subject"):
@@ -275,19 +274,21 @@ class TestPathfinderQuery:
         qg = raw["message"]["query_graph"]
         assert "edges" not in qg
         assert qg["paths"]["p0"]["subject"] == "n0"
-        assert qg["paths"]["p0"]["constraints"][0]["intermediate_categories"] == [
-            "biolink:Gene"
-        ]
+        assert qg["paths"]["p0"]["constraints"][0][
+            "required_intermediate_categories"
+        ] == ["biolink:Gene"]
 
     def test_qpath_direct_construction(self):
         p = QPath(
             subject="n0",
             object="n1",
             predicates=["biolink:treats"],
-            constraints=[QPathConstraint(intermediate_categories=["biolink:Gene"])],
+            constraints=[
+                QPathConstraint(required_intermediate_categories=["biolink:Gene"])
+            ],
         )
         assert p.subject == "n0"
-        assert p.constraints[0].intermediate_categories == ["biolink:Gene"]
+        assert p.constraints[0].required_intermediate_categories == ["biolink:Gene"]
 
     def test_query_graph_requires_edges_or_paths(self):
         with pytest.raises(ValidationError, match="edges"):

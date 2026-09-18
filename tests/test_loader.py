@@ -230,14 +230,24 @@ class TestEdgeProperties:
         assert sources[1]["resource_id"] == "infores:drugcentral"
         assert sources[1]["resource_role"] == "primary_knowledge_source"
 
-    def test_edge_sources_all_have_upstream_resource_ids(self, graph):
-        """Every source entry should have an upstream_resource_ids list."""
+    def test_edge_source_upstream_resource_ids(self, graph):
+        """upstream_resource_ids is present iff the source has something upstream.
+
+        TRAPI 2.0 gives the property a minItems of 1, so a primary knowledge
+        source -- which has nothing upstream of it -- carries no such property
+        rather than an empty list.
+        """
         src_idx = graph.node_id_to_idx["CHEBI:6801"]
         dst_idx = graph.node_id_to_idx["MONDO:0005148"]
         sources = graph.get_edge_property(src_idx, dst_idx, "biolink:treats", "sources")
-        for source in sources:
-            assert "upstream_resource_ids" in source
-            assert isinstance(source["upstream_resource_ids"], list)
+        assert sources
+        by_role = {s["resource_role"]: s for s in sources}
+
+        primary = by_role["primary_knowledge_source"]
+        assert "upstream_resource_ids" not in primary
+
+        aggregator = by_role["aggregator_knowledge_source"]
+        assert aggregator["upstream_resource_ids"] == [primary["resource_id"]]
 
     def test_edge_publications_in_attributes(self, graph):
         """Publications should be stored as a TRAPI attribute on the edge."""

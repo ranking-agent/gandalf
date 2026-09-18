@@ -6,6 +6,8 @@ envelope, the ``parameters`` object (including the ``timeout`` budget and its
 request fields 2.0 renamed.
 """
 
+import logging
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -504,3 +506,256 @@ class TestStrictValidationMode:
             "status": "Success",
             "schema_version": "2.0.0",
         }
+
+
+# ---------------------------------------------------------------------------
+# Nulls and empty containers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sparse_graph(tmp_path):
+    """A graph whose A:1 node has neither a name nor a category."""
+    from gandalf.loader import build_graph_from_jsonl
+
+    nodes = tmp_path / "nodes.jsonl"
+    edges = tmp_path / "edges.jsonl"
+    nodes.write_text(
+        '{"id": "A:1"}\n' '{"id": "B:1", "name": "Bee", "category": ["biolink:Gene"]}\n'
+    )
+    edges.write_text(
+        '{"id": "e1", "subject": "A:1", "object": "B:1", '
+        '"predicate": "biolink:affects", '
+        '"primary_knowledge_source": "infores:test"}\n'
+    )
+    return build_graph_from_jsonl(str(edges), str(nodes))
+
+
+def sparse_query() -> dict:
+    return {
+        "message": {
+            "query_graph": {
+                "nodes": {"n0": {"ids": ["A:1"]}, "n1": {}},
+                "edges": {"e0": {"subject": "n0", "object": "n1"}},
+            }
+        }
+    }
+
+
+def _null_paths(value, path=""):
+    """Yield the path of every null found anywhere inside *value*."""
+    if value is None:
+        yield path or "<root>"
+    elif isinstance(value, dict):
+        for key, sub in value.items():
+            yield from _null_paths(sub, f"{path}/{key}")
+    elif isinstance(value, list):
+        for i, sub in enumerate(value):
+            yield from _null_paths(sub, f"{path}/{i}")
+
+
+class TestNoNullsSerialized:
+    """TRAPI 2.0 is OpenAPI 3.1 and dropped every ``nullable``.
+
+    A typed property therefore does not admit null: an absent value has to be
+    an absent property.
+    """
+
+    @pytest.mark.parametrize("dehydrated", [False, True])
+    def test_nameless_node_carries_no_name_property(
+        self, sparse_graph, bmt, dehydrated
+    ):
+        response = lookup(sparse_graph, sparse_query(), bmt=bmt, dehydrated=dehydrated)
+        node = response["message"]["knowledge_graph"]["nodes"]["A:1"]
+        assert "name" not in node
+        # ... while a node that has one still reports it
+        assert response["message"]["knowledge_graph"]["nodes"]["B:1"]["name"] == "Bee"
+
+    def test_log_entry_outside_the_trapi_enum_carries_no_level(
+        self, graph, bmt  # noqa: F811
+    ):
+        """LogLevel has no CRITICAL member, so such a record reports no level."""
+        from gandalf.logging_config import TRAPILogCollector
+
+        collector = TRAPILogCollector()
+        logger = logging.getLogger("gandalf.test.levels")
+        logger.addHandler(collector)
+        logger.setLevel(logging.DEBUG)
+        try:
+            logger.critical("a critical message")
+            logger.warning("a warning message")
+        finally:
+            logger.removeHandler(collector)
+
+        entries = collector.get_logs()
+        assert "level" not in entries[0]
+        assert entries[1]["level"] == "WARNING"
+
+    @pytest.mark.parametrize("dehydrated", [False, True])
+    def test_whole_response_serializes_no_nulls(
+        self, graph, bmt, dehydrated  # noqa: F811
+    ):
+        """Nothing anywhere in a response may be null.
+
+        The one place 2.0 would permit it is ``Attribute.value``, which
+        declares no ``type`` -- no fixture attribute has a null value, so a
+        blanket assertion is the right guard here.
+        """
+        response = lookup(
+            graph, affects_query(), bmt=bmt, dehydrated=dehydrated, log_level="DEBUG"
+        )
+        assert list(_null_paths(response)) == []
+
+    def test_meta_attribute_omits_what_it_does_not_know(self):
+        """MetaAttribute.attribute_source / constraint_name are typed strings.
+
+        The meta-KG scan finds a source for some attributes and not others,
+        and gandalf never computes a constraint_name, so neither may be
+        serialized as null.
+        """
+        from gandalf.graph import _meta_attributes
+
+        known, unknown = _meta_attributes(
+            {
+                ("biolink:p_value", "infores:ctd", "p-value"),
+                ("biolink:score", None, "score"),
+            }
+        )
+        assert known["attribute_source"] == "infores:ctd"
+        assert "attribute_source" not in unknown
+        assert "constraint_name" not in known
+        assert "constraint_name" not in unknown
+
+    def test_meta_knowledge_graph_serializes_no_nulls(self, graph, bmt):  # noqa: F811
+        graph.build_metadata()
+        nulls = list(_null_paths(graph.meta_kg))
+        assert nulls == []
+
+
+class TestEmptyContainersOnlyWhereAllowed:
+    """2.0 forbids an empty value on some properties and requires it on others."""
+
+    def test_unqualified_edge_carries_no_qualifiers_property(
+        self, graph, bmt  # noqa: F811
+    ):
+        """Edge.qualifiers has a minItems of 1."""
+        treats = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": [METFORMIN]},
+                        "n1": {"ids": ["MONDO:0005148"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:treats"],
+                        }
+                    },
+                }
+            }
+        }
+        edges = lookup(graph, treats, bmt=bmt)["message"]["knowledge_graph"]["edges"]
+        assert edges
+        assert all("qualifiers" not in edge for edge in edges.values())
+
+    def test_qualified_edge_still_reports_its_qualifiers(
+        self, graph, bmt
+    ):  # noqa: F811
+        edges = lookup(graph, affects_query(), bmt=bmt)["message"]["knowledge_graph"][
+            "edges"
+        ]
+        assert any(edge.get("qualifiers") for edge in edges.values())
+
+    def test_primary_source_carries_no_upstream_resource_ids(
+        self, graph, bmt  # noqa: F811
+    ):
+        """RetrievalSource.upstream_resource_ids has a minItems of 1."""
+        edges = lookup(graph, affects_query(), bmt=bmt)["message"]["knowledge_graph"][
+            "edges"
+        ]
+        assert edges
+        for edge in edges.values():
+            for source in edge["sources"]:
+                if source["resource_role"] == "primary_knowledge_source":
+                    assert "upstream_resource_ids" not in source
+                else:
+                    assert source["upstream_resource_ids"]
+
+    def test_no_auxiliary_graphs_property_when_nothing_was_inferred(
+        self, graph, bmt  # noqa: F811
+    ):
+        """Message.auxiliary_graphs has a minProperties of 1."""
+        assert (
+            "auxiliary_graphs" not in lookup(graph, affects_query(), bmt=bmt)["message"]
+        )
+
+    def test_auxiliary_graphs_present_when_subclass_inference_fires(
+        self, graph, bmt  # noqa: F811
+    ):
+        response = lookup(
+            graph,
+            {
+                "message": {
+                    "query_graph": {
+                        "nodes": {
+                            "n0": {"ids": [METFORMIN]},
+                            "n1": {"ids": ["MONDO:0005015"]},
+                        },
+                        "edges": {
+                            "e0": {
+                                "subject": "n0",
+                                "object": "n1",
+                                "predicates": ["biolink:treats"],
+                            }
+                        },
+                    }
+                }
+            },
+            bmt=bmt,
+            subclass=True,
+            subclass_depth=1,
+        )
+        assert response["message"]["auxiliary_graphs"]
+
+    def test_nameless_node_still_reports_a_category(self, sparse_graph, bmt):
+        """Node.categories is required with a minItems of 1, so it cannot be [].
+
+        Omitting it is not an option either, so a record with no category is
+        served as the Biolink root class.
+        """
+        response = lookup(sparse_graph, sparse_query(), bmt=bmt)
+        node = response["message"]["knowledge_graph"]["nodes"]["A:1"]
+        assert node["categories"] == ["biolink:NamedThing"]
+
+    def test_empty_results_stay_an_empty_list(self, graph, bmt):  # noqa: F811
+        """2.0 *requires* the empty form here, so this must not be pruned.
+
+        "If Results are expected ... and no Results are available, this
+        property SHOULD be an array with 0 Results in it."
+        """
+        response = lookup(
+            graph,
+            {
+                "message": {
+                    "query_graph": {
+                        "nodes": {
+                            "n0": {"ids": ["NOSUCH:0000"]},
+                            "n1": {"categories": ["biolink:Gene"]},
+                        },
+                        "edges": {"e0": {"subject": "n0", "object": "n1"}},
+                    }
+                }
+            },
+            bmt=bmt,
+        )
+        assert response["message"]["results"] == []
+        # KnowledgeGraph.nodes is required and has no minimum, so it stays too.
+        assert response["message"]["knowledge_graph"] == {"nodes": {}, "edges": {}}
+
+    def test_edge_attributes_may_be_empty(self, graph, bmt):  # noqa: F811
+        """2.0 sets no minimum on Edge.attributes, so [] is a valid value."""
+        from gandalf.trapi import prune_edge
+
+        assert prune_edge({"attributes": []}) == {"attributes": []}

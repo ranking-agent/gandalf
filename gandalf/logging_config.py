@@ -66,14 +66,17 @@ class TRAPILogCollector(logging.Handler):
         self._entries: list[dict] = []
 
     def emit(self, record: logging.LogRecord) -> None:
+        entry = {
+            "timestamp": log_timestamp(),
+            "message": record.getMessage(),
+        }
+        # LogEntry.level is a TRAPI LogLevel enum, and TRAPI 2.0 admits no
+        # nulls, so a record logged at a level outside that enum (CRITICAL,
+        # or a custom level) carries no level rather than a null one.
         level_name = record.levelname
-        self._entries.append(
-            {
-                "timestamp": log_timestamp(),
-                "level": level_name if level_name in _TRAPI_LEVELS else None,
-                "message": record.getMessage(),
-            }
-        )
+        if level_name in _TRAPI_LEVELS:
+            entry["level"] = level_name
+        self._entries.append(entry)
 
     def get_logs(self) -> list[dict]:
         """Return collected log entries in chronological order."""

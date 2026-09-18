@@ -32,6 +32,7 @@ from typing import List, Tuple
 import msgpack
 import numpy as np
 
+from gandalf.biolink import NAMED_THING
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import (
     LMDBPropertyStore,
@@ -40,6 +41,7 @@ from gandalf.lmdb_store import (
     _put_with_resize,
 )
 from gandalf.sources import GraphSource, KGXJsonlSource
+from gandalf.trapi import prune_retrieval_sources
 
 import logging
 import lmdb
@@ -91,11 +93,16 @@ def _build_graph_from_source(source: GraphSource) -> CSRGraph:
     for node_data in source.iter_nodes():
         idx = node_id_to_idx.get(node_data["id"])
         if idx is not None:
-            node_properties[idx] = {
-                "name": node_data.get("name", None),
-                "categories": node_data.get("categories", []),
+            # No "name" key for a nameless node: TRAPI 2.0 admits no nulls, so
+            # an absent name must stay absent all the way to the response.
+            props = {
+                "categories": node_data.get("categories") or [NAMED_THING],
                 "attributes": node_data.get("attributes", []),
             }
+            name = node_data.get("name")
+            if name is not None:
+                props["name"] = name
+            node_properties[idx] = props
     if node_properties:
         logger.debug("  Loaded properties for %s nodes", f"{len(node_properties):,}")
 
@@ -148,7 +155,7 @@ def _build_graph_from_source(source: GraphSource) -> CSRGraph:
             prop_builder.add(
                 i,
                 {
-                    "sources": edge["sources"],
+                    "sources": prune_retrieval_sources(edge["sources"]),
                     "qualifiers": edge["qualifiers"],
                     "knowledge_level": edge.get("knowledge_level"),
                     "agent_type": edge.get("agent_type"),

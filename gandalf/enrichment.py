@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from gandalf.graph import NOT_PROVIDED, CSRGraph
 from gandalf.profiler import current_profiler
+from gandalf.trapi import prune_edge
 
 
 def enrich_knowledge_graph(message: dict, graph: CSRGraph) -> dict:
@@ -129,10 +130,12 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
             # requires knowledge_level and agent_type on every Edge, so an
             # unresolvable edge still gets the Biolink "not_provided" value.
             edge.setdefault("sources", [])
-            edge.setdefault("qualifiers", [])
             edge.setdefault("attributes", [])
             edge.setdefault("knowledge_level", NOT_PROVIDED)
             edge.setdefault("agent_type", NOT_PROVIDED)
+            # No qualifiers default: the property is optional in TRAPI 2.0 and
+            # an empty list is not a valid value for it.
+            prune_edge(edge)
             continue
 
         # Hot-path properties (in-memory dedup store)
@@ -152,6 +155,8 @@ def _enrich_edges(edges: dict, graph: CSRGraph) -> None:
 
         if "attributes" not in edge:
             edge["attributes"] = detail.get("attributes", [])
+
+        prune_edge(edge)
 
 
 def _find_fwd_edge_idx(

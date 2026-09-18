@@ -8,8 +8,46 @@ repeat back in its Response.  ``QueryParameters`` below is that object's
 knobs alongside gandalf's own (``subclass``, ``dehydrated``, ...).
 
 This module owns the pieces of the protocol that are not about graph search:
-reading those parameters, enforcing a client's time budget, and stamping the
-Response envelope.
+reading those parameters, enforcing a client's time budget, stamping the
+Response envelope, and the serialization rules below.
+
+Nulls and empty containers
+--------------------------
+TRAPI 2.0 is an ``openapi: 3.1.2`` document and dropped every ``nullable:
+true`` that 1.x carried.  Under OpenAPI 3.1 / JSON Schema 2020-12 a property
+declared ``type: string`` does not admit null (that would need
+``type: ["string", "null"]``, which the spec never uses), so **an absent value
+must be an absent property, never null**.  The only exceptions are
+``Attribute.value`` and ``AttributeConstraint.value``, which declare no
+``type`` at all ("May be any data type"), and anything under an
+``additionalProperties: true``.
+
+Empty containers are *not* forbidden across the board -- the rule is
+per-property, and there are three cases:
+
+1. ``minItems: 1`` / ``minProperties: 1`` on an **optional** property: an
+   empty value is invalid, so the property is omitted instead.  These are the
+   ones worth naming in code, because they are the ones a server can get wrong
+   quietly: ``Message.auxiliary_graphs``, ``Edge.qualifiers``,
+   ``RetrievalSource.upstream_resource_ids``, ``Response.logs``,
+   ``Response.data_release_versions``, ``Result.analyses``,
+   ``Analysis.edge_bindings``, ``Analysis.support_graphs``, ``MetaEdge``'s
+   list properties, and the QNode / QEdge / QPath constraint lists that come
+   back in the echoed ``query_graph``.
+2. ``minItems: 1`` on a **required** property (``Node.categories``,
+   ``Edge.sources``, ``NodeBinding.ids``, ``EdgeBinding.ids``,
+   ``AuxiliaryGraph.edges``, ``Result.node_bindings``): omitting it does not
+   help, so an empty value is a data problem to fix at its source.
+3. No minimum at all, where an empty container is perfectly valid:
+   ``KnowledgeGraph.nodes`` / ``.edges`` (and ``nodes`` is required, so it must
+   stay), ``Node.attributes``, ``Edge.attributes``, ``Analysis.attributes``.
+   ``Message.results`` belongs here and goes further -- 2.0 says that when
+   results are expected and none were found the property "SHOULD be an array
+   with 0 Results in it", so emptying it out would be the violation.
+
+Because of case 3 there is no blanket "strip falsy values" pass here, and
+because a response can carry millions of results there is no recursive walk of
+one either: each value is kept valid where it is produced.
 """
 
 import logging
@@ -169,6 +207,77 @@ def data_release_versions() -> dict:
     return {str(name): str(version) for name, version in parsed.items()}
 
 
+#: Served-``Edge`` properties that TRAPI 2.0 gives a ``minItems`` of 1 while
+#: leaving optional, so an empty value has to be omitted.  ``sources`` is
+#: excluded deliberately: it is required, so an empty one is a data problem
+#: (see the module docstring, case 2).  ``attributes`` is excluded because 2.0
+#: sets no minimum on it.
+EMPTY_FORBIDDEN_EDGE_PROPERTIES = ("qualifiers",)
+
+
+def prune_edge(edge: dict) -> dict:
+    """Drop the properties of a served Edge that TRAPI 2.0 forbids empty.
+
+    Called once per distinct knowledge-graph Edge rather than per result, and
+    only for the handful of properties in
+    :data:`EMPTY_FORBIDDEN_EDGE_PROPERTIES`, so it costs nothing measurable on
+    the hot path.
+
+    Args:
+        edge: A TRAPI Edge dict (mutated in place).
+
+    Returns:
+        The same dict.
+
+    Examples:
+        >>> prune_edge({"predicate": "biolink:treats", "qualifiers": []})
+        {'predicate': 'biolink:treats'}
+        >>> prune_edge({"qualifiers": [{"qualifier_type_id": "biolink:x",
+        ...                             "qualifier_value": "y"}]})
+        {'qualifiers': [{'qualifier_type_id': 'biolink:x', 'qualifier_value': 'y'}]}
+        >>> prune_edge({"attributes": []})
+        {'attributes': []}
+    """
+    for prop in EMPTY_FORBIDDEN_EDGE_PROPERTIES:
+        if prop in edge and not edge[prop]:
+            del edge[prop]
+    return edge
+
+
+def prune_retrieval_sources(sources: list) -> list:
+    """Drop the properties of an Edge's RetrievalSources that 2.0 forbids empty.
+
+    ``upstream_resource_ids`` has a ``minItems`` of 1, so a primary knowledge
+    source -- which by definition has nothing upstream of it -- carries no
+    such property rather than an empty list.  Applied at build time, before
+    the source lists are interned, so serving them costs nothing.
+
+    Args:
+        sources: RetrievalSource dicts (mutated in place).
+
+    Returns:
+        The same list.
+
+    Examples:
+        >>> prune_retrieval_sources([
+        ...     {"resource_id": "infores:a", "resource_role": "primary_knowledge_source",
+        ...      "upstream_resource_ids": []},
+        ...     {"resource_id": "infores:b", "resource_role": "aggregator_knowledge_source",
+        ...      "upstream_resource_ids": ["infores:a"]},
+        ... ]) == [
+        ...     {"resource_id": "infores:a", "resource_role": "primary_knowledge_source"},
+        ...     {"resource_id": "infores:b", "resource_role": "aggregator_knowledge_source",
+        ...      "upstream_resource_ids": ["infores:a"]},
+        ... ]
+        True
+    """
+    for source in sources:
+        for prop in ("upstream_resource_ids", "source_record_urls"):
+            if prop in source and not source[prop]:
+                del source[prop]
+    return sources
+
+
 def finalize_response(
     response: dict,
     request: Optional[dict] = None,
@@ -218,6 +327,12 @@ def finalize_response(
 
     if not response.get("logs"):
         response.pop("logs", None)
+
+    # Message.auxiliary_graphs has a minProperties of 1, so a response that
+    # inferred nothing carries no auxiliary_graphs rather than an empty map.
+    message = response.get("message")
+    if isinstance(message, dict) and not message.get("auxiliary_graphs", True):
+        del message["auxiliary_graphs"]
 
     return response
 

@@ -400,8 +400,12 @@ class TestSubclassHandling:
         assert len(results_no) >= 1
         assert len(results_yes) >= 1
 
-    def test_subclass_response_has_auxiliary_graphs_key(self, graph, bmt):
-        """Even without subclass, response should have auxiliary_graphs key."""
+    def test_response_without_inference_has_no_auxiliary_graphs_key(self, graph, bmt):
+        """Message.auxiliary_graphs has a minProperties of 1.
+
+        A query that infers nothing has no auxiliary graphs, so the property
+        must be absent rather than an empty map.
+        """
         query = {
             "message": {
                 "query_graph": {
@@ -421,8 +425,7 @@ class TestSubclassHandling:
         }
 
         response = lookup(graph, query, bmt=bmt)
-        assert "auxiliary_graphs" in response["message"]
-        assert isinstance(response["message"]["auxiliary_graphs"], dict)
+        assert "auxiliary_graphs" not in response["message"]
 
 
 class TestSubclassMultipleChildrenDistinctDerivations:

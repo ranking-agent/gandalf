@@ -119,6 +119,35 @@ The server implements **TRAPI 2.0** (`x-trapi.version` in
 - `Response.logs` has `minItems: 1`, so an empty log list is omitted rather
   than sent as `[]`.
 
+### Nulls and empty containers
+
+2.0 is an `openapi: 3.1.2` document and dropped every `nullable: true`, so a
+typed property does not admit null: **an absent value must be an absent
+property**. The only exceptions are `Attribute.value` /
+`AttributeConstraint.value` (no declared `type`) and anything under an
+`additionalProperties: true`.
+
+Empty containers are *per-property*, not a blanket rule, and there are three
+cases -- see the `gandalf.trapi` module docstring, which lists them with the
+affected properties:
+
+1. `minItems`/`minProperties` of 1 on an **optional** property -> omit it when
+   empty (`Message.auxiliary_graphs`, `Edge.qualifiers`,
+   `RetrievalSource.upstream_resource_ids`, `Response.logs`, ...).
+2. The same on a **required** property -> omitting does not help, so an empty
+   value is a data problem to fix at its source. `Node.categories` is the one
+   that bites: a KGX record with no category is normalized to
+   `biolink:NamedThing` (`gandalf.biolink.NAMED_THING`).
+3. No minimum at all -> empty is valid and must be left alone.
+   `Message.results` goes further: 2.0 says an expected-but-empty result set
+   SHOULD be `[]`, so emptying it out would be the violation.
+
+Because of case 3 there is no blanket "strip falsy values" pass, and because a
+response can carry millions of results there is no recursive walk of one
+either: each value is kept valid where it is produced -- in `normalize.py` and
+the loader at build time, and in `reconstruct.py` / `trapi.prune_edge` /
+`trapi.finalize_response` per distinct node, edge and response.
+
 The 1.x spellings of renamed request fields are rejected with a 400 rather
 than ignored (see `gandalf/request_validation.py`): silently dropping a filter
 a client asked for is worse than an error.

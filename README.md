@@ -242,6 +242,13 @@ means. The server repeats it back in the response, as the spec requires.
 }
 ```
 
+Responses never serialize a null, and never serialize an empty container for a
+property whose schema forbids one (`Edge.qualifiers`,
+`RetrievalSource.upstream_resource_ids`, `message.auxiliary_graphs`, `logs`, …)
+— TRAPI 2.0 is OpenAPI 3.1 and dropped `nullable`, so an absent value is an
+absent property. `message.results` is deliberately still `[]` when a query
+matched nothing, which is what 2.0 asks for.
+
 TRAPI's own parameters:
 
 - `timeout` (number): Seconds the client is willing to wait. When the budget is

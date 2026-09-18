@@ -25,7 +25,13 @@ from gandalf.profiler import (
 )
 from gandalf.graph import NOT_PROVIDED
 from gandalf.query_planner import get_next_qedge, remove_orphaned
-from gandalf.trapi import Deadline, QueryTimeout, finalize_response, timeout_response
+from gandalf.trapi import (
+    Deadline,
+    QueryTimeout,
+    finalize_response,
+    prune_edge,
+    timeout_response,
+)
 from gandalf.search.edge_constraints import EdgeConstraints
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
 from gandalf.search.gc_utils import GCMonitor
@@ -825,6 +831,10 @@ def _build_response(
                         edge_props["knowledge_level"] = knowledge_level
                         edge_props["agent_type"] = agent_type
 
+                    # Drop the properties TRAPI 2.0 forbids empty (once per
+                    # distinct edge, not once per path).
+                    prune_edge(edge_props)
+
                     if fwd_eidx >= 0:
                         orig_id = edge_id_map.get(fwd_eidx)
                         if orig_id is not None:
@@ -961,7 +971,10 @@ def _build_response(
                                             settings.subclass_inference_infores
                                         ),
                                         "resource_role": "primary_knowledge_source",
-                                        "upstream_resource_ids": [],
+                                        # No upstream_resource_ids: a primary
+                                        # knowledge source has nothing
+                                        # upstream, and 2.0 gives the property
+                                        # a minItems of 1.
                                     },
                                 ],
                             }
