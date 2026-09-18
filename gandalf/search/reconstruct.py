@@ -5,13 +5,16 @@ import logging
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
+
+from translator_tom.model_dicts import NodeDict
 
 from gandalf.config import settings
 from gandalf.profiler import current_profiler
 from gandalf.search.path_arrays import PathArrays
+from gandalf.trapi import ensure_node_category
 
 logger = logging.getLogger(__name__)
 
@@ -343,20 +346,27 @@ def reconstruct_paths(
             # pop (not get) so each property dict is freed as it is consumed,
             # avoiding a transient 2x peak alongside node_cache.
             all_props = props_batch.pop(int(node_idx), {})
+            # TRAPI 2.0 admits no nulls and requires at least one category on
+            # every Node, so a missing name yields no "name" key and a node
+            # with no stored category falls back to NamedThing.  (Node
+            # attributes may legitimately be an empty list.)
+            node_props: NodeDict
             if lightweight and bmt is not None:
-                node_cache[node_idx] = {
-                    "name": all_props.get("name"),
+                node_props = {
                     "categories": _get_most_specific_category(
                         all_props.get("categories", []), bmt
                     ),
                 }
+                name = all_props.get("name")
+                if name is not None:
+                    node_props["name"] = name
             else:
-                node_props = all_props.copy()
-                if "categories" not in node_props:
-                    node_props["categories"] = []
+                node_props = cast("NodeDict", all_props.copy())
+                if node_props.get("name") is None:
+                    node_props.pop("name", None)
                 if "attributes" not in node_props:
                     node_props["attributes"] = []
-                node_cache[node_idx] = node_props
+            node_cache[node_idx] = ensure_node_category(node_props)
             node_id_cache[node_idx] = id_batch.get(int(node_idx))
         prof.add_metric("unique_nodes", int(len(unique_node_indices)))
 

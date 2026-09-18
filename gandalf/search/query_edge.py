@@ -6,8 +6,8 @@ from typing import Optional
 
 from gandalf.profiler import current_profiler
 from gandalf.search.attribute_constraints import matches_attribute_constraints
+from gandalf.search.edge_constraints import EdgeConstraints
 from gandalf.search.node_filters import NodeFilter, apply_node_filters
-from gandalf.search.qualifiers import edge_matches_qualifier_constraints
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +96,9 @@ def query_edge(
     start_categories,
     end_categories,
     allowed_predicates,
-    qualifier_constraints,
+    edge_constraints: EdgeConstraints,
     inverse_predicates: Optional[list[str]] = None,
     node_filters: Optional[list[NodeFilter]] = None,
-    attribute_constraints: Optional[list] = None,
     start_node_constraints: Optional[list] = None,
     end_node_constraints: Optional[list] = None,
     logger: Optional[logging.Logger] = None,
@@ -117,14 +116,14 @@ def query_edge(
         start_categories: List of allowed categories for start node
         end_categories: List of allowed categories for end node
         allowed_predicates: List of forward predicate strings (canonical/symmetric descendants)
-        qualifier_constraints: List of qualifier constraint dicts from query
+        edge_constraints: The QEdge's parsed TRAPI 2.0 ``constraints`` object
+            (qualifiers, attributes, knowledge_level, agent_type, sources).
+            An empty ``EdgeConstraints`` filters nothing.
         inverse_predicates: List of inverse predicate strings for reverse direction
             matching. None means don't check inverse direction. Empty list means
             match all predicates in inverse direction (wildcard).
         node_filters: Pre-built list of NodeFilter closures (from
             ``build_node_filters``). Empty list / None means no filtering.
-        attribute_constraints: List of TRAPI AttributeConstraint dicts for
-            filtering edges by their attributes. All must be satisfied (AND).
         start_node_constraints: List of TRAPI AttributeConstraint dicts for
             filtering the start (subject) node by its attributes.
         end_node_constraints: List of TRAPI AttributeConstraint dicts for
@@ -179,19 +178,18 @@ def query_edge(
             n_inverse_preds=n_inverse_preds,
             check_inverse=check_inverse,
             n_end_categories=len(end_categories) if end_categories else 0,
-            has_attribute_constraints=bool(attribute_constraints),
+            has_edge_constraints=bool(edge_constraints),
         ):
             _query_forward(
                 graph,
                 start_idxes,
                 allowed_predicates,
                 end_categories,
-                qualifier_constraints,
+                edge_constraints,
                 check_inverse,
                 inverse_pred_set,
                 add_match,
                 node_filters=node_filters,
-                attribute_constraints=attribute_constraints,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
                 logger=logger,
@@ -206,19 +204,18 @@ def query_edge(
             n_inverse_preds=n_inverse_preds,
             check_inverse=check_inverse,
             n_start_categories=len(start_categories) if start_categories else 0,
-            has_attribute_constraints=bool(attribute_constraints),
+            has_edge_constraints=bool(edge_constraints),
         ):
             _query_backward(
                 graph,
                 end_idxes,
                 allowed_predicates,
                 start_categories,
-                qualifier_constraints,
+                edge_constraints,
                 check_inverse,
                 inverse_pred_set,
                 add_match,
                 node_filters=node_filters,
-                attribute_constraints=attribute_constraints,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
                 logger=logger,
@@ -233,19 +230,18 @@ def query_edge(
             n_predicates=n_allowed_preds,
             n_inverse_preds=n_inverse_preds,
             check_inverse=check_inverse,
-            has_attribute_constraints=bool(attribute_constraints),
+            has_edge_constraints=bool(edge_constraints),
         ):
             _query_both_pinned(
                 graph,
                 start_idxes,
                 end_idxes,
                 allowed_predicates,
-                qualifier_constraints,
+                edge_constraints,
                 check_inverse,
                 inverse_pred_set,
                 add_match,
                 node_filters=node_filters,
-                attribute_constraints=attribute_constraints,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
                 logger=logger,
@@ -263,12 +259,11 @@ def _query_forward(
     start_idxes,
     allowed_predicates,
     end_categories,
-    qualifier_constraints,
+    edge_constraints,
     check_inverse,
     inverse_pred_set,
     add_match,
     node_filters=None,
-    attribute_constraints=None,
     start_node_constraints=None,
     end_node_constraints=None,
     logger: Optional[logging.Logger] = None,
@@ -317,20 +312,12 @@ def _query_forward(
                 if not matches_attribute_constraints(obj_attrs, end_node_constraints):
                     continue
 
-            # Check qualifier constraints
-            if qualifier_constraints:
-                edge_qualifiers = props.get("qualifiers", [])
-                if not edge_matches_qualifier_constraints(
-                    edge_qualifiers, qualifier_constraints
-                ):
-                    continue
-
-            # Check edge attribute constraints (cold path: LMDB lookup)
-            if attribute_constraints:
-                if not _edge_passes_attribute_constraints(
-                    graph, fwd_edge_idx, attribute_constraints
-                ):
-                    continue
+            # Check the QEdge's constraints (qualifiers, knowledge_level,
+            # agent_type, sources, attributes)
+            if edge_constraints and not edge_constraints.permits(
+                graph, props, fwd_edge_idx
+            ):
+                continue
 
             add_match(start_idx, predicate, obj_idx, fwd_edge_idx)
 
@@ -367,20 +354,12 @@ def _query_forward(
                     ):
                         continue
 
-                # Check qualifier constraints
-                if qualifier_constraints:
-                    edge_qualifiers = props.get("qualifiers", [])
-                    if not edge_matches_qualifier_constraints(
-                        edge_qualifiers, qualifier_constraints
-                    ):
-                        continue
-
-                # Check edge attribute constraints (cold path: LMDB lookup)
-                if attribute_constraints:
-                    if not _edge_passes_attribute_constraints(
-                        graph, fwd_edge_idx, attribute_constraints
-                    ):
-                        continue
+                # Check the QEdge's constraints (qualifiers, knowledge_level,
+                # agent_type, sources, attributes)
+                if edge_constraints and not edge_constraints.permits(
+                    graph, props, fwd_edge_idx
+                ):
+                    continue
 
                 # Report the actual edge as stored in the graph
                 # The edge is: other_idx --[stored_pred]--> start_idx
@@ -413,12 +392,11 @@ def _query_backward(
     end_idxes,
     allowed_predicates,
     start_categories,
-    qualifier_constraints,
+    edge_constraints,
     check_inverse,
     inverse_pred_set,
     add_match,
     node_filters=None,
-    attribute_constraints=None,
     start_node_constraints=None,
     end_node_constraints=None,
     logger: Optional[logging.Logger] = None,
@@ -472,20 +450,12 @@ def _query_backward(
                 ):
                     continue
 
-            # Check qualifier constraints
-            if qualifier_constraints:
-                edge_qualifiers = props.get("qualifiers", [])
-                if not edge_matches_qualifier_constraints(
-                    edge_qualifiers, qualifier_constraints
-                ):
-                    continue
-
-            # Check edge attribute constraints (cold path: LMDB lookup)
-            if attribute_constraints:
-                if not _edge_passes_attribute_constraints(
-                    graph, fwd_edge_idx, attribute_constraints
-                ):
-                    continue
+            # Check the QEdge's constraints (qualifiers, knowledge_level,
+            # agent_type, sources, attributes)
+            if edge_constraints and not edge_constraints.permits(
+                graph, props, fwd_edge_idx
+            ):
+                continue
 
             add_match(subj_idx, predicate, end_idx, fwd_edge_idx)
 
@@ -522,20 +492,12 @@ def _query_backward(
                     ):
                         continue
 
-                # Check qualifier constraints
-                if qualifier_constraints:
-                    edge_qualifiers = props.get("qualifiers", [])
-                    if not edge_matches_qualifier_constraints(
-                        edge_qualifiers, qualifier_constraints
-                    ):
-                        continue
-
-                # Check edge attribute constraints (cold path: LMDB lookup)
-                if attribute_constraints:
-                    if not _edge_passes_attribute_constraints(
-                        graph, fwd_edge_idx, attribute_constraints
-                    ):
-                        continue
+                # Check the QEdge's constraints (qualifiers, knowledge_level,
+                # agent_type, sources, attributes)
+                if edge_constraints and not edge_constraints.permits(
+                    graph, props, fwd_edge_idx
+                ):
+                    continue
 
                 # Report the actual edge as stored in the graph
                 # The edge is: end_idx --[stored_pred]--> other_idx
@@ -567,12 +529,11 @@ def _query_both_pinned(
     start_idxes,
     end_idxes,
     allowed_predicates,
-    qualifier_constraints,
+    edge_constraints,
     check_inverse,
     inverse_pred_set,
     add_match,
     node_filters=None,
-    attribute_constraints=None,
     start_node_constraints=None,
     end_node_constraints=None,
     logger: Optional[logging.Logger] = None,
@@ -634,20 +595,12 @@ def _query_both_pinned(
                 if not matches_attribute_constraints(obj_attrs, end_node_constraints):
                     continue
 
-            # Check qualifier constraints inline
-            if qualifier_constraints:
-                edge_qualifiers = props.get("qualifiers", [])
-                if not edge_matches_qualifier_constraints(
-                    edge_qualifiers, qualifier_constraints
-                ):
-                    continue
-
-            # Check edge attribute constraints (cold path: LMDB lookup)
-            if attribute_constraints:
-                if not _edge_passes_attribute_constraints(
-                    graph, fwd_edge_idx, attribute_constraints
-                ):
-                    continue
+            # Check the QEdge's constraints (qualifiers, knowledge_level,
+            # agent_type, sources, attributes)
+            if edge_constraints and not edge_constraints.permits(
+                graph, props, fwd_edge_idx
+            ):
+                continue
 
             add_match(start_idx, predicate, obj_idx, fwd_edge_idx)
 
@@ -693,20 +646,12 @@ def _query_both_pinned(
                     ):
                         continue
 
-                # Check qualifier constraints before adding
-                if qualifier_constraints:
-                    edge_qualifiers = props.get("qualifiers", [])
-                    if not edge_matches_qualifier_constraints(
-                        edge_qualifiers, qualifier_constraints
-                    ):
-                        continue
-
-                # Check edge attribute constraints (cold path: LMDB lookup)
-                if attribute_constraints:
-                    if not _edge_passes_attribute_constraints(
-                        graph, fwd_edge_idx, attribute_constraints
-                    ):
-                        continue
+                # Check the QEdge's constraints (qualifiers, knowledge_level,
+                # agent_type, sources, attributes)
+                if edge_constraints and not edge_constraints.permits(
+                    graph, props, fwd_edge_idx
+                ):
+                    continue
 
                 # Report the actual edge as stored in the graph
                 # The edge is: end_idx --[stored_pred]--> obj_idx
@@ -759,20 +704,3 @@ def _record_traversal_metrics(graph, total_neighbors, slow_nodes):
             neighbors=int(neighbors),
             duration_ms=node_time * 1000.0,
         )
-
-
-def _edge_passes_attribute_constraints(graph, fwd_edge_idx, attribute_constraints):
-    """Check if an edge's attributes satisfy all attribute constraints.
-
-    Fetches edge attributes from LMDB (cold path) and applies the constraint
-    matching logic.  Only called for edges that already passed all other
-    filters (predicates, categories, qualifiers), so the number of LMDB
-    lookups is bounded by the surviving candidate set.
-    """
-    if graph.lmdb_store is None:
-        # No LMDB store — no attributes to check against
-        return False
-
-    detail = graph.lmdb_store.get(fwd_edge_idx)
-    edge_attrs = detail.get("attributes", [])
-    return matches_attribute_constraints(edge_attrs, attribute_constraints)

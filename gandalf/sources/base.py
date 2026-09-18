@@ -15,12 +15,19 @@ NormalizedEdge::
     object:     str   (required, non-empty)
     predicate:  str   (required, non-empty)
     id:         str | None
+    knowledge_level: str | None   # TRAPI 2.0 Edge.knowledge_level
+    agent_type:      str | None   # TRAPI 2.0 Edge.agent_type
     sources:    list[ {resource_id:str, resource_role:str,
                         upstream_resource_ids:list[str],
                         source_record_urls:list[str]  # optional} ]
     qualifiers: list[ {qualifier_type_id:str, qualifier_value:str} ]
     attributes: list[ {attribute_type_id:str, value:Any,
                         original_attribute_name:str} ]
+
+TRAPI 2.0 requires ``knowledge_level`` and ``agent_type`` on every Edge. A
+source may still yield ``None`` for either (plenty of KGX records predate the
+requirement); the loader substitutes the Biolink ``not_provided`` value so the
+served Edge always carries both.
 
 NormalizedNode::
 
@@ -92,6 +99,17 @@ def validate_normalized_edge(edge: dict) -> None:
 
     for field in ("subject", "object", "predicate"):
         _require_str("edge", edge_id, field, edge.get(field))
+
+    # TRAPI 2.0 Edge.knowledge_level / Edge.agent_type. Optional here because
+    # not every source records them; the loader defaults a missing value to
+    # ``not_provided`` rather than dropping the property.
+    for field in ("knowledge_level", "agent_type"):
+        value = edge.get(field)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise SourceValidationError(
+                f"edge {edge_id!r}: field {field!r} must be a non-empty string "
+                f"or absent, got {value!r}"
+            )
 
     for field in ("sources", "qualifiers", "attributes"):
         if not isinstance(edge.get(field), list):

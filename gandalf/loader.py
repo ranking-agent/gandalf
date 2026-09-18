@@ -5,12 +5,12 @@ Three-pass streaming loader that keeps peak memory at ~3-4GB for 38M edges:
 Pass 1: Stream edge triples to collect vocabularies (node IDs, predicates,
         edge count).
 Pass 2: Stream edges again, converting each to integer indices stored in
-        pre-allocated numpy arrays. Simultaneously interns qualifier/source data
-        into the EdgePropertyStoreBuilder and writes attributes to
-        a temporary LMDB keyed by original line index.
+        pre-allocated numpy arrays. Simultaneously interns qualifier/source and
+        knowledge_level/agent_type data into the EdgePropertyStoreBuilder and
+        writes attributes to a temporary LMDB keyed by original line index.
 Pass 3: Sort numpy arrays by (src, dst, pred) via np.lexsort. Rewrite the temp
         LMDB in CSR-sorted order to produce the final LMDB where key == CSR
-        edge index (zero indirection at query time). Reorder qualifier/source
+        edge index (zero indirection at query time). Reorder the hot-path
         dedup indices to match. Build CSR offset arrays.
 
 The build core (``_build_graph_from_source``) is agnostic to where records come
@@ -37,6 +37,7 @@ from typing import List, Tuple
 import msgpack
 import numpy as np
 
+from gandalf.biolink import NAMED_THING
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import (
     LMDBPropertyStore,
@@ -49,6 +50,7 @@ from gandalf.node_annotations import (
     annotate_node_properties,
 )
 from gandalf.sources import GraphSource, KGXJsonlSource
+from gandalf.trapi import prune_retrieval_sources
 
 import logging
 import lmdb
@@ -112,11 +114,16 @@ def _build_graph_from_source(
     for node_data in source.iter_nodes():
         idx = node_id_to_idx.get(node_data["id"])
         if idx is not None:
-            node_properties[idx] = {
-                "name": node_data.get("name", None),
-                "categories": node_data.get("categories", []),
+            # No "name" key for a nameless node: TRAPI 2.0 admits no nulls, so
+            # an absent name must stay absent all the way to the response.
+            props = {
+                "categories": node_data.get("categories") or [NAMED_THING],
                 "attributes": node_data.get("attributes", []),
             }
+            name = node_data.get("name")
+            if name is not None:
+                props["name"] = name
+            node_properties[idx] = props
     if node_properties:
         logger.debug("  Loaded properties for %s nodes", f"{len(node_properties):,}")
 
@@ -172,9 +179,17 @@ def _build_graph_from_source(
             # Capture edge ID from the normalized record (if present)
             edge_ids[i] = edge.get("id")
 
-            # Hot path: intern qualifiers + sources (already normalized)
+            # Hot path: intern qualifiers, sources and the knowledge_level /
+            # agent_type pair TRAPI 2.0 requires on every Edge (already
+            # normalized; a source that omits either yields "not_provided").
             prop_builder.add(
-                i, {"sources": edge["sources"], "qualifiers": edge["qualifiers"]}
+                i,
+                {
+                    "sources": prune_retrieval_sources(edge["sources"]),
+                    "qualifiers": edge["qualifiers"],
+                    "knowledge_level": edge.get("knowledge_level"),
+                    "agent_type": edge.get("agent_type"),
+                },
             )
 
             # Cold path: write attributes to temp LMDB

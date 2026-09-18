@@ -42,6 +42,8 @@ from typing import (
     Tuple,
 )
 
+from gandalf.biolink import NAMED_THING
+
 logger = logging.getLogger(__name__)
 
 # TRAPI attribute_type_id used by the Annotator service for its payload.
@@ -151,7 +153,10 @@ def attach_annotations(
     Each annotated node gets exactly one ``biothings_annotations`` attribute:
     any attribute already carrying that ``attribute_type_id`` is replaced, so
     annotating twice is idempotent.  Nodes present in the graph but absent from
-    the node file get a properties entry created for them.
+    the node file get a properties entry created for them, in the same shape
+    the loader builds: no ``name`` key at all (TRAPI 2.0 admits no nulls, so an
+    unknown name must stay absent) and ``categories`` defaulted to the Biolink
+    root class (it is required with a ``minItems`` of 1).
 
     Args:
         node_properties: Loader property map, ``node_idx -> {name, categories,
@@ -164,7 +169,8 @@ def attach_annotations(
         The number of nodes that received an annotation.
 
     Examples:
-        >>> props = {0: {"name": "TP53", "categories": [], "attributes": []}}
+        >>> props = {0: {"name": "TP53", "categories": ["biolink:Gene"],
+        ...               "attributes": []}}
         >>> attach_annotations(props, {"NCBIGene:7157": 0},
         ...                    {"NCBIGene:7157": {"symbol": "TP53"}})
         1
@@ -177,7 +183,7 @@ def attach_annotations(
         if node_idx is None:
             continue
         properties = node_properties.setdefault(
-            node_idx, {"name": None, "categories": [], "attributes": []}
+            node_idx, {"categories": [NAMED_THING], "attributes": []}
         )
         attributes = properties.setdefault("attributes", [])
         attributes[:] = [

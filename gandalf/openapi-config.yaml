@@ -19,6 +19,9 @@ x-translator:
   team:
   - DOGSLED
 x-trapi:
-  version: 1.5.0
+  version: 2.0.0
+  asyncquery: true
+  multicuriequery: false
+  pathfinderquery: false
   operations:
   - lookup

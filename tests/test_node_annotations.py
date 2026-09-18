@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from gandalf.biolink import NAMED_THING
 from gandalf.enrichment import enrich_knowledge_graph
 from gandalf.graph import CSRGraph
 from gandalf.loader import build_graph_from_jsonl
@@ -15,6 +16,7 @@ from gandalf.node_annotations import (
     fetch_annotations,
 )
 from gandalf.search import lookup
+from tests.test_trapi_conformance import assert_valid_trapi
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 NODES_FILE = os.path.join(FIXTURES_DIR, "nodes.jsonl")
@@ -125,14 +127,19 @@ class TestAttachAnnotations:
         assert len(node_properties[0]["attributes"]) == 2
 
     def test_creates_properties_for_node_without_any(self):
-        """A node in the edge file but not the node file still gets annotated."""
+        """A node in the edge file but not the node file still gets annotated.
+
+        The entry must match the shape the loader builds: TRAPI 2.0 admits no
+        nulls, so an unknown name is absent rather than None, and the required
+        categories fall back to the Biolink root class.
+        """
         node_properties = {}
         attach_annotations(
             node_properties, {"NCBIGene:7157": 3}, {"NCBIGene:7157": {"symbol": "TP53"}}
         )
 
-        assert node_properties[3]["name"] is None
-        assert node_properties[3]["categories"] == []
+        assert "name" not in node_properties[3]
+        assert node_properties[3]["categories"] == [NAMED_THING]
         assert node_properties[3]["attributes"][0]["value"] == {"symbol": "TP53"}
 
     def test_reannotating_replaces_rather_than_duplicates(self):
@@ -229,6 +236,18 @@ class TestAnnotationsReachTrapiResponses:
             if attribute["attribute_type_id"] == BIOTHINGS_ANNOTATIONS_ATTRIBUTE_TYPE_ID
         ]
         assert annotations == [self.ANNOTATION]
+
+    def test_annotated_response_is_valid_trapi(self, annotated_graph, bmt):
+        """The annotation attribute must not cost the response its conformance.
+
+        ``biothings_annotations`` is not a Biolink CURIE -- it is the
+        Annotator service's own attribute_type_id -- so it is worth pinning
+        that TRAPI 2.0 still admits a response carrying it.
+        """
+        response = lookup(annotated_graph, _one_hop_query(), bmt=bmt)
+        enrich_knowledge_graph(response["message"], annotated_graph)
+
+        assert_valid_trapi(response)
 
     def test_annotation_survives_mmap_round_trip(self, annotated_graph, tmp_path):
         graph_dir = tmp_path / "graph_mmap"

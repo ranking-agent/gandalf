@@ -6,9 +6,16 @@ query results are consistent with the actual graph data.
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from bmt.toolkit import Toolkit
+from translator_tom.model_dicts import (
+    EdgeBindingDict,
+    EdgeDict,
+    QueryGraphDict,
+    ResponseDict,
+    ResultDict,
+)
 
 from gandalf.biolink import make_toolkit
 from gandalf.graph import CSRGraph
@@ -180,7 +187,7 @@ def validate_edge_exists(
 
 def validate_trapi_response(
     graph: CSRGraph,
-    response: dict,
+    response: ResponseDict,
     check_inverse: bool = True,
 ) -> ValidationResult:
     """
@@ -262,9 +269,8 @@ def validate_trapi_response(
 
         # Check node bindings
         node_bindings = result.get("node_bindings", {})
-        for qnode_id, bindings in node_bindings.items():
-            for binding in bindings:
-                node_id = binding.get("id")
+        for qnode_id, binding in node_bindings.items():
+            for node_id in binding.get("ids", []):
                 if node_id and node_id not in kg_nodes:
                     errors.append(
                         ValidationError(
@@ -280,9 +286,8 @@ def validate_trapi_response(
         analyses = result.get("analyses", [])
         for analysis in analyses:
             edge_bindings = analysis.get("edge_bindings", {})
-            for qedge_id, bindings in edge_bindings.items():
-                for binding in bindings:
-                    edge_id = binding.get("id")
+            for qedge_id, binding in edge_bindings.items():
+                for edge_id in binding.get("ids", []):
                     if edge_id and edge_id not in kg_edges:
                         errors.append(
                             ValidationError(
@@ -522,18 +527,18 @@ def find_edge_in_graph(
 
 
 def _result_node_fingerprint(
-    result: dict,
+    result: ResultDict,
 ) -> frozenset[tuple[str, str]]:
     """Create a hashable fingerprint from a result's node bindings."""
     pairs: list[tuple[str, str]] = []
-    for qnode_id, bindings in result.get("node_bindings", {}).items():
-        for binding in bindings:
-            pairs.append((qnode_id, binding.get("id", "")))
+    for qnode_id, binding in result.get("node_bindings", {}).items():
+        for node_id in binding.get("ids", []):
+            pairs.append((qnode_id, node_id))
     return frozenset(pairs)
 
 
 def _get_qgraph_path_order(
-    query_graph: dict,
+    query_graph: QueryGraphDict,
 ) -> tuple[list[str], list[str]]:
     """Determine a linear ordering of qnode and qedge IDs from the query graph.
 
@@ -582,8 +587,8 @@ def _get_qgraph_path_order(
 
 
 def _format_result_path(
-    result: dict,
-    kg_edges: dict,
+    result: ResultDict,
+    kg_edges: dict[str, EdgeDict],
     qnode_order: list[str],
     qedge_order: list[str],
 ) -> str:
@@ -607,9 +612,10 @@ def _format_result_path(
 
     # Map qnode_id -> bound node ID.
     qnode_to_id: dict[str, str] = {}
-    for qnode_id, bindings in node_bindings.items():
-        if bindings:
-            qnode_to_id[qnode_id] = bindings[0].get("id", "?")
+    for qnode_id, binding in node_bindings.items():
+        ids = binding.get("ids") or []
+        if ids:
+            qnode_to_id[qnode_id] = ids[0]
 
     parts: list[str] = []
     for i, qnode_id in enumerate(qnode_order):
@@ -625,24 +631,24 @@ def _format_result_path(
 
 def _format_edge_bindings(
     qedge_id: str,
-    edge_bindings: dict,
-    kg_edges: dict,
+    edge_bindings: dict[str, EdgeBindingDict],
+    kg_edges: dict[str, EdgeDict],
 ) -> str:
     """Format all edge bindings for a single qedge as a compact label.
 
     Multiple distinct predicate/qualifier combinations are separated by
     ``" | "``.
     """
-    bindings = edge_bindings.get(qedge_id, [])
-    if not bindings:
+    binding = edge_bindings.get(qedge_id)
+    bound_ids = binding.get("ids") if binding else None
+    if not bound_ids:
         return "?"
 
     descriptions: list[str] = []
     seen: set[tuple[str, str]] = set()
 
-    for binding in bindings:
-        edge_id = binding.get("id")
-        edge = kg_edges.get(edge_id, {}) if edge_id else {}
+    for edge_id in bound_ids:
+        edge: EdgeDict | dict[str, Any] = kg_edges.get(edge_id) or {}
 
         predicate = edge.get("predicate", "?")
         qualifiers = edge.get("qualifiers") or []

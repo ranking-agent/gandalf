@@ -166,7 +166,7 @@ def test_async_callback_forwards_request_traceparent(otel_server, callback_serve
         json={"callback": callback_url, "message": _QUERY_MESSAGE},
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "accepted"
+    assert resp.json()["status"] == "Accepted"
 
     assert _wait_for(lambda: len(received) > 0), "callback never received the POST"
     cb = received[0]

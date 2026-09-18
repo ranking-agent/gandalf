@@ -1,11 +1,17 @@
-"""Tests for query-graph None-field normalization.
+"""Tests for query-graph null / empty-container normalization.
 
 Regression coverage for the default (non-validating) request path: a client
 that sends an optional field explicitly as ``null`` (e.g. ``"ids": null`` on an
 unpinned node) used to leave the key present with a ``None`` value, which broke
 the ``node.get("ids", [])`` idiom downstream (``len(None)`` -> 500). See
 ``gandalf.request_validation.normalize_query_graph``.
+
+The same pass also drops empty containers for the properties TRAPI 2.0 gives a
+``minItems`` / ``minProperties`` of 1, because the query graph is echoed back
+in the response and would otherwise be invalid there.
 """
+
+import pytest
 
 from gandalf.request_validation import normalize_query_graph
 
@@ -50,11 +56,61 @@ class TestNormalizeQueryGraph:
         assert "ids" not in qg["nodes"]["n0"]
         assert qg["nodes"]["n0"]["categories"] == ["biolink:Disease"]
 
-    def test_empty_list_preserved(self):
-        # An explicit empty list is a valid, distinct value -- keep it.
-        qg = {"nodes": {"n0": {"ids": []}}, "edges": {}}
+    @pytest.mark.parametrize("prop", ["ids", "categories", "member_ids", "constraints"])
+    def test_empty_qnode_list_dropped(self, prop):
+        """TRAPI 2.0 gives each of these a minItems of 1.
+
+        The query graph is echoed back in the response, so an empty list on
+        the way in would be an invalid message.query_graph on the way out.
+        """
+        qg = {"nodes": {"n0": {prop: []}}, "edges": {}}
         normalize_query_graph(qg)
-        assert qg["nodes"]["n0"]["ids"] == []
+        assert prop not in qg["nodes"]["n0"]
+
+    def test_empty_qedge_predicates_dropped(self):
+        qg = {
+            "nodes": {"n0": {}, "n1": {}},
+            "edges": {"e0": {"subject": "n0", "object": "n1", "predicates": []}},
+        }
+        normalize_query_graph(qg)
+        assert "predicates" not in qg["edges"]["e0"]
+
+    def test_empty_qedge_constraints_dropped(self):
+        """QEdgeConstraints has a minProperties of 1, its lists a minItems of 1."""
+        qg = {
+            "nodes": {"n0": {}, "n1": {}},
+            "edges": {
+                "e0": {
+                    "subject": "n0",
+                    "object": "n1",
+                    "constraints": {"qualifiers": [], "attributes": []},
+                }
+            },
+        }
+        normalize_query_graph(qg)
+        assert "constraints" not in qg["edges"]["e0"]
+
+    def test_empty_qpath_constraints_dropped(self):
+        qg = {
+            "nodes": {"n0": {}, "n1": {}},
+            "paths": {
+                "p0": {
+                    "subject": "n0",
+                    "object": "n1",
+                    "predicates": [],
+                    "constraints": [],
+                }
+            },
+        }
+        normalize_query_graph(qg)
+        assert "predicates" not in qg["paths"]["p0"]
+        assert "constraints" not in qg["paths"]["p0"]
+
+    def test_other_empty_values_preserved(self):
+        """Only the properties 2.0 forbids empty are dropped."""
+        qg = {"nodes": {"n0": {"is_set": False, "set_interpretation": ""}}, "edges": {}}
+        normalize_query_graph(qg)
+        assert qg["nodes"]["n0"] == {"is_set": False, "set_interpretation": ""}
 
     def test_missing_containers_no_error(self):
         normalize_query_graph({})  # should not raise

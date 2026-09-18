@@ -4,6 +4,12 @@ This package implements complex graph traversal with predicate expansion,
 qualifier matching, symmetric predicate handling, and subclass reasoning.
 """
 
+from gandalf.search.edge_constraints import (
+    AllowDeny,
+    ConstraintError,
+    EdgeConstraints,
+    SourcesConstraint,
+)
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
 from gandalf.search.gc_utils import GCMonitor, gc_disabled
 from gandalf.search.lookup import lookup
@@ -34,6 +40,10 @@ __all__ = [
     "PredicateExpander",
     "QualifierExpander",
     "GCMonitor",
+    "EdgeConstraints",
+    "AllowDeny",
+    "SourcesConstraint",
+    "ConstraintError",
     # 3-hop path finding
     "find_3hop_paths_with_properties",
     "find_3hop_paths_filtered",

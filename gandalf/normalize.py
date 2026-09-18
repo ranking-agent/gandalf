@@ -17,13 +17,18 @@ from typing import Optional
 import orjson
 from bmt.toolkit import Toolkit
 
-from gandalf.biolink import make_toolkit
+from gandalf.biolink import NAMED_THING, make_toolkit
 from gandalf.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 # Fields that are structural (not stored as properties)
+#
+# ``knowledge_level`` and ``agent_type`` are structural under TRAPI 2.0, which
+# promotes them from edge attributes to required top-level Edge properties.
+# Keeping them out of the attribute list means an edge reports each exactly
+# once, in the place the schema puts it.
 _CORE_FIELDS = {
     "id",
     "category",
@@ -33,6 +38,8 @@ _CORE_FIELDS = {
     "sources",
     "primary_knowledge_source",
     "aggregator_knowledge_source",
+    "knowledge_level",
+    "agent_type",
 }
 
 # Node fields that become top-level TRAPI Node properties (not attributes).
@@ -130,10 +137,15 @@ def _get_qualifier_fields() -> set:
 def _extract_sources(data):
     """Extract normalized source list from edge data.
 
-    Ensures every source has an ``upstream_resource_ids`` list (defaults to
-    ``[]``) and prepends an infores aggregator_knowledge_source
-    whose upstream points to the top of the existing source chain (i.e. the
-    source(s) not referenced in any other source's upstream_resource_ids).
+    Prepends an infores aggregator_knowledge_source whose upstream points to
+    the top of the existing source chain (i.e. the source(s) not referenced in
+    any other source's upstream_resource_ids).
+
+    Every source gets an ``upstream_resource_ids`` list, empty where nothing
+    is upstream, because the chain computation above reads it on every source
+    and both graph sources are validated against that contract.  The loader
+    drops the empty ones before they are stored (TRAPI 2.0 gives the property
+    a ``minItems`` of 1); see ``gandalf.trapi.prune_retrieval_sources``.
 
     This function is pure: it does not mutate ``data``.
     """
@@ -175,7 +187,7 @@ def _extract_sources(data):
             src = {
                 "resource_id": s["resource_id"],
                 "resource_role": s["resource_role"],
-                "upstream_resource_ids": s.get("upstream_resource_ids", []),
+                "upstream_resource_ids": s.get("upstream_resource_ids") or [],
             }
             if s.get("source_record_urls"):
                 src["source_record_urls"] = s["source_record_urls"]
@@ -287,14 +299,19 @@ def normalize_edge(raw: dict) -> dict:
     """Restructure a raw KGX edge dict into gandalf's normalized edge form.
 
     Produces the contract documented in ``gandalf.sources.base`` (subject,
-    object, predicate, id, plus the normalized sources/qualifiers/attributes
-    lists). Pure: does not mutate ``raw``.
+    object, predicate, id, knowledge_level, agent_type, plus the normalized
+    sources/qualifiers/attributes lists). ``knowledge_level`` and
+    ``agent_type`` pass through as ``None`` when the raw record omits them;
+    the loader substitutes the Biolink ``not_provided`` value. Pure: does not
+    mutate ``raw``.
     """
     return {
         "subject": raw["subject"],
         "object": raw["object"],
         "predicate": raw["predicate"],
         "id": raw.get("id"),
+        "knowledge_level": raw.get("knowledge_level"),
+        "agent_type": raw.get("agent_type"),
         "sources": _extract_sources(raw),
         "qualifiers": _extract_qualifiers(raw),
         "attributes": _extract_attributes(raw),
@@ -306,10 +323,17 @@ def normalize_node(raw: dict) -> dict:
 
     Renames raw ``category`` (singular) to ``categories`` (plural) and converts
     non-core fields to TRAPI Attribute dicts. Pure: does not mutate ``raw``.
+
+    TRAPI 2.0 admits no nulls and requires at least one category on every
+    Node, so a record with no name yields no ``name`` key at all (rather than
+    ``None``), and one with no category is normalized to ``NamedThing``.
     """
-    return {
+    node = {
         "id": raw.get("id"),
-        "name": raw.get("name"),
-        "categories": raw.get("category", []),
+        "categories": raw.get("category") or [NAMED_THING],
         "attributes": _extract_node_attributes(raw),
     }
+    name = raw.get("name")
+    if name is not None:
+        node["name"] = name
+    return node

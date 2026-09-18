@@ -15,6 +15,11 @@ from bmt.toolkit import Toolkit
 
 from gandalf.config import settings
 
+#: Root of the Biolink class hierarchy.  TRAPI 2.0 requires Node.categories
+#: and gives it a minItems of 1, so a record that names no category is served
+#: as a NamedThing rather than with an (invalid) empty list.
+NAMED_THING = "biolink:NamedThing"
+
 _SCHEMA_URL = (
     "https://raw.githubusercontent.com/biolink/biolink-model/"
     "refs/tags/v{version}/biolink-model.yaml"

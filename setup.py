@@ -10,7 +10,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="gandalf",
-    version="1.0.2",
+    version="2.0.0",
     author="Max Wang",
     author_email="max@covar.com",
     description="Fast 3-hop path finding in large knowledge graphs",
@@ -24,13 +24,11 @@ setup(
         "Topic :: Scientific/Engineering :: Bio-Informatics",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     install_requires=requirements,
     extras_require={
         "mongo": ["pymongo>=4.0"],

@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # used by the tier 1 driver (BioPack/retriever) so qualifier/predicate
     # classification is identical across tiers. Empty uses BMT's built-in
     # default schema.
-    biolink_version: str = "4.3.2"
+    biolink_version: str = "4.4.2"
 
     # Heartbeat (Automat cluster registration)
     automat_host: str = ""  # e.g. "http://automat:8080"; empty = disabled
@@ -65,9 +65,22 @@ class Settings(BaseSettings):
     # Gunicorn worker count
     workers: int = 2
 
+    # TRAPI query-time budget (parameters.timeout, gandalf/trapi.py).
+    # query_timeout is the server's own default in seconds; 0 disables it, and
+    # a client can disable it explicitly with a negative parameters.timeout.
+    # A client asking for less than min_query_timeout gets an HTTP 409, since
+    # the server knows up front it cannot answer that fast.
+    query_timeout: float = 0.0
+    min_query_timeout: float = 1.0
+
+    # Source-data versions reported as Response.data_release_versions, as a
+    # JSON object mapping source name to release version, e.g.
+    # '{"translator_kg": "2026_06_21"}'.  Empty omits the property.
+    data_release_versions: str = ""
+
     # Path reconstruction tunables (search/reconstruct.py)
     debug_paths_tsv: str = ""
-    large_result_threshold: int = 10000000
+    large_result_threshold: int = 10_000_000
     max_path_limit: int = 0
 
     # Default service URL for the literature_cooccurrence annotator plugin.
