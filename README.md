@@ -384,6 +384,25 @@ docker run -p 6429:6429 \
   gandalf
 ```
 
+### Docker Compose
+
+`compose.yml` runs Gandalf on Shepherd's Docker network (`shepherd_default`), so
+it sends traces to Shepherd's Jaeger and is reachable from Shepherd and the
+retriever at `http://gandalf:6429`. Start Shepherd first (or run
+`docker network create shepherd_default` to run Gandalf on its own).
+
+```bash
+# Graph read from ./graph by default
+GANDALF_GRAPH_DIR=/path/to/graph docker compose up --build
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GANDALF_GRAPH_DIR` | `./graph` | Host directory mounted read-only at `/data/graph` |
+| `SHEPHERD_NETWORK` | `shepherd_default` | External Docker network to join |
+| `GANDALF_OTEL_ENABLED` | `true` | Set to `false` when no Jaeger is running |
+| `GANDALF_JAEGER_HOST` / `GANDALF_JAEGER_PORT` | `http://jaeger` / `4317` | OTLP gRPC collector |
+
 ## Verifying the Server
 
 ```bash
