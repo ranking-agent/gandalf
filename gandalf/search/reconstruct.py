@@ -3,9 +3,8 @@
 import csv
 import logging
 import time
-from collections import defaultdict
 from datetime import datetime
-from typing import Any, Optional, cast
+from typing import Any, NamedTuple, Optional, cast
 
 import numpy as np
 
@@ -141,18 +140,12 @@ def reconstruct_paths(
     paths_fwd_edge_idx = np.zeros((num_paths, num_edges), dtype=np.int32)
 
     # Fill in first edge data
-    for i, (subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx) in enumerate(
-        first_results
-    ):
-        if via_inverse:
-            paths_nodes[i, 0] = obj_idx
-            paths_nodes[i, 1] = subj_idx
-        else:
-            paths_nodes[i, 0] = subj_idx
-            paths_nodes[i, 1] = obj_idx
-        paths_preds[i, 0] = get_pred_idx(predicate)
-        paths_via_inverse[i, 0] = via_inverse
-        paths_fwd_edge_idx[i, 0] = fwd_edge_idx
+    first = _edge_arrays(first_results, get_pred_idx)
+    paths_nodes[:, 0] = first.subj
+    paths_nodes[:, 1] = first.obj
+    paths_preds[:, 0] = first.pred
+    paths_via_inverse[:, 0] = first.via_inverse
+    paths_fwd_edge_idx[:, 0] = first.fwd_edge_idx
 
     logger.debug(
         "  Starting with %s paths from edge '%s'", f"{num_paths:,}", first_edge_id
@@ -185,107 +178,48 @@ def reconstruct_paths(
         subj_in_paths = subj_qnode in qnode_to_col
         obj_in_paths = obj_qnode in qnode_to_col
 
-        edge_data = edge_results[edge_id]
+        # The edge's matches in query-aligned direction, as arrays
+        edge = _edge_arrays(edge_results[edge_id], get_pred_idx)
 
-        # Normalize edge data to query-aligned direction
-        normalized_edge_data = []
-        for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
-            if via_inverse:
-                normalized_edge_data.append(
-                    (obj_idx, predicate, subj_idx, via_inverse, fwd_edge_idx)
-                )
-            else:
-                normalized_edge_data.append(
-                    (subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx)
-                )
-        edge_data = normalized_edge_data
-
-        if subj_in_paths and obj_in_paths:
-            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = (
-                _join_both_in_paths(
-                    paths_nodes,
-                    paths_preds,
-                    paths_via_inverse,
-                    paths_fwd_edge_idx,
-                    edge_data,
-                    qnode_to_col[subj_qnode],
-                    qnode_to_col[obj_qnode],
-                    join_idx,
-                    max_nodes,
-                    num_edges,
-                    get_pred_idx,
-                    logger=logger,
-                )
-            )
-
-        elif subj_in_paths:
-            if obj_qnode not in qnode_to_col:
-                qnode_to_col[obj_qnode] = num_node_cols
-                num_node_cols += 1
-            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = (
-                _join_on_subject(
-                    paths_nodes,
-                    paths_preds,
-                    paths_via_inverse,
-                    paths_fwd_edge_idx,
-                    edge_data,
-                    qnode_to_col[subj_qnode],
-                    qnode_to_col[obj_qnode],
-                    join_idx,
-                    max_nodes,
-                    num_edges,
-                    get_pred_idx,
-                    logger=logger,
-                )
-            )
-
-        elif obj_in_paths:
-            if subj_qnode not in qnode_to_col:
-                qnode_to_col[subj_qnode] = num_node_cols
-                num_node_cols += 1
-            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = (
-                _join_on_object(
-                    paths_nodes,
-                    paths_preds,
-                    paths_via_inverse,
-                    paths_fwd_edge_idx,
-                    edge_data,
-                    qnode_to_col[subj_qnode],
-                    qnode_to_col[obj_qnode],
-                    join_idx,
-                    max_nodes,
-                    num_edges,
-                    get_pred_idx,
-                    logger=logger,
-                )
-            )
-
-        else:
-            # Neither node in paths - cartesian product
+        if not subj_in_paths and not obj_in_paths:
             logger.debug("    Warning: Cartesian product needed for edge '%s'", edge_id)
+        for qnode, in_paths in ((subj_qnode, subj_in_paths), (obj_qnode, obj_in_paths)):
+            if not in_paths:
+                qnode_to_col[qnode] = num_node_cols
+                num_node_cols += 1
+        subj_col = qnode_to_col[subj_qnode]
+        obj_col = qnode_to_col[obj_qnode]
 
-            if subj_qnode not in qnode_to_col:
-                qnode_to_col[subj_qnode] = num_node_cols
-                num_node_cols += 1
-            if obj_qnode not in qnode_to_col:
-                qnode_to_col[obj_qnode] = num_node_cols
-                num_node_cols += 1
-            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = (
-                _join_cartesian(
-                    paths_nodes,
-                    paths_preds,
-                    paths_via_inverse,
-                    paths_fwd_edge_idx,
-                    edge_data,
-                    qnode_to_col[subj_qnode],
-                    qnode_to_col[obj_qnode],
-                    join_idx,
-                    max_nodes,
-                    num_edges,
-                    get_pred_idx,
-                    logger=logger,
-                )
-            )
+        # Join on whichever ends are already bound; the ends that are not
+        # get filled in from the edge.  With neither bound, every key is
+        # equal and the join is a cartesian product.
+        if subj_in_paths and obj_in_paths:
+            path_keys = _pair_keys(paths_nodes[:, subj_col], paths_nodes[:, obj_col])
+            edge_keys = _pair_keys(edge.subj, edge.obj)
+            new_node_cols = {}
+        elif subj_in_paths:
+            path_keys, edge_keys = paths_nodes[:, subj_col], edge.subj
+            new_node_cols = {obj_col: edge.obj}
+        elif obj_in_paths:
+            path_keys, edge_keys = paths_nodes[:, obj_col], edge.obj
+            new_node_cols = {subj_col: edge.subj}
+        else:
+            path_keys = np.zeros(len(paths_nodes), dtype=np.int8)
+            edge_keys = np.zeros(len(edge.subj), dtype=np.int8)
+            new_node_cols = {subj_col: edge.subj, obj_col: edge.obj}
+
+        paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = _join(
+            paths_nodes,
+            paths_preds,
+            paths_via_inverse,
+            paths_fwd_edge_idx,
+            path_keys,
+            edge_keys,
+            edge,
+            new_node_cols,
+            join_idx,
+            logger=logger,
+        )
 
         t_join_end = time.perf_counter()
         prof.add_metric("paths_out", len(paths_nodes))
@@ -342,6 +276,10 @@ def reconstruct_paths(
 
         node_cache = {}
         node_id_cache = {}
+        # Nodes share a few dozen distinct category lists, and resolving the
+        # most specific one costs a BMT call per category, so resolve each
+        # distinct list once.
+        specific_categories: dict[tuple, list] = {}
         for node_idx in unique_node_indices:
             # pop (not get) so each property dict is freed as it is consumed,
             # avoiding a transient 2x peak alongside node_cache.
@@ -352,11 +290,14 @@ def reconstruct_paths(
             # attributes may legitimately be an empty list.)
             node_props: NodeDict
             if lightweight and bmt is not None:
-                node_props = {
-                    "categories": _get_most_specific_category(
-                        all_props.get("categories", []), bmt
-                    ),
-                }
+                categories = tuple(all_props.get("categories", []))
+                specific = specific_categories.get(categories)
+                if specific is None:
+                    specific = _get_most_specific_category(list(categories), bmt)
+                    specific_categories[categories] = specific
+                # A list of its own per node, so no response code that
+                # edits one node's categories can reach another's.
+                node_props = {"categories": list(specific)}
                 name = all_props.get("name")
                 if name is not None:
                     node_props["name"] = name
@@ -599,246 +540,123 @@ def _dump_debug_tsv(
         logger.error("  Debug TSV: failed to write %s: %s", tsv_path, exc)
 
 
-def _join_both_in_paths(
+class _EdgeArrays(NamedTuple):
+    """One query edge's matches as parallel arrays, in query direction."""
+
+    subj: np.ndarray
+    obj: np.ndarray
+    pred: np.ndarray
+    via_inverse: np.ndarray
+    fwd_edge_idx: np.ndarray
+
+
+def _edge_arrays(edge_matches, get_pred_idx) -> _EdgeArrays:
+    """Convert ``query_edge`` match tuples into query-aligned arrays.
+
+    A match found through an inverse lookup is stored object-to-subject, so
+    its ends are swapped back to the query's direction here.
+
+    >>> vocab = {}
+    >>> arrays = _edge_arrays(
+    ...     [(1, "biolink:treats", 2, False, 7), (3, "biolink:treated_by", 4, True, 8)],
+    ...     lambda p: vocab.setdefault(p, len(vocab)),
+    ... )
+    >>> arrays.subj.tolist(), arrays.obj.tolist(), arrays.pred.tolist()
+    ([1, 4], [2, 3], [0, 1])
+    """
+    n = len(edge_matches)
+    if n == 0:
+        empty = np.empty(0, dtype=np.int32)
+        return _EdgeArrays(empty, empty, empty, np.empty(0, dtype=np.bool_), empty)
+    subj, preds, obj, via_inverse, fwd = zip(*edge_matches)
+    subj_arr = np.fromiter(subj, dtype=np.int32, count=n)
+    obj_arr = np.fromiter(obj, dtype=np.int32, count=n)
+    inv_arr = np.fromiter(via_inverse, dtype=np.bool_, count=n)
+    return _EdgeArrays(
+        subj=np.where(inv_arr, obj_arr, subj_arr),
+        obj=np.where(inv_arr, subj_arr, obj_arr),
+        pred=np.fromiter((get_pred_idx(p) for p in preds), dtype=np.int32, count=n),
+        via_inverse=inv_arr,
+        fwd_edge_idx=np.fromiter(fwd, dtype=np.int32, count=n),
+    )
+
+
+def _pair_keys(subj: np.ndarray, obj: np.ndarray) -> np.ndarray:
+    """Pack (subject, object) node index pairs into single int64 join keys."""
+    return (subj.astype(np.int64) << 32) | obj.astype(np.int64)
+
+
+def _join(
     paths_nodes,
     paths_preds,
     paths_via_inverse,
     paths_fwd_edge_idx,
-    edge_data,
-    subj_col,
-    obj_col,
-    join_idx,
-    max_nodes,
-    num_edges,
-    get_pred_idx,
+    path_keys: np.ndarray,
+    edge_keys: np.ndarray,
+    edge: _EdgeArrays,
+    new_node_cols: dict,
+    join_idx: int,
     logger: Optional[logging.Logger] = None,
 ):
-    """Join when both nodes already in path - validate consistency."""
-    logger = logger if logger is not None else logging.getLogger(__name__)
-    edge_index = defaultdict(list)
-    for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
-        edge_index[(subj_idx, obj_idx)].append(
-            (get_pred_idx(predicate), via_inverse, fwd_edge_idx)
-        )
+    """Extend each path with every edge match whose key equals the path's key.
 
-    # Pass 1: Count output rows
-    output_count = 0
-    for path_idx in range(len(paths_nodes)):
-        key = (
-            int(paths_nodes[path_idx, subj_col]),
-            int(paths_nodes[path_idx, obj_col]),
-        )
-        if key in edge_index:
-            output_count += len(edge_index[key])
+    Output rows come in path order and, within a path, in the edge matches'
+    original order.  When the output would exceed ``MAX_PATH_LIMIT`` it is
+    truncated to the first ``MAX_PATH_LIMIT`` rows of that order.
+
+    Args:
+        paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx: The
+            partial paths so far.
+        path_keys: One join key per path.
+        edge_keys: One join key per edge match (same dtype as ``path_keys``).
+        edge: The edge's matches, query-aligned.
+        new_node_cols: ``{node column: array}`` for the edge ends not yet in
+            the paths, to be filled from the matching edge.
+        join_idx: The edge's column in the per-edge arrays.
+
+    Returns:
+        The joined ``(nodes, preds, via_inverse, fwd_edge_idx)`` arrays.
+    """
+    logger = logger if logger is not None else logging.getLogger(__name__)
+
+    # Sort the edges by key (stably, so equal keys keep their original
+    # order) and find each path's run of matching edges.
+    edge_order = np.argsort(edge_keys, kind="stable")
+    sorted_keys = edge_keys[edge_order]
+    lo = np.searchsorted(sorted_keys, path_keys, side="left")
+    counts = np.searchsorted(sorted_keys, path_keys, side="right") - lo
+
+    output_count = int(counts.sum())
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
         logger.warning(
             "Truncating %s intermediate paths to %s",
             f"{output_count:,}",
             f"{MAX_PATH_LIMIT:,}",
         )
+        # Keep whole paths up to the limit, then part of the path that
+        # crosses it, then nothing.
+        ends = np.cumsum(counts)
+        cut = int(np.searchsorted(ends, MAX_PATH_LIMIT, side="left"))
+        counts = counts.copy()
+        counts[cut] = MAX_PATH_LIMIT - (int(ends[cut - 1]) if cut > 0 else 0)
+        counts[cut + 1 :] = 0
         output_count = MAX_PATH_LIMIT
 
-    # Pass 2: Fill pre-allocated arrays
-    new_nodes = np.empty((output_count, max_nodes), dtype=np.int32)
-    new_preds = np.empty((output_count, num_edges), dtype=np.int32)
-    new_via_inv = np.empty((output_count, num_edges), dtype=np.bool_)
-    new_fwd_eidx = np.empty((output_count, num_edges), dtype=np.int32)
-    w = 0
-    for path_idx in range(len(paths_nodes)):
-        if w >= output_count:
-            break
-        key = (
-            int(paths_nodes[path_idx, subj_col]),
-            int(paths_nodes[path_idx, obj_col]),
-        )
-        if key in edge_index:
-            for pred_idx, via_inverse, fwd_edge_idx in edge_index[key]:
-                if w >= output_count:
-                    break
-                new_nodes[w] = paths_nodes[path_idx]
-                new_preds[w] = paths_preds[path_idx]
-                new_preds[w, join_idx] = pred_idx
-                new_via_inv[w] = paths_via_inverse[path_idx]
-                new_via_inv[w, join_idx] = via_inverse
-                new_fwd_eidx[w] = paths_fwd_edge_idx[path_idx]
-                new_fwd_eidx[w, join_idx] = fwd_edge_idx
-                w += 1
+    # Output row -> (source path, matching edge)
+    path_of_row = np.repeat(np.arange(len(path_keys)), counts)
+    run_starts = np.repeat(np.cumsum(counts) - counts, counts)
+    offset_in_run = np.arange(output_count) - run_starts
+    edge_of_row = edge_order[np.repeat(lo, counts) + offset_in_run]
 
-    return new_nodes, new_preds, new_via_inv, new_fwd_eidx
-
-
-def _join_on_subject(
-    paths_nodes,
-    paths_preds,
-    paths_via_inverse,
-    paths_fwd_edge_idx,
-    edge_data,
-    subj_col,
-    obj_col,
-    join_idx,
-    max_nodes,
-    num_edges,
-    get_pred_idx,
-    logger: Optional[logging.Logger] = None,
-):
-    """Join on subject node, add object node."""
-    logger = logger if logger is not None else logging.getLogger(__name__)
-    edge_index = defaultdict(list)
-    for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
-        edge_index[subj_idx].append(
-            (get_pred_idx(predicate), obj_idx, via_inverse, fwd_edge_idx)
-        )
-
-    # Pass 1: Count
-    output_count = 0
-    for path_idx in range(len(paths_nodes)):
-        sidx = int(paths_nodes[path_idx, subj_col])
-        if sidx in edge_index:
-            output_count += len(edge_index[sidx])
-    if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        logger.warning(
-            "Truncating %s intermediate paths to %s",
-            f"{output_count:,}",
-            f"{MAX_PATH_LIMIT:,}",
-        )
-        output_count = MAX_PATH_LIMIT
-
-    # Pass 2: Fill
-    new_nodes = np.empty((output_count, max_nodes), dtype=np.int32)
-    new_preds = np.empty((output_count, num_edges), dtype=np.int32)
-    new_via_inv = np.empty((output_count, num_edges), dtype=np.bool_)
-    new_fwd_eidx = np.empty((output_count, num_edges), dtype=np.int32)
-    w = 0
-    for path_idx in range(len(paths_nodes)):
-        if w >= output_count:
-            break
-        sidx = int(paths_nodes[path_idx, subj_col])
-        if sidx in edge_index:
-            for pred_idx, obj_idx, via_inverse, fwd_edge_idx in edge_index[sidx]:
-                if w >= output_count:
-                    break
-                new_nodes[w] = paths_nodes[path_idx]
-                new_nodes[w, obj_col] = obj_idx
-                new_preds[w] = paths_preds[path_idx]
-                new_preds[w, join_idx] = pred_idx
-                new_via_inv[w] = paths_via_inverse[path_idx]
-                new_via_inv[w, join_idx] = via_inverse
-                new_fwd_eidx[w] = paths_fwd_edge_idx[path_idx]
-                new_fwd_eidx[w, join_idx] = fwd_edge_idx
-                w += 1
-
-    return new_nodes, new_preds, new_via_inv, new_fwd_eidx
-
-
-def _join_on_object(
-    paths_nodes,
-    paths_preds,
-    paths_via_inverse,
-    paths_fwd_edge_idx,
-    edge_data,
-    subj_col,
-    obj_col,
-    join_idx,
-    max_nodes,
-    num_edges,
-    get_pred_idx,
-    logger: Optional[logging.Logger] = None,
-):
-    """Join on object node, add subject node."""
-    logger = logger if logger is not None else logging.getLogger(__name__)
-    edge_index = defaultdict(list)
-    for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
-        edge_index[obj_idx].append(
-            (subj_idx, get_pred_idx(predicate), via_inverse, fwd_edge_idx)
-        )
-
-    # Pass 1: Count
-    output_count = 0
-    for path_idx in range(len(paths_nodes)):
-        oidx = int(paths_nodes[path_idx, obj_col])
-        if oidx in edge_index:
-            output_count += len(edge_index[oidx])
-    if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        logger.warning(
-            "Truncating %s intermediate paths to %s",
-            f"{output_count:,}",
-            f"{MAX_PATH_LIMIT:,}",
-        )
-        output_count = MAX_PATH_LIMIT
-
-    # Pass 2: Fill
-    new_nodes = np.empty((output_count, max_nodes), dtype=np.int32)
-    new_preds = np.empty((output_count, num_edges), dtype=np.int32)
-    new_via_inv = np.empty((output_count, num_edges), dtype=np.bool_)
-    new_fwd_eidx = np.empty((output_count, num_edges), dtype=np.int32)
-    w = 0
-    for path_idx in range(len(paths_nodes)):
-        if w >= output_count:
-            break
-        oidx = int(paths_nodes[path_idx, obj_col])
-        if oidx in edge_index:
-            for sidx, pred_idx, via_inverse, fwd_edge_idx in edge_index[oidx]:
-                if w >= output_count:
-                    break
-                new_nodes[w] = paths_nodes[path_idx]
-                new_nodes[w, subj_col] = sidx
-                new_preds[w] = paths_preds[path_idx]
-                new_preds[w, join_idx] = pred_idx
-                new_via_inv[w] = paths_via_inverse[path_idx]
-                new_via_inv[w, join_idx] = via_inverse
-                new_fwd_eidx[w] = paths_fwd_edge_idx[path_idx]
-                new_fwd_eidx[w, join_idx] = fwd_edge_idx
-                w += 1
-
-    return new_nodes, new_preds, new_via_inv, new_fwd_eidx
-
-
-def _join_cartesian(
-    paths_nodes,
-    paths_preds,
-    paths_via_inverse,
-    paths_fwd_edge_idx,
-    edge_data,
-    subj_col,
-    obj_col,
-    join_idx,
-    max_nodes,
-    num_edges,
-    get_pred_idx,
-    logger: Optional[logging.Logger] = None,
-):
-    """Neither node in paths - cartesian product."""
-    logger = logger if logger is not None else logging.getLogger(__name__)
-    output_count = len(paths_nodes) * len(edge_data)
-    if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        logger.warning(
-            "Truncating %s intermediate paths to %s",
-            f"{output_count:,}",
-            f"{MAX_PATH_LIMIT:,}",
-        )
-        output_count = MAX_PATH_LIMIT
-
-    new_nodes = np.empty((output_count, max_nodes), dtype=np.int32)
-    new_preds = np.empty((output_count, num_edges), dtype=np.int32)
-    new_via_inv = np.empty((output_count, num_edges), dtype=np.bool_)
-    new_fwd_eidx = np.empty((output_count, num_edges), dtype=np.int32)
-    w = 0
-    for path_idx in range(len(paths_nodes)):
-        if w >= output_count:
-            break
-        for subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx in edge_data:
-            if w >= output_count:
-                break
-            new_nodes[w] = paths_nodes[path_idx]
-            new_nodes[w, subj_col] = subj_idx
-            new_nodes[w, obj_col] = obj_idx
-            new_preds[w] = paths_preds[path_idx]
-            new_preds[w, join_idx] = get_pred_idx(predicate)
-            new_via_inv[w] = paths_via_inverse[path_idx]
-            new_via_inv[w, join_idx] = via_inverse
-            new_fwd_eidx[w] = paths_fwd_edge_idx[path_idx]
-            new_fwd_eidx[w, join_idx] = fwd_edge_idx
-            w += 1
+    new_nodes = paths_nodes[path_of_row]
+    for col, values in new_node_cols.items():
+        new_nodes[:, col] = values[edge_of_row]
+    new_preds = paths_preds[path_of_row]
+    new_preds[:, join_idx] = edge.pred[edge_of_row]
+    new_via_inv = paths_via_inverse[path_of_row]
+    new_via_inv[:, join_idx] = edge.via_inverse[edge_of_row]
+    new_fwd_eidx = paths_fwd_edge_idx[path_of_row]
+    new_fwd_eidx[:, join_idx] = edge.fwd_edge_idx[edge_of_row]
 
     return new_nodes, new_preds, new_via_inv, new_fwd_eidx
 

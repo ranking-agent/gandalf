@@ -5,6 +5,7 @@ import gc
 import logging
 import time
 import uuid
+import weakref
 from collections import defaultdict
 from typing import Any, Optional, Union, cast
 
@@ -215,11 +216,9 @@ def _lookup_inner(
         else:
             logger.debug("Using provided BMT instance")
 
-    # Create predicate expander for handling symmetric/inverse predicates at query time
-    predicate_expander = PredicateExpander(bmt)
-
-    # Create qualifier expander for handling qualifier value hierarchy at query time
-    qualifier_expander = QualifierExpander(bmt)
+    # Expanders for symmetric/inverse predicates and the qualifier value
+    # hierarchy, shared by every query on this BMT so their caches persist
+    predicate_expander, qualifier_expander = _expanders_for(bmt)
 
     original_query_graph = query["message"]["query_graph"]
     query_graph = copy.deepcopy(original_query_graph)
@@ -252,12 +251,27 @@ def _lookup_inner(
         "Query graph: %s nodes, %s edges", len(original_nodes), len(original_edges)
     )
 
+    # Graph node indices bound to each qnode: a pinned qnode's ids to start
+    # with, then whatever each processed edge connected it to.  Bindings are
+    # carried between edges as indices -- never as node ID strings, which
+    # would cost a node-store read per node to produce and another to turn
+    # back into an index for the next edge.  A pinned qnode whose ids are
+    # all unknown to the graph is bound to nothing (not left unpinned).
+    bound_idxes: dict[str, list[int]] = {
+        qnode_id: _resolve_node_idxes(graph, qnode["ids"])
+        for qnode_id, qnode in subqgraph["nodes"].items()
+        if len(qnode.get("ids", [])) > 0
+    }
+    # Binding counts that replace a qnode's own ids for the query planner:
+    # set once an edge query has discovered the qnode's nodes.
+    discovered_counts: dict[str, int] = {}
+
     # Process edges one at a time
     while len(subqgraph["edges"].keys()) > 0:
         deadline.check("edge query")
 
         # Get next edge to query
-        next_edge_id, next_edge = get_next_qedge(subqgraph)
+        next_edge_id, next_edge = get_next_qedge(subqgraph, discovered_counts)
 
         qedge_cm = prof.stage("qedge", qedge_id=next_edge_id)
         qedge_cm.__enter__()
@@ -273,22 +287,9 @@ def _lookup_inner(
         start_node = subqgraph["nodes"][next_edge["subject"]]
         end_node = subqgraph["nodes"][next_edge["object"]]
 
-        # Get pinned node indices
-        start_node_idxes = None
-        if len(start_node.get("ids", [])) > 0:
-            start_node_idxes = [
-                graph.get_node_idx(node_id)
-                for node_id in start_node["ids"]
-                if graph.get_node_idx(node_id) is not None
-            ]
-
-        end_node_idxes = None
-        if len(end_node.get("ids", [])) > 0:
-            end_node_idxes = [
-                graph.get_node_idx(node_id)
-                for node_id in end_node["ids"]
-                if graph.get_node_idx(node_id) is not None
-            ]
+        # Node indices bound to each end, or None where the end is unpinned
+        start_node_idxes = bound_idxes.get(next_edge["subject"])
+        end_node_idxes = bound_idxes.get(next_edge["object"])
 
         # Handle subclass edges with dedicated traversal
         if next_edge.get("_subclass"):
@@ -372,7 +373,8 @@ def _lookup_inner(
             qedge_cm.__exit__(None, None, None)
             break
 
-        # Update subgraph with discovered nodes for next iteration
+        # Bind both ends to the nodes this edge discovered, for the edges
+        # still to be queried
         discovered_subjects = set()
         discovered_objects = set()
 
@@ -382,17 +384,19 @@ def _lookup_inner(
                 # subj_idx -> obj_idx, but the query direction is reversed.
                 # So subj_idx corresponds to the query's object node and
                 # obj_idx corresponds to the query's subject node.
-                discovered_subjects.add(graph.get_node_id(obj_idx))
-                discovered_objects.add(graph.get_node_id(subj_idx))
+                discovered_subjects.add(obj_idx)
+                discovered_objects.add(subj_idx)
             else:
-                discovered_subjects.add(graph.get_node_id(subj_idx))
-                discovered_objects.add(graph.get_node_id(obj_idx))
+                discovered_subjects.add(subj_idx)
+                discovered_objects.add(obj_idx)
 
-        # Update node IDs in subgraph
-        if len(discovered_subjects) > 0:
-            subqgraph["nodes"][next_edge["subject"]]["ids"] = list(discovered_subjects)
-        if len(discovered_objects) > 0:
-            subqgraph["nodes"][next_edge["object"]]["ids"] = list(discovered_objects)
+        for qnode_id, discovered in (
+            (next_edge["subject"], discovered_subjects),
+            (next_edge["object"], discovered_objects),
+        ):
+            if len(discovered) > 0:
+                bound_idxes[qnode_id] = list(discovered)
+                discovered_counts[qnode_id] = len(discovered)
 
         # Remove processed edge
         subqgraph["edges"].pop(next_edge_id)
@@ -490,7 +494,7 @@ def _lookup_inner(
 _DEADLINE_CHECK_INTERVAL = 4096
 
 
-def _append_edge_binding(binding: dict, edge_kg_id: str) -> None:
+def _append_edge_binding(binding: dict, bound: set, edge_kg_id: str) -> None:
     """Add ``edge_kg_id`` to a QEdge's EdgeBinding unless already present.
 
     A TRAPI 2.0 EdgeBinding lists every knowledge-graph edge bound to one
@@ -500,11 +504,77 @@ def _append_edge_binding(binding: dict, edge_kg_id: str) -> None:
 
     Args:
         binding: The EdgeBinding for one QEdge (mutated in place).
+        bound: The ids already in ``binding["ids"]``, kept alongside it so the
+            membership test does not scan the list (mutated in place).
         edge_kg_id: The knowledge-graph edge id to bind.
+
+    >>> binding, bound = {"ids": []}, set()
+    >>> for edge_id in ["e1", "e2", "e1"]:
+    ...     _append_edge_binding(binding, bound, edge_id)
+    >>> binding
+    {'ids': ['e1', 'e2']}
     """
-    ids = binding["ids"]
-    if edge_kg_id not in ids:
-        ids.append(edge_kg_id)
+    if edge_kg_id not in bound:
+        bound.add(edge_kg_id)
+        binding["ids"].append(edge_kg_id)
+
+
+def _group_rows(keys: np.ndarray) -> list[np.ndarray]:
+    """Group the row indices of *keys* by identical rows.
+
+    Groups come in order of each group's first row, and each group's row
+    indices ascend -- the order a dict keyed on the row, filled row by row,
+    would give.  A key with no columns puts every row in one group.
+
+    >>> keys = np.array([[5, 1], [2, 2], [5, 1], [2, 3], [2, 2]])
+    >>> [g.tolist() for g in _group_rows(keys)]
+    [[0, 2], [1, 4], [3]]
+    >>> [g.tolist() for g in _group_rows(np.empty((3, 0), dtype=np.int32))]
+    [[0, 1, 2]]
+    """
+    if keys.shape[1] == 0:
+        return [np.arange(len(keys))]
+    _, first_rows, group_of_row = np.unique(
+        keys, axis=0, return_index=True, return_inverse=True
+    )
+    group_of_row = group_of_row.reshape(-1)
+    rows_by_group = np.argsort(group_of_row, kind="stable")
+    boundaries = np.cumsum(np.bincount(group_of_row))[:-1]
+    groups = np.split(rows_by_group, boundaries)
+    return [groups[g] for g in np.argsort(first_rows)]
+
+
+def _edge_content_key(graph, fwd_eidx: int) -> tuple:
+    """The qualifiers-and-sources part of an edge's dedup key in a result."""
+    quals = graph.edge_properties.get_qualifiers(fwd_eidx)
+    sources = graph.edge_properties.get_sources(fwd_eidx)
+    return (
+        tuple(
+            sorted(
+                (q.get("qualifier_type_id", ""), q.get("qualifier_value", ""))
+                for q in (quals or [])
+            )
+        ),
+        tuple(
+            sorted(
+                (s.get("resource_id", ""), s.get("resource_role", ""))
+                for s in (sources or [])
+            )
+        ),
+    )
+
+
+def _index_subclass_edges_by_child(sc_edges: list) -> dict[str, list]:
+    """Index a group's subclass edges by child node (query-direction subject).
+
+    Self-edges (the depth-0 identity match, child == parent) support nothing
+    and are left out.  Each child's edges keep their original order.
+    """
+    by_child: dict[str, list] = defaultdict(list)
+    for sc_edge in sc_edges:
+        if sc_edge["subject"] != sc_edge["object"]:
+            by_child[sc_edge.get("_query_subject")].append(sc_edge)
+    return by_child
 
 
 def _build_response(
@@ -596,61 +666,50 @@ def _build_response(
             required = original_query_graph["nodes"][qn_id].get("ids", [])
             all_mode_requirements[qn_id] = set(required)
 
-    # Group paths by unique node binding combinations using numpy arrays.
-    # Stores path *indices* (ints) instead of enriched dicts (~15 GB savings
-    # for 5M paths).
-    # For ALL/COLLATE nodes, exclude them from the key so paths with
-    # different bindings for those nodes merge into the same group.
-    node_binding_groups: dict[tuple, list[int]] = defaultdict(list)
-
-    for path_idx in range(num_paths):
-        key_pairs = []
-        for col in range(pa_num_node_cols):
-            qnode_id = col_to_qnode[col]
-            if qnode_id in superclass_qnodes:
-                continue
-            if qnode_id in all_mode_nodes or qnode_id in collate_mode_nodes:
-                continue
-            node_idx = int(pa_nodes[path_idx, col])
-            bound_id = node_id_cache[node_idx]
-            if qnode_id in qnode_to_superclass:
-                sc_qnode = qnode_to_superclass[qnode_id]
-                if sc_qnode in qnode_to_col:
-                    sc_col = qnode_to_col[sc_qnode]
-                    sc_node_idx = int(pa_nodes[path_idx, sc_col])
-                    sc_id = node_id_cache[sc_node_idx]
-                    if sc_id != bound_id:
-                        bound_id = sc_id
-            key_pairs.append((qnode_id, bound_id))
-        node_key = tuple(sorted(key_pairs))
-        node_binding_groups[node_key].append(path_idx)
+    # Group paths into results by the nodes they bind.  A result is
+    # identified by the node bound to each qnode, except that a
+    # subclass-expanded qnode is identified by its superclass's binding (the
+    # node the client asked about), and ALL/COLLATE qnodes are left out so
+    # that paths differing only there merge into one result.  Node indices
+    # map one-to-one onto node IDs, so grouping on indices is grouping on IDs.
+    key_cols = []
+    for col in range(pa_num_node_cols):
+        qnode_id = col_to_qnode[col]
+        if (
+            qnode_id in superclass_qnodes
+            or qnode_id in all_mode_nodes
+            or qnode_id in collate_mode_nodes
+        ):
+            continue
+        sc_qnode = qnode_to_superclass.get(qnode_id)
+        key_cols.append(qnode_to_col[sc_qnode] if sc_qnode in qnode_to_col else col)
+    path_groups = _group_rows(pa_nodes[:, key_cols])
 
     # For ALL-mode nodes, filter groups to only those where all required
     # IDs appear across the group's paths.
     if all_mode_requirements:
-        filtered_groups = {}
-        for node_key, path_indices in node_binding_groups.items():
+        filtered_groups = []
+        for path_indices in path_groups:
             all_satisfied = True
             for qn_id, required_ids in all_mode_requirements.items():
                 if qn_id not in qnode_to_col:
                     all_satisfied = False
                     break
                 col = qnode_to_col[qn_id]
-                found_ids = set()
-                for pidx in path_indices:
-                    nidx = int(pa_nodes[pidx, col])
-                    found_ids.add(node_id_cache[nidx])
+                found_ids = {
+                    node_id_cache[nidx] for nidx in pa_nodes[path_indices, col].tolist()
+                }
                 if not required_ids.issubset(found_ids):
                     all_satisfied = False
                     break
             if all_satisfied:
-                filtered_groups[node_key] = path_indices
-        node_binding_groups = filtered_groups
+                filtered_groups.append(path_indices)
+        path_groups = filtered_groups
 
     t_grouped = time.perf_counter()
     logger.debug(
         "  Grouped into %s unique node paths (%.2fs)",
-        f"{len(node_binding_groups):,}",
+        f"{len(path_groups):,}",
         t_grouped - t_post_start,
     )
 
@@ -669,18 +728,49 @@ def _build_response(
                 edge_detail_map = graph.lmdb_store.get_batch(unique_eidx)
             edge_id_map = graph.get_edge_ids_batch(unique_eidx)
 
+    kg_nodes = response["message"]["knowledge_graph"]["nodes"]
+    kg_edges = response["message"]["knowledge_graph"]["edges"]
+    aux_graphs = response["message"]["auxiliary_graphs"]
+
+    # Every node bound on some path, by ID: subclass-edge endpoints are
+    # always path nodes, so they resolve here rather than in the node store.
+    node_idx_by_id = {node_id: idx for idx, node_id in node_id_cache.items()}
+
+    # Each path column's qedge and the node columns of its query-direction
+    # subject and object.
+    edge_cols = []
+    for col in range(pa_num_edges):
+        qedge_id = col_to_qedge[col]
+        edge_def = query_graph["edges"][qedge_id]
+        edge_cols.append(
+            (
+                col,
+                qedge_id,
+                qnode_to_col[edge_def["subject"]],
+                qnode_to_col[edge_def["object"]],
+            )
+        )
+
+    # The (qualifiers, sources) part of each edge's dedup key, computed once
+    # per distinct edge rather than once per path through it.
+    edge_content_keys: dict[int, tuple] = {}
+
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
     # Edge dicts are created only for unique edges (not per-path).
-    for group_number, (node_key, path_indices) in enumerate(
-        node_binding_groups.items()
-    ):
+    for group_number, path_indices in enumerate(path_groups):
         # Checking the clock per result would cost a syscall per result on
         # multi-million-result queries, so sample it instead.
         if deadline and group_number % _DEADLINE_CHECK_INTERVAL == 0:
             deadline.check("response building")
 
-        first_idx = path_indices[0]
+        # This group's rows as Python lists: one conversion per array
+        # instead of a NumPy scalar lookup per cell.
+        rows_nodes = pa_nodes[path_indices].tolist()
+        rows_preds = pa_preds[path_indices].tolist()
+        rows_via_inv = pa_via_inv[path_indices].tolist()
+        rows_fwd_eidx = pa_fwd_eidx[path_indices].tolist()
+        first_nodes = rows_nodes[0]
 
         result: dict[str, Any] = {
             "node_bindings": {},
@@ -706,44 +796,37 @@ def _build_response(
                 for rid in sorted(all_mode_requirements[qnode_id]):
                     rid_idx = graph.get_node_idx(rid)
                     if rid_idx is not None and rid_idx in node_cache:
-                        response["message"]["knowledge_graph"]["nodes"][rid] = (
-                            node_cache[rid_idx]
-                        )
+                        kg_nodes[rid] = node_cache[rid_idx]
                     bound_ids.append(rid)
                 result["node_bindings"][qnode_id] = {"ids": bound_ids}
             elif qnode_id in collate_mode_nodes:
                 # COLLATE: collect all distinct bound entities across paths
                 seen_ids = {}
-                for pidx in path_indices:
-                    nidx = int(pa_nodes[pidx, col])
+                for row in rows_nodes:
+                    nidx = row[col]
                     nid = node_id_cache[nidx]
                     if nid not in seen_ids:
                         seen_ids[nid] = nidx
                 for nid, nidx in seen_ids.items():
-                    response["message"]["knowledge_graph"]["nodes"][nid] = node_cache[
-                        nidx
-                    ]
+                    kg_nodes[nid] = node_cache[nidx]
                 result["node_bindings"][qnode_id] = {"ids": list(seen_ids)}
             else:
                 # BATCH (default): single binding from first path
-                node_idx = int(pa_nodes[first_idx, col])
+                node_idx = first_nodes[col]
                 node = node_cache[node_idx]
                 node_id = node_id_cache[node_idx]
-                response["message"]["knowledge_graph"]["nodes"][node_id] = node
+                kg_nodes[node_id] = node
 
                 bound_id = node_id
                 if qnode_id in qnode_to_superclass:
                     sc_qnode = qnode_to_superclass[qnode_id]
                     if sc_qnode in qnode_to_col:
-                        sc_col = qnode_to_col[sc_qnode]
-                        sc_node_idx = int(pa_nodes[first_idx, sc_col])
+                        sc_node_idx = first_nodes[qnode_to_col[sc_qnode]]
                         sc_node = node_cache[sc_node_idx]
                         sc_node_id = node_id_cache[sc_node_idx]
                         if sc_node_id != node_id:
                             bound_id = sc_node_id
-                            response["message"]["knowledge_graph"]["nodes"][
-                                sc_node_id
-                            ] = sc_node
+                            kg_nodes[sc_node_id] = sc_node
 
                 result["node_bindings"][qnode_id] = {"ids": [bound_id]}
 
@@ -753,20 +836,17 @@ def _build_response(
         edge_bindings_by_qedge = defaultdict(list)
         edge_seen_keys: dict[str, set] = defaultdict(set)
 
-        for path_idx in path_indices:
-            for col in range(pa_num_edges):
-                qedge_id = col_to_qedge[col]
-                pred_idx = int(pa_preds[path_idx, col])
-                predicate = idx_to_predicate[pred_idx]
-                is_inverse = bool(pa_via_inv[path_idx, col])
-                fwd_eidx = int(pa_fwd_eidx[path_idx, col])
+        for nodes_row, preds_row, via_inv_row, fwd_eidx_row in zip(
+            rows_nodes, rows_preds, rows_via_inv, rows_fwd_eidx
+        ):
+            for col, qedge_id, subj_col_e, obj_col_e in edge_cols:
+                predicate = idx_to_predicate[preds_row[col]]
+                is_inverse = via_inv_row[col]
+                fwd_eidx = fwd_eidx_row[col]
 
                 # Determine actual (stored) edge direction
-                edge_def = query_graph["edges"][qedge_id]
-                subj_col_e = qnode_to_col[edge_def["subject"]]
-                obj_col_e = qnode_to_col[edge_def["object"]]
-                query_subj_idx = int(pa_nodes[path_idx, subj_col_e])
-                query_obj_idx = int(pa_nodes[path_idx, obj_col_e])
+                query_subj_idx = nodes_row[subj_col_e]
+                query_obj_idx = nodes_row[obj_col_e]
 
                 if is_inverse:
                     actual_subj_idx, actual_obj_idx = query_obj_idx, query_subj_idx
@@ -780,24 +860,11 @@ def _build_response(
                 if lightweight or fwd_eidx < 0:
                     edge_key: tuple = (subj_id, predicate, obj_id, (), ())
                 else:
-                    quals = graph.edge_properties.get_qualifiers(fwd_eidx)
-                    quals_key = tuple(
-                        sorted(
-                            (
-                                q.get("qualifier_type_id", ""),
-                                q.get("qualifier_value", ""),
-                            )
-                            for q in (quals or [])
-                        )
-                    )
-                    sources = graph.edge_properties.get_sources(fwd_eidx)
-                    sources_key = tuple(
-                        sorted(
-                            (s.get("resource_id", ""), s.get("resource_role", ""))
-                            for s in (sources or [])
-                        )
-                    )
-                    edge_key = (subj_id, predicate, obj_id, quals_key, sources_key)
+                    content_key = edge_content_keys.get(fwd_eidx)
+                    if content_key is None:
+                        content_key = _edge_content_key(graph, fwd_eidx)
+                        edge_content_keys[fwd_eidx] = content_key
+                    edge_key = (subj_id, predicate, obj_id) + content_key
 
                 if edge_key not in edge_seen_keys[qedge_id]:
                     edge_seen_keys[qedge_id].add(edge_key)
@@ -864,12 +931,18 @@ def _build_response(
 
                     edge_bindings_by_qedge[qedge_id].append(edge_props)
 
+        # This group's subclass edges, indexed by the child they derive from
+        # (built on first use, per subclass qedge).
+        subclass_edges_by_child: dict[str, dict[str, list]] = {}
+
         # Add edges to knowledge graph and result bindings
         for edge_id, edges in edge_bindings_by_qedge.items():
             if edge_id in subclass_qedges:
                 continue
 
-            result["analyses"][0]["edge_bindings"][edge_id] = {"ids": []}
+            binding: dict = {"ids": []}
+            bound_kg_ids: set = set()
+            result["analyses"][0]["edge_bindings"][edge_id] = binding
 
             attached = qedge_attached_subclass.get(edge_id, [])
 
@@ -883,7 +956,7 @@ def _build_response(
             # present.
             for edge in edges:
                 edge_kg_id = edge.pop("_edge_id", None) or str(uuid.uuid4())[:8]
-                response["message"]["knowledge_graph"]["edges"][edge_kg_id] = edge
+                kg_edges[edge_kg_id] = edge
 
                 if attached:
                     subclass_edge_kg_ids = []
@@ -893,51 +966,46 @@ def _build_response(
                         # The endpoint of THIS base edge that carries the subclass
                         # expansion, in query direction (never stored direction,
                         # which is swapped for inverse edges).
-                        base_child = edge.get(
-                            "_query_subject"
-                            if which_end == "subject"
-                            else "_query_object"
+                        base_child = cast(
+                            str,
+                            edge.get(
+                                "_query_subject"
+                                if which_end == "subject"
+                                else "_query_object"
+                            ),
                         )
 
-                        sc_edges = edge_bindings_by_qedge.get(sc_edge_id, [])
-                        for sc_edge in sc_edges:
-                            if sc_edge["subject"] == sc_edge["object"]:
-                                continue
-                            # Attach only the subclass edge belonging to this
-                            # derivation: its child (the subclass qedge subject,
-                            # in query direction) must be the base edge's expanded
-                            # endpoint.  Otherwise every sibling subclass edge in
-                            # the group would be attached to every base edge,
-                            # cross-contaminating support graphs and collapsing
-                            # distinct inferred edges into one.
-                            if sc_edge.get("_query_subject") != base_child:
-                                continue
+                        by_child = subclass_edges_by_child.get(sc_edge_id)
+                        if by_child is None:
+                            by_child = _index_subclass_edges_by_child(
+                                edge_bindings_by_qedge.get(sc_edge_id, [])
+                            )
+                            subclass_edges_by_child[sc_edge_id] = by_child
+
+                        # Attach only the subclass edges belonging to this
+                        # derivation: their child (the subclass qedge subject,
+                        # in query direction) must be the base edge's expanded
+                        # endpoint.  Otherwise every sibling subclass edge in
+                        # the group would be attached to every base edge,
+                        # cross-contaminating support graphs and collapsing
+                        # distinct inferred edges into one.
+                        for sc_edge in by_child.get(base_child, ()):
                             sc_kg_id = sc_edge.get("_edge_id") or str(uuid.uuid4())[:8]
-                            response["message"]["knowledge_graph"]["edges"][
-                                sc_kg_id
-                            ] = sc_edge
+                            kg_edges[sc_kg_id] = sc_edge
                             subclass_edge_kg_ids.append(sc_kg_id)
 
                             # Ensure subclass edge endpoint nodes are in KG nodes.
                             # Child nodes from subclass expansion may not have been
                             # added above (only first_idx path nodes are added).
                             for ep_id in (sc_edge["subject"], sc_edge["object"]):
-                                if (
-                                    ep_id
-                                    not in response["message"]["knowledge_graph"][
-                                        "nodes"
-                                    ]
-                                ):
-                                    ep_idx = graph.get_node_idx(ep_id)
-                                    if ep_idx is not None and ep_idx in node_cache:
-                                        response["message"]["knowledge_graph"]["nodes"][
-                                            ep_id
-                                        ] = node_cache[ep_idx]
+                                if ep_id not in kg_nodes:
+                                    ep_idx = node_idx_by_id.get(ep_id)
+                                    if ep_idx is not None:
+                                        kg_nodes[ep_id] = node_cache[ep_idx]
 
                         # Get superclass node ID for endpoint override
                         if sc_qnode_id in qnode_to_col:
-                            sc_col = qnode_to_col[sc_qnode_id]
-                            sc_node_idx = int(pa_nodes[first_idx, sc_col])
+                            sc_node_idx = first_nodes[qnode_to_col[sc_qnode_id]]
                             superclass_node_overrides[which_end] = node_id_cache[
                                 sc_node_idx
                             ]
@@ -947,15 +1015,12 @@ def _build_response(
                         composite_edge_id = "_".join(composite_edge_ids)
                         aux_graph_id = f"aux_{composite_edge_id}"
 
-                        if aux_graph_id not in response["message"]["auxiliary_graphs"]:
-                            response["message"]["auxiliary_graphs"][aux_graph_id] = {
+                        if aux_graph_id not in aux_graphs:
+                            aux_graphs[aux_graph_id] = {
                                 "edges": composite_edge_ids,
                             }
 
-                        if (
-                            composite_edge_id
-                            not in response["message"]["knowledge_graph"]["edges"]
-                        ):
+                        if composite_edge_id not in kg_edges:
                             # Use query-aligned IDs so the override maps to the
                             # correct endpoint regardless of stored edge direction.
                             qs = edge.get("_query_subject", edge["subject"])
@@ -993,24 +1058,13 @@ def _build_response(
                                     },
                                 ],
                             }
-                            response["message"]["knowledge_graph"]["edges"][
-                                composite_edge_id
-                            ] = inferred_edge
+                            kg_edges[composite_edge_id] = inferred_edge
 
-                        _append_edge_binding(
-                            result["analyses"][0]["edge_bindings"][edge_id],
-                            composite_edge_id,
-                        )
+                        _append_edge_binding(binding, bound_kg_ids, composite_edge_id)
                     else:
-                        _append_edge_binding(
-                            result["analyses"][0]["edge_bindings"][edge_id],
-                            edge_kg_id,
-                        )
+                        _append_edge_binding(binding, bound_kg_ids, edge_kg_id)
                 else:
-                    _append_edge_binding(
-                        result["analyses"][0]["edge_bindings"][edge_id],
-                        edge_kg_id,
-                    )
+                    _append_edge_binding(binding, bound_kg_ids, edge_kg_id)
 
         # A TRAPI 2.0 Analysis must bind at least one QEdge, and a Result's
         # analyses list must not be empty.  A result whose every qedge was a
@@ -1038,6 +1092,36 @@ def _build_response(
         t_built - t_grouped,
     )
     logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
+
+
+#: Predicate and qualifier expanders per BMT instance.  Each caches the BMT
+#: lookups it makes, so sharing them across queries means the Biolink
+#: hierarchy is walked once per process rather than once per query.  Keyed
+#: weakly so a discarded toolkit takes its expanders with it.
+_EXPANDERS: (
+    "weakref.WeakKeyDictionary[Any, tuple[PredicateExpander, QualifierExpander]]"
+) = weakref.WeakKeyDictionary()
+
+
+def _expanders_for(bmt) -> tuple[PredicateExpander, QualifierExpander]:
+    """The shared ``(PredicateExpander, QualifierExpander)`` for *bmt*.
+
+    Concurrent queries may both build a pair for a new toolkit; the loser's
+    is simply discarded.  The expanders' caches only ever gain entries that
+    are pure functions of the toolkit, so sharing them across threads is
+    safe under the GIL.
+    """
+    expanders = _EXPANDERS.get(bmt)
+    if expanders is None:
+        expanders = (PredicateExpander(bmt), QualifierExpander(bmt))
+        _EXPANDERS[bmt] = expanders
+    return expanders
+
+
+def _resolve_node_idxes(graph, node_ids) -> list[int]:
+    """Map node IDs to graph indices, dropping IDs the graph does not contain."""
+    idxes = (graph.get_node_idx(node_id) for node_id in node_ids)
+    return [idx for idx in idxes if idx is not None]
 
 
 def _rewrite_for_subclass(query_graph, subclass_depth=1):

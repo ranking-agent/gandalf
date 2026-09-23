@@ -24,11 +24,18 @@ class GraphFormatError(RuntimeError):
 
 
 def _load_npy(path: Path, mmap_mode: Literal["r+", "r", "w+", "c"] = "r") -> np.ndarray:
-    """Load a .npy file, optionally copying into RAM instead of memory-mapping."""
+    """Load a .npy file, optionally copying into RAM instead of memory-mapping.
+
+    A memory-mapped array is returned as a plain ``ndarray`` view of the
+    same mapping (no copy; the mmap stays alive through ``.base``).
+    ``np.memmap`` overrides ``__getitem__`` in Python, which makes every
+    scalar index about 3x slower than on an ``ndarray`` -- and traversal
+    indexes the CSR arrays one element at a time.
+    """
     arr: np.ndarray = np.load(path, mmap_mode=mmap_mode)
     if settings.load_mmaps_into_memory:
-        arr = np.array(arr)
-    return arr
+        return np.array(arr)
+    return np.asarray(arr)
 
 
 # Biolink's own "we don't know" member of both KnowledgeLevelEnum and
@@ -696,14 +703,56 @@ class CSRGraph:
             mask = predicates == pred_id
             return sources[mask]
 
+    def predicate_mask(self, predicates) -> np.ndarray:
+        """Boolean lookup table over predicate ids, True for *predicates*.
+
+        Indexing it with a slice of a CSR predicate array filters that slice
+        in one vectorized step.  Build it once per query and pass it to the
+        ``*_with_properties`` methods as ``predicate_mask``.  Predicates the
+        graph does not contain are ignored.
+        """
+        size = max(self.id_to_predicate, default=-1) + 1
+        mask = np.zeros(size, dtype=np.bool_)
+        for predicate in predicates:
+            pred_id = self.predicate_to_idx.get(predicate)
+            if pred_id is not None:
+                mask[pred_id] = True
+        return mask
+
+    def _positions_with_predicates(
+        self, predicates: np.ndarray, start: int, end: int, predicate_filter, mask
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Positions in ``[start, end)`` whose predicate passes, and those predicates.
+
+        *mask* (from :meth:`predicate_mask`) takes precedence over
+        *predicate_filter* (a collection of predicate strings); with neither,
+        every position passes.
+        """
+        pred_ids = predicates[start:end]
+        if mask is None and predicate_filter is not None:
+            mask = self.predicate_mask(predicate_filter)
+        if mask is None:
+            return np.arange(start, end), pred_ids
+        keep = np.flatnonzero(mask[pred_ids])
+        return keep + start, pred_ids[keep]
+
     def neighbors_with_properties(
-        self, node_idx: int, predicate_filter: Optional[list] = None
+        self,
+        node_idx: int,
+        predicate_filter: Optional[list] = None,
+        predicate_mask: Optional[np.ndarray] = None,
     ):
         """Get neighbors with edge properties (qualifiers + sources).
 
-        Predicate filtering is done FIRST (in-memory from CSR arrays),
+        Predicate filtering is done FIRST (vectorized over the CSR arrays),
         then qualifier/source properties are fetched only for matching
         edges — avoiding unnecessary dedup store lookups.
+
+        Args:
+            node_idx: Source node index.
+            predicate_filter: Optional collection of allowed predicate strings.
+            predicate_mask: Optional precomputed :meth:`predicate_mask`;
+                cheaper than ``predicate_filter`` when calling once per node.
 
         Returns list of (neighbor_idx, predicate_str, edge_props, fwd_edge_idx)
         tuples where edge_props = {"qualifiers": [...], "sources": [...]}.
@@ -713,23 +762,27 @@ class CSRGraph:
         """
         start = int(self.fwd_offsets[node_idx])
         end = int(self.fwd_offsets[node_idx + 1])
+        positions, pred_ids = self._positions_with_predicates(
+            self.fwd_predicates, start, end, predicate_filter, predicate_mask
+        )
 
-        result = []
-        for pos in range(start, end):
-            pred_id = int(self.fwd_predicates[pos])
-            pred_str = self.id_to_predicate[pred_id]
-
-            if predicate_filter is not None and pred_str not in predicate_filter:
-                continue
-
-            target = int(self.fwd_targets[pos])
-            props = self.edge_properties._get_props(pos)
-            result.append((target, pred_str, props, pos))
-
-        return result
+        id_to_predicate = self.id_to_predicate
+        get_props = self.edge_properties._get_props
+        return [
+            (target, id_to_predicate[pred_id], get_props(pos), pos)
+            for target, pred_id, pos in zip(
+                self.fwd_targets[positions].tolist(),
+                pred_ids.tolist(),
+                positions.tolist(),
+            )
+        ]
 
     def neighbors_filtered_by_targets(
-        self, node_idx: int, target_set: set, predicate_filter: Optional[set] = None
+        self,
+        node_idx: int,
+        target_set: set,
+        predicate_filter: Optional[set] = None,
+        predicate_mask: Optional[np.ndarray] = None,
     ):
         """Get outgoing neighbors that are in *target_set*, with properties.
 
@@ -742,6 +795,7 @@ class CSRGraph:
             node_idx: Source node index.
             target_set: Set of target node indices to keep.
             predicate_filter: Optional set of allowed predicate strings.
+            predicate_mask: Optional precomputed :meth:`predicate_mask`.
 
         Returns:
             List of (target_idx, predicate_str, edge_props, fwd_edge_idx) tuples
@@ -749,55 +803,54 @@ class CSRGraph:
         """
         start = int(self.fwd_offsets[node_idx])
         end = int(self.fwd_offsets[node_idx + 1])
+        positions, pred_ids = self._positions_with_predicates(
+            self.fwd_predicates, start, end, predicate_filter, predicate_mask
+        )
 
-        result = []
-        for pos in range(start, end):
-            target = int(self.fwd_targets[pos])
-            if target not in target_set:
-                continue
-
-            pred_id = int(self.fwd_predicates[pos])
-            pred_str = self.id_to_predicate[pred_id]
-
-            if predicate_filter is not None and pred_str not in predicate_filter:
-                continue
-
-            props = self.edge_properties._get_props(pos)
-            result.append((target, pred_str, props, pos))
-
-        return result
+        id_to_predicate = self.id_to_predicate
+        get_props = self.edge_properties._get_props
+        return [
+            (target, id_to_predicate[pred_id], get_props(pos), pos)
+            for target, pred_id, pos in zip(
+                self.fwd_targets[positions].tolist(),
+                pred_ids.tolist(),
+                positions.tolist(),
+            )
+            if target in target_set
+        ]
 
     def incoming_neighbors_with_properties(
-        self, node_idx, predicate_filter: Optional[list] = None
+        self,
+        node_idx,
+        predicate_filter: Optional[list] = None,
+        predicate_mask: Optional[np.ndarray] = None,
     ):
         """Get incoming neighbors with edge properties (qualifiers + sources).
 
         Uses the ``rev_to_fwd`` mapping for O(1) property lookup.  This
         correctly handles duplicate (src, dst, pred) edges that differ only
         in qualifiers / sources — each reverse-CSR position maps to its own
-        unique forward-CSR position.
+        unique forward-CSR position.  Filtering arguments are as for
+        :meth:`neighbors_with_properties`.
 
         Returns list of (src_idx, predicate, edge_props, fwd_edge_idx) tuples.
         """
         start = int(self.rev_offsets[node_idx])
         end = int(self.rev_offsets[node_idx + 1])
+        positions, pred_ids = self._positions_with_predicates(
+            self.rev_predicates, start, end, predicate_filter, predicate_mask
+        )
 
-        result = []
-        for pos in range(start, end):
-            src_idx = int(self.rev_sources[pos])
-            pred_id = int(self.rev_predicates[pos])
-            predicate = self.id_to_predicate[pred_id]
-
-            if predicate_filter is not None and predicate not in predicate_filter:
-                continue
-
-            # O(1) forward edge index lookup via rev_to_fwd mapping
-            fwd_idx = int(self.rev_to_fwd[pos])
-            props = self.edge_properties._get_props(fwd_idx)
-
-            result.append((src_idx, predicate, props, fwd_idx))
-
-        return result
+        id_to_predicate = self.id_to_predicate
+        get_props = self.edge_properties._get_props
+        return [
+            (src_idx, id_to_predicate[pred_id], get_props(fwd_idx), fwd_idx)
+            for src_idx, pred_id, fwd_idx in zip(
+                self.rev_sources[positions].tolist(),
+                pred_ids.tolist(),
+                self.rev_to_fwd[positions].tolist(),
+            )
+        ]
 
     def get_edges(self, node_idx):
         """Get all edges from a node as (neighbor_idx, predicate_str) tuples."""

@@ -1,6 +1,5 @@
 """"""
 
-import copy
 import math
 from collections import defaultdict
 
@@ -8,26 +7,29 @@ N = 1_000_000  # total number of nodes
 R = 25  # number of edges per node
 
 
-def get_next_qedge(qgraph):
-    """Get next qedge to solve."""
-    qgraph = copy.deepcopy(qgraph)
-    for qnode in qgraph["nodes"].values():
-        if (
-            qnode.get("set_interpretation") == "MANY"
-            and len(qnode.get("member_ids") or []) > 0
-        ):
-            # MCQ
-            qnode["ids"] = len(qnode["member_ids"])
-        elif qnode.get("ids") is not None:
-            qnode["ids"] = len(qnode["ids"])
-        else:
-            qnode["ids"] = N
+def get_next_qedge(qgraph, bound_counts=None):
+    """Get next qedge to solve.
+
+    Args:
+        qgraph: The (remaining) query graph.
+        bound_counts: Optional ``{qnode_id: n}`` giving the number of graph
+            nodes already bound to a qnode, for callers that track bindings
+            outside the qgraph.  Overrides the count derived from that
+            qnode's ``ids``.
+    """
+    num_ids = get_num_ids(qgraph)
+    if bound_counts:
+        num_ids.update(
+            (qnode_id, n) for qnode_id, n in bound_counts.items() if qnode_id in num_ids
+        )
+    adjacency_mat = get_adjacency_matrix(qgraph)
     pinnednesses = {
-        qnode_id: get_pinnedness(qgraph, qnode_id) for qnode_id in qgraph["nodes"]
+        qnode_id: -compute_log_expected_n(adjacency_mat, num_ids, qnode_id)
+        for qnode_id in qgraph["nodes"]
     }
     efforts = {
-        qedge_id: math.log(qgraph["nodes"][qedge["subject"]]["ids"])
-        + math.log(qgraph["nodes"][qedge["object"]]["ids"])
+        qedge_id: math.log(num_ids[qedge["subject"]])
+        + math.log(num_ids[qedge["object"]])
         for qedge_id, qedge in qgraph["edges"].items()
     }
     edge_priorities = {
@@ -86,8 +88,31 @@ def get_adjacency_matrix(qgraph):
 
 
 def get_num_ids(qgraph):
-    """Get the number of ids for each node."""
-    return {qnode_id: qnode["ids"] for qnode_id, qnode in qgraph["nodes"].items()}
+    """Get the number of ids bound to each node (``N`` for an unpinned node).
+
+    Reads the counts without copying the id lists, which after a traversal
+    step can hold every node the step discovered.
+
+    >>> get_num_ids({"nodes": {
+    ...     "a": {"ids": ["X:1", "X:2"]},
+    ...     "b": {},
+    ...     "c": {"set_interpretation": "MANY", "member_ids": ["X:3"]},
+    ... }})
+    {'a': 2, 'b': 1000000, 'c': 1}
+    """
+    return {qnode_id: _num_ids(qnode) for qnode_id, qnode in qgraph["nodes"].items()}
+
+
+def _num_ids(qnode):
+    """Count the ids bound to one qnode, treating a multi-curie qnode by its members."""
+    if (
+        qnode.get("set_interpretation") == "MANY"
+        and len(qnode.get("member_ids") or []) > 0
+    ):
+        return len(qnode["member_ids"])
+    if qnode.get("ids") is not None:
+        return len(qnode["ids"])
+    return N
 
 
 def connected_edges(qgraph, node_id):

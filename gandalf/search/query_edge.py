@@ -50,6 +50,8 @@ def query_subclass_edge(
     if end_idxes is None:
         return matches
 
+    subclass_mask = graph.predicate_mask([subclass_pred])
+
     for superclass_idx in end_idxes:
         # BFS: current frontier -> next frontier, up to `depth` levels
         # Depth 0 = identity match (the node itself)
@@ -65,12 +67,12 @@ def query_subclass_edge(
                 # Walk incoming subclass_of edges: child --subclass_of--> node_idx
                 for (
                     child_idx,
-                    predicate,
+                    _predicate,
                     _props,
                     fwd_eidx,
-                ) in graph.incoming_neighbors_with_properties(node_idx):
-                    if predicate != subclass_pred:
-                        continue
+                ) in graph.incoming_neighbors_with_properties(
+                    node_idx, predicate_mask=subclass_mask
+                ):
                     if child_idx in visited:
                         continue
                     visited.add(child_idx)
@@ -165,6 +167,14 @@ def query_edge(
             seen_edges.add(key)
             matches.append((subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx))
 
+    # Predicate filters as lookup tables over predicate ids, built once so
+    # that each node's neighbour slice is filtered in one vectorized step.
+    # None means "any predicate".
+    forward_mask = (
+        graph.predicate_mask(allowed_predicates) if allowed_predicates else None
+    )
+    inverse_mask = graph.predicate_mask(inverse_pred_set) if inverse_pred_set else None
+
     prof = current_profiler()
     n_allowed_preds = len(allowed_predicates) if allowed_predicates else 0
     n_inverse_preds = len(inverse_pred_set) if check_inverse else 0
@@ -183,11 +193,11 @@ def query_edge(
             _query_forward(
                 graph,
                 start_idxes,
-                allowed_predicates,
+                forward_mask,
                 end_categories,
                 edge_constraints,
                 check_inverse,
-                inverse_pred_set,
+                inverse_mask,
                 add_match,
                 node_filters=node_filters,
                 start_node_constraints=start_node_constraints,
@@ -209,11 +219,11 @@ def query_edge(
             _query_backward(
                 graph,
                 end_idxes,
-                allowed_predicates,
+                forward_mask,
                 start_categories,
                 edge_constraints,
                 check_inverse,
-                inverse_pred_set,
+                inverse_mask,
                 add_match,
                 node_filters=node_filters,
                 start_node_constraints=start_node_constraints,
@@ -236,10 +246,10 @@ def query_edge(
                 graph,
                 start_idxes,
                 end_idxes,
-                allowed_predicates,
+                forward_mask,
                 edge_constraints,
                 check_inverse,
-                inverse_pred_set,
+                inverse_mask,
                 add_match,
                 node_filters=node_filters,
                 start_node_constraints=start_node_constraints,
@@ -254,21 +264,72 @@ def query_edge(
     return matches
 
 
+def _node_checker(graph, categories, node_filters, attribute_constraints):
+    """Build a memoized test of whether a node satisfies a query node.
+
+    Checks the node's categories (any of *categories*), the plugin node
+    filters, and the query node's attribute constraints.  The node record is
+    read once per node, and the verdict is cached for the rest of the edge
+    query: hub nodes are reached from many pinned nodes, and each read
+    unpacks the node's whole stored record.
+
+    Returns:
+        A ``node_idx -> bool`` callable, or None when there is nothing to
+        check (every node passes).
+    """
+    if not categories and not node_filters and not attribute_constraints:
+        return None
+    verdicts: dict[int, bool] = {}
+
+    def passes(node_idx: int) -> bool:
+        verdict = verdicts.get(node_idx)
+        if verdict is None:
+            verdict = _node_passes(
+                graph, node_idx, categories, node_filters, attribute_constraints
+            )
+            verdicts[node_idx] = verdict
+        return verdict
+
+    return passes
+
+
+def _node_passes(graph, node_idx, categories, node_filters, attribute_constraints):
+    """Uncached check behind :func:`_node_checker`."""
+    props: dict = {}
+    if categories or attribute_constraints:
+        props = graph.get_all_node_properties(node_idx)
+    if categories:
+        node_categories = props.get("categories", [])
+        if not any(cat in node_categories for cat in categories):
+            return False
+    if not apply_node_filters(node_filters, graph, node_idx):
+        return False
+    if attribute_constraints and not matches_attribute_constraints(
+        props.get("attributes", []), attribute_constraints
+    ):
+        return False
+    return True
+
+
 def _query_forward(
     graph,
     start_idxes,
-    allowed_predicates,
+    forward_mask,
     end_categories,
     edge_constraints,
     check_inverse,
-    inverse_pred_set,
+    inverse_mask,
     add_match,
     node_filters=None,
     start_node_constraints=None,
     end_node_constraints=None,
     logger: Optional[logging.Logger] = None,
 ):
-    """Case 1: Start pinned, end unpinned - forward search from pinned nodes."""
+    """Case 1: Start pinned, end unpinned - forward search from pinned nodes.
+
+    ``forward_mask`` / ``inverse_mask`` are :meth:`CSRGraph.predicate_mask`
+    tables, or None for "any predicate".
+    """
     logger = logger if logger is not None else logging.getLogger(__name__)
     logger.debug("  Forward search from %s pinned nodes", len(start_idxes))
 
@@ -277,40 +338,26 @@ def _query_forward(
     total_neighbors = 0
     slow_nodes = []  # Track nodes that take > 0.1s
 
+    start_ok = _node_checker(graph, None, None, start_node_constraints)
+    end_ok = _node_checker(graph, end_categories, node_filters, end_node_constraints)
+
     for start_idx in start_idxes:
         # Check start node attribute constraints once per start node
-        if start_node_constraints:
-            start_attrs = graph.get_node_property(start_idx, "attributes", [])
-            if not matches_attribute_constraints(start_attrs, start_node_constraints):
-                continue
+        if start_ok is not None and not start_ok(start_idx):
+            continue
 
         t_node_start = time.perf_counter()
         node_neighbors = 0
 
         # Check outgoing edges (direct matches)
         for obj_idx, predicate, props, fwd_edge_idx in graph.neighbors_with_properties(
-            start_idx
+            start_idx, predicate_mask=forward_mask
         ):
             node_neighbors += 1
-            # Check predicate
-            if allowed_predicates and predicate not in allowed_predicates:
+
+            # Check the object: categories, node filters, attribute constraints
+            if end_ok is not None and not end_ok(obj_idx):
                 continue
-
-            # Check object categories
-            if end_categories:
-                obj_cats = graph.get_node_property(obj_idx, "categories", [])
-                if not any(cat in obj_cats for cat in end_categories):
-                    continue
-
-            # Check node filters (plugin-defined: degree, IC, etc.)
-            if not apply_node_filters(node_filters, graph, obj_idx):
-                continue
-
-            # Check end node attribute constraints
-            if end_node_constraints:
-                obj_attrs = graph.get_node_property(obj_idx, "attributes", [])
-                if not matches_attribute_constraints(obj_attrs, end_node_constraints):
-                    continue
 
             # Check the QEdge's constraints (qualifiers, knowledge_level,
             # agent_type, sources, attributes)
@@ -329,30 +376,14 @@ def _query_forward(
                 stored_pred,
                 props,
                 fwd_edge_idx,
-            ) in graph.incoming_neighbors_with_properties(start_idx):
+            ) in graph.incoming_neighbors_with_properties(
+                start_idx, predicate_mask=inverse_mask
+            ):
                 node_neighbors += 1
 
-                # Check if stored predicate is one of our inverse predicates
-                if inverse_pred_set and stored_pred not in inverse_pred_set:
+                # The "other" node becomes our object
+                if end_ok is not None and not end_ok(other_idx):
                     continue
-
-                # Check object categories (the "other" node becomes our object)
-                if end_categories:
-                    obj_cats = graph.get_node_property(other_idx, "categories", [])
-                    if not any(cat in obj_cats for cat in end_categories):
-                        continue
-
-                # Check node filters (plugin-defined: degree, IC, etc.)
-                if not apply_node_filters(node_filters, graph, other_idx):
-                    continue
-
-                # Check end node attribute constraints (other_idx is the "object" via inverse)
-                if end_node_constraints:
-                    obj_attrs = graph.get_node_property(other_idx, "attributes", [])
-                    if not matches_attribute_constraints(
-                        obj_attrs, end_node_constraints
-                    ):
-                        continue
 
                 # Check the QEdge's constraints (qualifiers, knowledge_level,
                 # agent_type, sources, attributes)
@@ -390,18 +421,21 @@ def _query_forward(
 def _query_backward(
     graph,
     end_idxes,
-    allowed_predicates,
+    forward_mask,
     start_categories,
     edge_constraints,
     check_inverse,
-    inverse_pred_set,
+    inverse_mask,
     add_match,
     node_filters=None,
     start_node_constraints=None,
     end_node_constraints=None,
     logger: Optional[logging.Logger] = None,
 ):
-    """Case 2: Start unpinned, end pinned - backward search from pinned nodes."""
+    """Case 2: Start unpinned, end pinned - backward search from pinned nodes.
+
+    Predicate masks are as for :func:`_query_forward`.
+    """
     logger = logger if logger is not None else logging.getLogger(__name__)
     logger.debug("  Backward search from %s pinned nodes", len(end_idxes))
 
@@ -410,12 +444,15 @@ def _query_backward(
     total_neighbors = 0
     slow_nodes = []  # Track nodes that take > 0.1s
 
-    for i, end_idx in enumerate(end_idxes):
+    end_ok = _node_checker(graph, None, None, end_node_constraints)
+    start_ok = _node_checker(
+        graph, start_categories, node_filters, start_node_constraints
+    )
+
+    for end_idx in end_idxes:
         # Check end node attribute constraints once per end node
-        if end_node_constraints:
-            end_attrs = graph.get_node_property(end_idx, "attributes", [])
-            if not matches_attribute_constraints(end_attrs, end_node_constraints):
-                continue
+        if end_ok is not None and not end_ok(end_idx):
+            continue
 
         t_node_start = time.perf_counter()
         node_neighbors = 0
@@ -426,29 +463,14 @@ def _query_backward(
             predicate,
             props,
             fwd_edge_idx,
-        ) in graph.incoming_neighbors_with_properties(end_idx):
+        ) in graph.incoming_neighbors_with_properties(
+            end_idx, predicate_mask=forward_mask
+        ):
             node_neighbors += 1
-            # Check predicate
-            if allowed_predicates and predicate not in allowed_predicates:
+
+            # Check the subject: categories, node filters, attribute constraints
+            if start_ok is not None and not start_ok(subj_idx):
                 continue
-
-            # Check subject categories
-            if start_categories:
-                subj_cats = graph.get_node_property(subj_idx, "categories", [])
-                if not any(cat in subj_cats for cat in start_categories):
-                    continue
-
-            # Check node filters (plugin-defined: degree, IC, etc.)
-            if not apply_node_filters(node_filters, graph, subj_idx):
-                continue
-
-            # Check start node attribute constraints
-            if start_node_constraints:
-                subj_attrs = graph.get_node_property(subj_idx, "attributes", [])
-                if not matches_attribute_constraints(
-                    subj_attrs, start_node_constraints
-                ):
-                    continue
 
             # Check the QEdge's constraints (qualifiers, knowledge_level,
             # agent_type, sources, attributes)
@@ -467,30 +489,12 @@ def _query_backward(
                 stored_pred,
                 props,
                 fwd_edge_idx,
-            ) in graph.neighbors_with_properties(end_idx):
+            ) in graph.neighbors_with_properties(end_idx, predicate_mask=inverse_mask):
                 node_neighbors += 1
 
-                # Check if stored predicate is one of our inverse predicates
-                if inverse_pred_set and stored_pred not in inverse_pred_set:
+                # The "other" node becomes our subject
+                if start_ok is not None and not start_ok(other_idx):
                     continue
-
-                # Check subject categories (the "other" node becomes our subject)
-                if start_categories:
-                    subj_cats = graph.get_node_property(other_idx, "categories", [])
-                    if not any(cat in subj_cats for cat in start_categories):
-                        continue
-
-                # Check node filters (plugin-defined: degree, IC, etc.)
-                if not apply_node_filters(node_filters, graph, other_idx):
-                    continue
-
-                # Check start node attribute constraints (other_idx is the "subject" via inverse)
-                if start_node_constraints:
-                    subj_attrs = graph.get_node_property(other_idx, "attributes", [])
-                    if not matches_attribute_constraints(
-                        subj_attrs, start_node_constraints
-                    ):
-                        continue
 
                 # Check the QEdge's constraints (qualifiers, knowledge_level,
                 # agent_type, sources, attributes)
@@ -528,17 +532,20 @@ def _query_both_pinned(
     graph,
     start_idxes,
     end_idxes,
-    allowed_predicates,
+    forward_mask,
     edge_constraints,
     check_inverse,
-    inverse_pred_set,
+    inverse_mask,
     add_match,
     node_filters=None,
     start_node_constraints=None,
     end_node_constraints=None,
     logger: Optional[logging.Logger] = None,
 ):
-    """Case 3: Both ends pinned - intersection search."""
+    """Case 3: Both ends pinned - intersection search.
+
+    Predicate masks are as for :func:`_query_forward`.
+    """
     logger = logger if logger is not None else logging.getLogger(__name__)
     logger.debug(
         "  Both ends pinned: %s start, %s end", len(start_idxes), len(end_idxes)
@@ -551,22 +558,20 @@ def _query_both_pinned(
     # This avoids property-dict allocations for edges whose target is not
     # in end_set (the vast majority in typical queries).
     end_set = set(end_idxes)
-    pred_filter_set = set(allowed_predicates) if allowed_predicates else None
+
+    # Both ends are pinned, so categories are not rechecked: only the node
+    # filters and each end's attribute constraints apply.
+    start_ok = _node_checker(graph, None, node_filters, start_node_constraints)
+    end_ok = _node_checker(graph, None, node_filters, end_node_constraints)
 
     t_neighbors_start = time.perf_counter()
     total_neighbors = 0
     slow_nodes = []
 
     for start_idx in start_idxes:
-        # Check node filters on the start node
-        if not apply_node_filters(node_filters, graph, start_idx):
+        # Check node filters and attribute constraints on the start node
+        if start_ok is not None and not start_ok(start_idx):
             continue
-
-        # Check start node attribute constraints
-        if start_node_constraints:
-            start_attrs = graph.get_node_property(start_idx, "attributes", [])
-            if not matches_attribute_constraints(start_attrs, start_node_constraints):
-                continue
 
         t_node_start = time.perf_counter()
 
@@ -583,17 +588,11 @@ def _query_both_pinned(
             props,
             fwd_edge_idx,
         ) in graph.neighbors_filtered_by_targets(
-            start_idx, end_set, predicate_filter=pred_filter_set
+            start_idx, end_set, predicate_mask=forward_mask
         ):
-            # Check node filters on the end node
-            if not apply_node_filters(node_filters, graph, obj_idx):
+            # Check node filters and attribute constraints on the end node
+            if end_ok is not None and not end_ok(obj_idx):
                 continue
-
-            # Check end node attribute constraints
-            if end_node_constraints:
-                obj_attrs = graph.get_node_property(obj_idx, "attributes", [])
-                if not matches_attribute_constraints(obj_attrs, end_node_constraints):
-                    continue
 
             # Check the QEdge's constraints (qualifiers, knowledge_level,
             # agent_type, sources, attributes)
@@ -614,15 +613,9 @@ def _query_both_pinned(
     if check_inverse:
         start_set = set(start_idxes)
         for end_idx in end_idxes:
-            # Check node filters on the end node
-            if not apply_node_filters(node_filters, graph, end_idx):
+            # Check node filters and attribute constraints on the end node
+            if end_ok is not None and not end_ok(end_idx):
                 continue
-
-            # Check end node attribute constraints
-            if end_node_constraints:
-                end_attrs = graph.get_node_property(end_idx, "attributes", [])
-                if not matches_attribute_constraints(end_attrs, end_node_constraints):
-                    continue
 
             for (
                 obj_idx,
@@ -630,21 +623,13 @@ def _query_both_pinned(
                 props,
                 fwd_edge_idx,
             ) in graph.neighbors_filtered_by_targets(
-                end_idx, start_set, predicate_filter=inverse_pred_set or None
+                end_idx, start_set, predicate_mask=inverse_mask
             ):
                 total_neighbors += 1
 
-                # Check node filters on the target (start) node
-                if not apply_node_filters(node_filters, graph, obj_idx):
+                # obj_idx is a start node: check its filters and constraints
+                if start_ok is not None and not start_ok(obj_idx):
                     continue
-
-                # Check start node attribute constraints (obj_idx is a start node)
-                if start_node_constraints:
-                    subj_attrs = graph.get_node_property(obj_idx, "attributes", [])
-                    if not matches_attribute_constraints(
-                        subj_attrs, start_node_constraints
-                    ):
-                        continue
 
                 # Check the QEdge's constraints (qualifiers, knowledge_level,
                 # agent_type, sources, attributes)
