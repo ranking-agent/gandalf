@@ -64,3 +64,6 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Benchmark outputs and cached synthetic graphs
+bench_results/
