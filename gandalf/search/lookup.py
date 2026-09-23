@@ -564,69 +564,6 @@ def _edge_content_key(graph, fwd_eidx: int) -> tuple:
     )
 
 
-def _edge_dict(
-    graph,
-    fwd_eidx: int,
-    predicate: str,
-    subj_id: str,
-    obj_id: str,
-    lightweight: bool,
-    edge_detail_map: dict,
-) -> InFlightEdge:
-    """Build the knowledge-graph Edge for one bound edge, pruned for TRAPI 2.0.
-
-    Args:
-        fwd_eidx: The edge's forward-CSR position, or -1 for a synthetic
-            edge with no stored counterpart (a depth-0 subclass self-match).
-        predicate, subj_id, obj_id: The edge as stored (not query-aligned).
-        lightweight: Build the minimal dehydrated shape.
-        edge_detail_map: Prefetched cold-path detail by forward edge index.
-    """
-    # knowledge_level and agent_type are required on every TRAPI 2.0 Edge,
-    # and both come from the in-memory dedup store, so even a dehydrated
-    # response carries them.
-    if fwd_eidx >= 0:
-        knowledge_level, agent_type = graph.edge_properties.get_kl_at(fwd_eidx)
-    else:
-        knowledge_level = agent_type = NOT_PROVIDED
-
-    edge_props: InFlightEdge
-    if lightweight:
-        # A dehydrated edge carries the smallest useful shape: no cold-path
-        # attributes, and no sources either, even though TRAPI 2.0 requires
-        # them and they are cheap to read.  Sources are the largest thing left
-        # on an edge once attributes are gone (~200 bytes each), and this mode
-        # exists to keep the payload minimal -- so a dehydrated response is
-        # knowingly not schema-valid.  See InFlightEdge for the contract.
-        edge_props = {
-            "predicate": predicate,
-            "subject": subj_id,
-            "object": obj_id,
-            "knowledge_level": knowledge_level,
-            "agent_type": agent_type,
-        }
-    else:
-        if fwd_eidx < 0:
-            edge_props = cast("InFlightEdge", {})
-        else:
-            edge_props = cast(
-                "InFlightEdge",
-                graph.get_edge_properties_by_index(
-                    fwd_eidx,
-                    lmdb_detail=edge_detail_map.get(fwd_eidx, {}),
-                ).copy(),
-            )
-        edge_props["predicate"] = predicate
-        edge_props["subject"] = subj_id
-        edge_props["object"] = obj_id
-        edge_props["knowledge_level"] = knowledge_level
-        edge_props["agent_type"] = agent_type
-
-    # Drop the properties TRAPI 2.0 forbids empty
-    prune_edge(edge_props)
-    return edge_props
-
-
 def _index_subclass_edges_by_child(sc_edges: list) -> dict[str, list]:
     """Index a group's subclass edges by child node (query-direction subject).
 
@@ -817,8 +754,6 @@ def _build_response(
     # The (qualifiers, sources) part of each edge's dedup key, computed once
     # per distinct edge rather than once per path through it.
     edge_content_keys: dict[int, tuple] = {}
-    # Each real edge's pruned Edge dict, copied into every result binding it.
-    edge_templates: dict[int, InFlightEdge] = {}
 
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
@@ -933,33 +868,54 @@ def _build_response(
 
                 if edge_key not in edge_seen_keys[qedge_id]:
                     edge_seen_keys[qedge_id].add(edge_key)
-                    # Build edge dict only for unique edges.  A real edge's
-                    # dict depends on nothing but the edge, so it is built
-                    # once per response and copied into each result.
+                    # Build edge dict only for unique edges
+                    # knowledge_level and agent_type are required on every
+                    # TRAPI 2.0 Edge, and both come from the in-memory dedup
+                    # store, so even a dehydrated response carries them.
                     if fwd_eidx >= 0:
-                        template = edge_templates.get(fwd_eidx)
-                        if template is None:
-                            template = _edge_dict(
-                                graph,
-                                fwd_eidx,
-                                predicate,
-                                subj_id,
-                                obj_id,
-                                lightweight,
-                                edge_detail_map,
-                            )
-                            edge_templates[fwd_eidx] = template
-                        edge_props = cast("InFlightEdge", dict(template))
-                    else:
-                        edge_props = _edge_dict(
-                            graph,
-                            fwd_eidx,
-                            predicate,
-                            subj_id,
-                            obj_id,
-                            lightweight,
-                            edge_detail_map,
+                        knowledge_level, agent_type = graph.edge_properties.get_kl_at(
+                            fwd_eidx
                         )
+                    else:
+                        knowledge_level = agent_type = NOT_PROVIDED
+
+                    edge_props: InFlightEdge
+                    if lightweight:
+                        # A dehydrated edge carries the smallest useful shape:
+                        # no cold-path attributes, and no sources either, even
+                        # though TRAPI 2.0 requires them and they are cheap to
+                        # read.  Sources are the largest thing left on an edge
+                        # once attributes are gone (~200 bytes each), and this
+                        # mode exists to keep the payload minimal -- so a
+                        # dehydrated response is knowingly not schema-valid.
+                        # See InFlightEdge for the contract.
+                        edge_props = {
+                            "predicate": predicate,
+                            "subject": subj_id,
+                            "object": obj_id,
+                            "knowledge_level": knowledge_level,
+                            "agent_type": agent_type,
+                        }
+                    else:
+                        if fwd_eidx < 0:
+                            edge_props = cast("InFlightEdge", {})
+                        else:
+                            edge_props = cast(
+                                "InFlightEdge",
+                                graph.get_edge_properties_by_index(
+                                    fwd_eidx,
+                                    lmdb_detail=edge_detail_map.get(fwd_eidx, {}),
+                                ).copy(),
+                            )
+                        edge_props["predicate"] = predicate
+                        edge_props["subject"] = subj_id
+                        edge_props["object"] = obj_id
+                        edge_props["knowledge_level"] = knowledge_level
+                        edge_props["agent_type"] = agent_type
+
+                    # Drop the properties TRAPI 2.0 forbids empty (once per
+                    # distinct edge, not once per path).
+                    prune_edge(edge_props)
 
                     if fwd_eidx >= 0:
                         orig_id = edge_id_map.get(fwd_eidx)
