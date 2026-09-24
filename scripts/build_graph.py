@@ -13,6 +13,7 @@ from pathlib import Path
 
 from gandalf import build_graph_from_jsonl
 from gandalf.logging_config import configure_logging
+from gandalf.node_annotations import DEFAULT_ANNOTATION_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ def main():
 Examples:
   # Basic usage
   kg-build --edges edges.jsonl --nodes nodes.jsonl --output graph_mmap/
+
+  # Also fetch node annotations from the Translator Annotator service
+  kg-build --edges edges.jsonl --nodes nodes.jsonl --output graph_mmap/ --annotate
         """,
     )
 
@@ -38,6 +42,23 @@ Examples:
 
     parser.add_argument(
         "--output", "-o", required=True, type=Path, help="Output directory for graph"
+    )
+
+    parser.add_argument(
+        "--annotate",
+        action="store_true",
+        help=(
+            "Annotate nodes via the Translator Annotator (biothings_annotator) "
+            "and store the results as 'biothings_annotations' node attributes. "
+            "Requires network access and `pip install -r requirements-annotate.txt`"
+        ),
+    )
+
+    parser.add_argument(
+        "--annotate-batch-size",
+        type=int,
+        default=DEFAULT_ANNOTATION_BATCH_SIZE,
+        help="CURIEs per Annotator request (default: %(default)s)",
     )
 
     parser.add_argument(
@@ -63,11 +84,15 @@ Examples:
     # Build graph
     logger.info("Building graph from %s", args.edges)
     logger.info("Loading nodes from %s", args.nodes)
+    if args.annotate:
+        logger.info("Node annotation enabled (biothings_annotator)")
 
     try:
         graph = build_graph_from_jsonl(
             edge_jsonl_path=str(args.edges),
             node_jsonl_path=str(args.nodes),
+            annotate_nodes=args.annotate,
+            annotation_batch_size=args.annotate_batch_size,
         )
 
         # Save graph

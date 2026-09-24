@@ -15,6 +15,11 @@ from gandalf.diagnostics import (
 from gandalf.graph import CSRGraph, EdgePropertyStore, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import LMDBPropertyStore
 from gandalf.loader import build_graph_from_jsonl, build_graph_from_mongo
+from gandalf.node_annotations import (
+    BIOTHINGS_ANNOTATIONS_ATTRIBUTE_TYPE_ID,
+    annotate_node_properties,
+    fetch_annotations,
+)
 from gandalf.normalize import normalize_edge, normalize_node
 from gandalf.query_planner import get_next_qedge
 from gandalf.search import (
@@ -49,6 +54,10 @@ __all__ = [
     # Loading
     "build_graph_from_jsonl",
     "build_graph_from_mongo",
+    # Node annotation (build time)
+    "annotate_node_properties",
+    "fetch_annotations",
+    "BIOTHINGS_ANNOTATIONS_ATTRIBUTE_TYPE_ID",
     # Normalization
     "normalize_edge",
     "normalize_node",

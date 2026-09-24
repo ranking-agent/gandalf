@@ -43,6 +43,9 @@ pip install -e ".[server]"
 
 # Install with dev dependencies (pytest, black, mypy)
 pip install -e ".[dev]"
+
+# Install the optional node annotation dependency (biothings_annotator)
+pip install -r requirements-annotate.txt
 ```
 
 ## Quick Start
@@ -86,6 +89,48 @@ graph.save_mmap("data/processed/gandalf_mmap")
 > deploy: binding shapes, `QEdge.constraints`, the `parameters` object and its
 > timeout, the response envelope, and the remaining null / empty-container
 > rules.
+
+### Annotating nodes at build time
+
+Passing `annotate_nodes=True` resolves every node through the Translator
+Annotator service ([`biothings_annotator`](https://github.com/biothings/biothings_annotator))
+and stores whatever it returns on the node, so queries never pay for the
+lookup:
+
+```python
+graph = build_graph_from_jsonl(
+    edges_path="data/raw/edges.jsonl",
+    nodes_path="data/raw/nodes.jsonl",
+    annotate_nodes=True,
+)
+```
+
+Annotations are stored as a single TRAPI node attribute with
+`attribute_type_id: "biothings_annotations"` — the same shape the Annotator
+service produces — and are returned with every node in the knowledge graph:
+
+```json
+{
+  "id": "MONDO:0005148",
+  "name": "type 2 diabetes mellitus",
+  "attributes": [
+    {
+      "attribute_type_id": "biothings_annotations",
+      "value": {"mondo": {"label": "type 2 diabetes mellitus"}}
+    }
+  ]
+}
+```
+
+Only CURIE prefixes the Annotator knows (NCBIGene, CHEBI, MONDO, HP, ...) are
+sent to it; everything else is skipped without a request. Nodes the Annotator
+has nothing for are left untouched rather than given an empty attribute.
+
+This requires network access and the optional dependency:
+
+```bash
+pip install -r requirements-annotate.txt
+```
 
 ### Query paths (TRAPI format)
 
@@ -300,6 +345,10 @@ Gandalf's own parameters:
 ```bash
 # Build a CSR graph from JSONL node/edge files
 gandalf-build --edges data/edges.jsonl --nodes data/nodes.jsonl --output data/graph_mmap/
+
+# ... and add node annotations from the Translator Annotator service
+gandalf-build --edges data/edges.jsonl --nodes data/nodes.jsonl \
+    --output data/graph_mmap/ --annotate
 
 # Query paths from the command line
 gandalf-query --graph data/graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979"

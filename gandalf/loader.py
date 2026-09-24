@@ -22,6 +22,11 @@ edges. Two thin wrappers select a source:
 
 Normalization itself lives in ``gandalf.normalize``; record validation lives in
 ``gandalf.sources.base``.
+
+Node annotation (``annotate_nodes=True``) is an optional build-time step: node
+IDs are resolved through the Translator Annotator service and whatever it
+returns is stored on the node as a ``biothings_annotations`` TRAPI attribute.
+See ``gandalf.node_annotations``.
 """
 
 import shutil
@@ -40,6 +45,10 @@ from gandalf.lmdb_store import (
     _encode_key,
     _put_with_resize,
 )
+from gandalf.node_annotations import (
+    DEFAULT_ANNOTATION_BATCH_SIZE,
+    annotate_node_properties,
+)
 from gandalf.sources import GraphSource, KGXJsonlSource
 from gandalf.trapi import prune_retrieval_sources
 
@@ -49,12 +58,24 @@ import lmdb
 logger = logging.getLogger(__name__)
 
 
-def _build_graph_from_source(source: GraphSource) -> CSRGraph:
+def _build_graph_from_source(
+    source: GraphSource,
+    annotate_nodes: bool = False,
+    annotation_batch_size: int = DEFAULT_ANNOTATION_BATCH_SIZE,
+) -> CSRGraph:
     """Build a CSR graph from a :class:`GraphSource` using three-pass streaming.
 
     The source yields already-normalized, validated node and edge records (see
     ``gandalf.sources.base`` for the contract). Peak memory: ~3-4GB for 38M
     edges.
+
+    Args:
+        source: Yields normalized node and edge records.
+        annotate_nodes: Look every node up through the Translator Annotator
+            (``biothings_annotator``) and store the result as a
+            ``biothings_annotations`` node attribute. Requires network access
+            and the optional ``biothings_annotator`` package.
+        annotation_batch_size: CURIEs per Annotator request.
     """
     # =================================================================
     # Pass 1: Vocabulary collection
@@ -105,6 +126,15 @@ def _build_graph_from_source(source: GraphSource) -> CSRGraph:
             node_properties[idx] = props
     if node_properties:
         logger.debug("  Loaded properties for %s nodes", f"{len(node_properties):,}")
+
+    # Optional: enrich nodes with annotations from the Translator Annotator.
+    # Done here, before the properties are frozen into the graph, so the
+    # annotations travel with the graph and cost nothing at query time.
+    if annotate_nodes:
+        annotated = annotate_node_properties(
+            node_properties, node_id_to_idx, batch_size=annotation_batch_size
+        )
+        logger.info("  Annotated %s nodes", f"{annotated:,}")
 
     # =================================================================
     # Pass 2: Build arrays + dedup store + temp LMDB
@@ -341,25 +371,56 @@ def _build_graph_from_source(source: GraphSource) -> CSRGraph:
     return graph
 
 
-def build_graph_from_jsonl(edge_jsonl_path, node_jsonl_path) -> CSRGraph:
+def build_graph_from_jsonl(
+    edge_jsonl_path,
+    node_jsonl_path,
+    annotate_nodes: bool = False,
+    annotation_batch_size: int = DEFAULT_ANNOTATION_BATCH_SIZE,
+) -> CSRGraph:
     """Build a CSR graph from KGX jsonl files.
 
     Reads ``edge_jsonl_path`` / ``node_jsonl_path`` and applies gandalf's
     normalization, then builds the graph. ``node_jsonl_path`` may be falsy to
     build from edge endpoints only.
+
+    Args:
+        edge_jsonl_path: Path to the KGX edges jsonl file.
+        node_jsonl_path: Path to the KGX nodes jsonl file, or falsy.
+        annotate_nodes: Annotate nodes via ``biothings_annotator`` (see
+            :func:`gandalf.node_annotations.annotate_node_properties`).
+        annotation_batch_size: CURIEs per Annotator request.
     """
     source = KGXJsonlSource(edge_jsonl_path, node_jsonl_path)
-    return _build_graph_from_source(source)
+    return _build_graph_from_source(
+        source,
+        annotate_nodes=annotate_nodes,
+        annotation_batch_size=annotation_batch_size,
+    )
 
 
 def build_graph_from_mongo(
-    *, mongo_uri: str, db: str, nodes_collection: str, edges_collection: str
+    *,
+    mongo_uri: str,
+    db: str,
+    nodes_collection: str,
+    edges_collection: str,
+    annotate_nodes: bool = False,
+    annotation_batch_size: int = DEFAULT_ANNOTATION_BATCH_SIZE,
 ) -> CSRGraph:
     """Build a CSR graph from already-normalized documents in MongoDB.
 
     The documents must already be in gandalf's normalized form (see
     ``gandalf.sources.base``); no normalization is applied. Requires ``pymongo``
     (install the ``mongo`` extra).
+
+    Args:
+        mongo_uri: MongoDB connection URI.
+        db: Database name.
+        nodes_collection: Collection of normalized node documents.
+        edges_collection: Collection of normalized edge documents.
+        annotate_nodes: Annotate nodes via ``biothings_annotator`` (see
+            :func:`gandalf.node_annotations.annotate_node_properties`).
+        annotation_batch_size: CURIEs per Annotator request.
     """
     from gandalf.sources.mongo import MongoSource
 
@@ -370,6 +431,10 @@ def build_graph_from_mongo(
         edges_collection=edges_collection,
     )
     try:
-        return _build_graph_from_source(source)
+        return _build_graph_from_source(
+            source,
+            annotate_nodes=annotate_nodes,
+            annotation_batch_size=annotation_batch_size,
+        )
     finally:
         source.close()

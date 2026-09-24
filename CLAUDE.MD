@@ -32,6 +32,9 @@ pip install -e ".[dev]"
 # Build graph from JSONL
 gandalf-build --edges data/edges.jsonl --nodes data/nodes.jsonl --output graph_mmap/
 
+# Build graph with node annotations from the Translator Annotator
+gandalf-build --edges data/edges.jsonl --nodes data/nodes.jsonl --output graph_mmap/ --annotate
+
 # Query paths
 gandalf-query --graph graph_mmap/ --start "CHEBI:45783" --end "MONDO:0004979"
 
@@ -44,6 +47,9 @@ python gandalf/main.py
 # Run tests
 pytest
 pytest --cov=gandalf
+
+# Run the tests that hit live external services (deselected by default)
+pytest -m integration
 ```
 
 ## Project Structure
@@ -52,6 +58,7 @@ pytest --cov=gandalf
 gandalf/
 ├── graph.py          # CSRGraph class (core data structure)
 ├── loader.py         # JSONL to graph conversion
+├── node_annotations.py  # Build-time node annotation (biothings_annotator)
 ├── trapi.py          # TRAPI 2.0 envelope, query parameters, timeouts
 ├── search/           # Search & path finding (package)
 │   ├── __init__.py       # Re-exports public API
@@ -246,9 +253,17 @@ external API call that `bmt.Toolkit()` makes on initialisation.  If you add new
 predicates or qualifier values to the test fixtures, update the corresponding
 lookup tables in `MockBMT`.
 
+Tests marked `@pytest.mark.integration` call live external services and are
+deselected by default (see `[tool.pytest.ini_options]` in `pyproject.toml`).
+Run them explicitly with `python -m pytest -m integration`.
+
 ## Known Considerations
 
 - Symmetric predicates are handled via BMT toolkit
+- Node annotation (`--annotate`) is optional: it needs network access and the
+  `biothings_annotator` package (`pip install -r requirements-annotate.txt`),
+  which is not on PyPI and so is deliberately not a pyproject extra — PyPI
+  rejects distributions with direct-URL dependencies
 - CI/CD pipeline configured via `.github/workflows/ci.yml` (lint, test, typecheck)
 - Dockerfile available for containerized deployment
 - Server configurable via environment variables (see README.md)
