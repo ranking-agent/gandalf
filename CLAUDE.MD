@@ -120,8 +120,10 @@ ways, and the split between them is deliberate:
    so full Pydantic validation there costs microseconds.
 2. **TypedDicts for internals** (`translator_tom.model_dicts`): gandalf keeps
    building plain dicts and serializing them with orjson, but the dicts are
-   *typed*.  A `TypedDict` is free at runtime -- `cast` compiles to nothing --
-   so this is static checking at zero cost, and mypy (which CI runs) catches
+   *typed*.  A `TypedDict` is free at runtime, so this is static checking at
+   almost no cost.  (`typing.cast` is not free, though: it is a real function
+   call, so keep it out of per-result and per-path loops -- an annotated
+   assignment types a value without one.)  mypy (which CI runs) catches
    binding-shape mistakes, nulls where 2.0 admits none, and misspelled
    properties.  Two gandalf-specific subclasses live in `gandalf/trapi.py`:
    `InFlightEdge` (an Edge plus the `_edge_id` / `_query_*` markers stripped

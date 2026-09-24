@@ -1,6 +1,7 @@
 """Unit tests for gandalf.loader module."""
 
 import os
+import pickle
 import tempfile
 
 import pytest
@@ -138,6 +139,19 @@ class TestKnowledgeLevelAndAgentType:
         graph.save_mmap(directory)
         (directory / "edge_kl_at_idx.npy").unlink()
         with pytest.raises(GraphFormatError, match="Rebuild the graph"):
+            CSRGraph.load_mmap(directory)
+
+    def test_graph_with_index_but_no_pool_is_refused(self, graph, tmp_path):
+        """Mismatched build files get the rebuild message, not a KeyError."""
+        directory = tmp_path / "mismatched"
+        graph.save_mmap(directory)
+        pools_path = directory / "edge_property_pools.pkl"
+        with open(pools_path, "rb") as f:
+            pools = pickle.load(f)
+        del pools["kl_at_pool"]
+        with open(pools_path, "wb") as f:
+            pickle.dump(pools, f)
+        with pytest.raises(GraphFormatError, match="mismatched gandalf versions"):
             CSRGraph.load_mmap(directory)
 
 
