@@ -296,7 +296,8 @@ class EdgePropertyStore:
 
         Raises:
             GraphFormatError: if the saved graph predates TRAPI 2.0 support and
-                so carries no knowledge_level / agent_type for its edges.
+                so carries no knowledge_level / agent_type for its edges, or
+                carries only half of them (index without pool).
         """
         store = cls()
 
@@ -319,6 +320,17 @@ class EdgePropertyStore:
 
         with open(directory / "edge_property_pools.pkl", "rb") as f:
             pools = pickle.load(f)
+        if "kl_at_pool" not in pools:
+            # The index array is there but its pool is not, so the files
+            # come from different builds (or a pre-release build of 2.0
+            # support); the index cannot be interpreted either way.
+            raise GraphFormatError(
+                f"{directory} has edge_kl_at_idx.npy but its "
+                f"edge_property_pools.pkl holds no knowledge_level / "
+                f"agent_type pool (it has: {sorted(pools)}), so its files come "
+                f"from mismatched gandalf versions. Rebuild the graph with "
+                f"gandalf-build to serve it."
+            )
 
         store._sources_pool = pools["sources_pool"]
         store._quals_pool = pools["quals_pool"]
