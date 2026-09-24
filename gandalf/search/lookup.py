@@ -544,6 +544,102 @@ def _group_rows(keys: np.ndarray) -> list[np.ndarray]:
     return [groups[g] for g in np.argsort(first_rows)]
 
 
+#: Rows converted to Python lists per block in ``_build_response``.
+_ROWS_BLOCK = 65_536
+
+
+def _iter_group_rows(arrays: list, groups: list, block: int = _ROWS_BLOCK):
+    """Yield each group's rows of every array in *arrays*, as Python lists.
+
+    Groups are converted a block of about *block* rows at a time: one
+    fancy-index and ``tolist()`` per array per block rather than per group,
+    which on a result set of millions of small groups is millions of NumPy
+    calls saved, while the Python lists held at once stay bounded.
+
+    Yields:
+        One tuple per group, in group order, of that group's rows from each
+        array (a list of row lists per array).
+
+    >>> a = np.arange(10).reshape(5, 2)
+    >>> b = a * 10
+    >>> groups = [np.array([3]), np.array([0, 4]), np.array([1])]
+    >>> for rows_a, rows_b in _iter_group_rows([a, b], groups, block=2):
+    ...     print(rows_a, rows_b)
+    [[6, 7]] [[60, 70]]
+    [[0, 1], [8, 9]] [[0, 10], [80, 90]]
+    [[2, 3]] [[20, 30]]
+    """
+    start = 0
+    while start < len(groups):
+        # Take whole groups up to the block size (always at least one).
+        end, count = start, 0
+        while end < len(groups) and (count == 0 or count + len(groups[end]) <= block):
+            count += len(groups[end])
+            end += 1
+        rows = np.concatenate(groups[start:end])
+        block_lists = [array[rows].tolist() for array in arrays]
+        offset = 0
+        for group in groups[start:end]:
+            size = len(group)
+            yield tuple(lists[offset : offset + size] for lists in block_lists)
+            offset += size
+        start = end
+
+
+def _full_edge(
+    graph, fwd_eidx: int, predicate: str, subj_id: str, obj_id: str, detail: dict
+) -> InFlightEdge:
+    """A real edge's knowledge-graph Edge for a full response, pruned for 2.0.
+
+    Args:
+        fwd_eidx: The edge's forward-CSR position.
+        predicate, subj_id, obj_id: The edge as stored (not query-aligned).
+        detail: The edge's prefetched cold-path detail (``{}`` if none).
+    """
+    edge_props: InFlightEdge = graph.get_edge_properties_by_index(
+        fwd_eidx, lmdb_detail=detail
+    )
+    edge_props["predicate"] = predicate
+    edge_props["subject"] = subj_id
+    edge_props["object"] = obj_id
+    # knowledge_level and agent_type are required on every TRAPI 2.0 Edge
+    (
+        edge_props["knowledge_level"],
+        edge_props["agent_type"],
+    ) = graph.edge_properties.get_kl_at(fwd_eidx)
+    prune_edge(edge_props)
+    return edge_props
+
+
+def _minimal_edge(
+    graph, fwd_eidx: int, predicate: str, subj_id: str, obj_id: str
+) -> InFlightEdge:
+    """A dehydrated edge, or the Edge for a synthetic edge (``fwd_eidx < 0``).
+
+    knowledge_level and agent_type are required on every TRAPI 2.0 Edge and
+    come from the in-memory dedup store, so even a dehydrated edge carries
+    them.  A dehydrated edge otherwise carries the smallest useful shape: no
+    cold-path attributes, and no sources either, even though TRAPI 2.0
+    requires them and they are cheap to read.  Sources are the largest thing
+    left on an edge once attributes are gone (~200 bytes each), and that mode
+    exists to keep the payload minimal -- so a dehydrated response is
+    knowingly not schema-valid.  See InFlightEdge for the contract.
+
+    Needs no pruning: none of its properties is one TRAPI 2.0 forbids empty.
+    """
+    if fwd_eidx >= 0:
+        knowledge_level, agent_type = graph.edge_properties.get_kl_at(fwd_eidx)
+    else:
+        knowledge_level = agent_type = NOT_PROVIDED
+    return {
+        "predicate": predicate,
+        "subject": subj_id,
+        "object": obj_id,
+        "knowledge_level": knowledge_level,
+        "agent_type": agent_type,
+    }
+
+
 def _edge_content_key(graph, fwd_eidx: int) -> tuple:
     """The qualifiers-and-sources part of an edge's dedup key in a result."""
     quals = graph.edge_properties.get_qualifiers(fwd_eidx)
@@ -738,6 +834,9 @@ def _build_response(
 
     # Each path column's qedge and the node columns of its query-direction
     # subject and object.
+    # Also whether it is a synthetic subclass qedge, whose matches that bind
+    # a node to itself (the depth-0 identity match) support nothing and are
+    # skipped outright.
     edge_cols = []
     for col in range(pa_num_edges):
         qedge_id = col_to_qedge[col]
@@ -748,28 +847,39 @@ def _build_response(
                 qedge_id,
                 qnode_to_col[edge_def["subject"]],
                 qnode_to_col[edge_def["object"]],
+                qedge_id in subclass_qedges,
             )
         )
 
     # The (qualifiers, sources) part of each edge's dedup key, computed once
-    # per distinct edge rather than once per path through it.
+    # per pair of interned qualifier/source lists, and looked up once per
+    # distinct edge rather than once per path through it.
     edge_content_keys: dict[int, tuple] = {}
+    content_keys_by_pools: dict[tuple, tuple] = {}
+
+    # Each real edge's Edge dict for a full response, built once and copied
+    # into every result that binds the edge.
+    edge_templates: dict[int, InFlightEdge] = {}
 
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
     # Edge dicts are created only for unique edges (not per-path).
-    for group_number, path_indices in enumerate(path_groups):
+    # Each group's rows arrive as Python lists, converted a block of groups
+    # at a time rather than with a NumPy scalar lookup per cell.
+    group_rows = _iter_group_rows(
+        [pa_nodes, pa_preds, pa_via_inv, pa_fwd_eidx], path_groups
+    )
+    for group_number, (
+        rows_nodes,
+        rows_preds,
+        rows_via_inv,
+        rows_fwd_eidx,
+    ) in enumerate(group_rows):
         # Checking the clock per result would cost a syscall per result on
         # multi-million-result queries, so sample it instead.
         if deadline and group_number % _DEADLINE_CHECK_INTERVAL == 0:
             deadline.check("response building")
 
-        # This group's rows as Python lists: one conversion per array
-        # instead of a NumPy scalar lookup per cell.
-        rows_nodes = pa_nodes[path_indices].tolist()
-        rows_preds = pa_preds[path_indices].tolist()
-        rows_via_inv = pa_via_inv[path_indices].tolist()
-        rows_fwd_eidx = pa_fwd_eidx[path_indices].tolist()
         first_nodes = rows_nodes[0]
 
         result: dict[str, Any] = {
@@ -839,14 +949,18 @@ def _build_response(
         for nodes_row, preds_row, via_inv_row, fwd_eidx_row in zip(
             rows_nodes, rows_preds, rows_via_inv, rows_fwd_eidx
         ):
-            for col, qedge_id, subj_col_e, obj_col_e in edge_cols:
+            for col, qedge_id, subj_col_e, obj_col_e, is_subclass in edge_cols:
+                query_subj_idx = nodes_row[subj_col_e]
+                query_obj_idx = nodes_row[obj_col_e]
+                if is_subclass and query_subj_idx == query_obj_idx:
+                    # Identity match: never bound, never in the KG
+                    continue
+
                 predicate = idx_to_predicate[preds_row[col]]
                 is_inverse = via_inv_row[col]
                 fwd_eidx = fwd_eidx_row[col]
 
                 # Determine actual (stored) edge direction
-                query_subj_idx = nodes_row[subj_col_e]
-                query_obj_idx = nodes_row[obj_col_e]
 
                 if is_inverse:
                     actual_subj_idx, actual_obj_idx = query_obj_idx, query_subj_idx
@@ -862,60 +976,37 @@ def _build_response(
                 else:
                     content_key = edge_content_keys.get(fwd_eidx)
                     if content_key is None:
-                        content_key = _edge_content_key(graph, fwd_eidx)
+                        pools = graph.edge_properties.pool_indices(fwd_eidx)
+                        content_key = content_keys_by_pools.get(pools)
+                        if content_key is None:
+                            content_key = _edge_content_key(graph, fwd_eidx)
+                            content_keys_by_pools[pools] = content_key
                         edge_content_keys[fwd_eidx] = content_key
                     edge_key = (subj_id, predicate, obj_id) + content_key
 
                 if edge_key not in edge_seen_keys[qedge_id]:
                     edge_seen_keys[qedge_id].add(edge_key)
                     # Build edge dict only for unique edges
-                    # knowledge_level and agent_type are required on every
-                    # TRAPI 2.0 Edge, and both come from the in-memory dedup
-                    # store, so even a dehydrated response carries them.
-                    if fwd_eidx >= 0:
-                        knowledge_level, agent_type = graph.edge_properties.get_kl_at(
-                            fwd_eidx
-                        )
-                    else:
-                        knowledge_level = agent_type = NOT_PROVIDED
-
                     edge_props: InFlightEdge
-                    if lightweight:
-                        # A dehydrated edge carries the smallest useful shape:
-                        # no cold-path attributes, and no sources either, even
-                        # though TRAPI 2.0 requires them and they are cheap to
-                        # read.  Sources are the largest thing left on an edge
-                        # once attributes are gone (~200 bytes each), and this
-                        # mode exists to keep the payload minimal -- so a
-                        # dehydrated response is knowingly not schema-valid.
-                        # See InFlightEdge for the contract.
-                        edge_props = {
-                            "predicate": predicate,
-                            "subject": subj_id,
-                            "object": obj_id,
-                            "knowledge_level": knowledge_level,
-                            "agent_type": agent_type,
-                        }
-                    else:
-                        if fwd_eidx < 0:
-                            edge_props = cast("InFlightEdge", {})
-                        else:
-                            edge_props = cast(
-                                "InFlightEdge",
-                                graph.get_edge_properties_by_index(
-                                    fwd_eidx,
-                                    lmdb_detail=edge_detail_map.get(fwd_eidx, {}),
-                                ).copy(),
+                    if not lightweight and fwd_eidx >= 0:
+                        # A real edge's full dict depends only on the edge,
+                        # so it is built once and copied per result.
+                        template = edge_templates.get(fwd_eidx)
+                        if template is None:
+                            template = _full_edge(
+                                graph,
+                                fwd_eidx,
+                                predicate,
+                                subj_id,
+                                obj_id,
+                                edge_detail_map.get(fwd_eidx, {}),
                             )
-                        edge_props["predicate"] = predicate
-                        edge_props["subject"] = subj_id
-                        edge_props["object"] = obj_id
-                        edge_props["knowledge_level"] = knowledge_level
-                        edge_props["agent_type"] = agent_type
-
-                    # Drop the properties TRAPI 2.0 forbids empty (once per
-                    # distinct edge, not once per path).
-                    prune_edge(edge_props)
+                            edge_templates[fwd_eidx] = template
+                        edge_props = template.copy()
+                    else:
+                        edge_props = _minimal_edge(
+                            graph, fwd_eidx, predicate, subj_id, obj_id
+                        )
 
                     if fwd_eidx >= 0:
                         orig_id = edge_id_map.get(fwd_eidx)

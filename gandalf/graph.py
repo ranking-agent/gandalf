@@ -246,6 +246,16 @@ class EdgePropertyStore:
         """Get just the sources for an edge. Zero-alloc pool reference."""
         return self._sources_pool[self._sources_idx[idx]]
 
+    def pool_indices(self, idx) -> tuple[int, int]:
+        """The ``(qualifiers, sources)`` pool indices of an edge.
+
+        Edges with equal indices carry the very same qualifier and source
+        lists, so anything derived from those lists can be computed once per
+        pair -- a few thousand pairs even on a graph of tens of millions of
+        edges.
+        """
+        return int(self._quals_idx[idx]), int(self._sources_idx[idx])
+
     def get_kl_at(self, idx):
         """Get the ``(knowledge_level, agent_type)`` pair for an edge.
 
