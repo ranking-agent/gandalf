@@ -106,9 +106,11 @@ def stage_lines(response: dict) -> list[str]:
             tree = json.loads(entry["message"])
             lines = []
             for child in tree.get("children", []):
-                lines.append(
-                    f"  {child['name']:<18}{child['duration_ms'] / 1000:>8.2f}s"
-                )
+                name = child["name"]
+                qedge_id = child.get("fields", {}).get("qedge_id")
+                if qedge_id:
+                    name = f"{name} {qedge_id}"
+                lines.append(f"  {name:<18}{child['duration_ms'] / 1000:>8.2f}s")
                 for sub in child.get("children", []):
                     lines.append(
                         f"    {sub['name']:<16}{sub['duration_ms'] / 1000:>8.2f}s"
