@@ -490,6 +490,9 @@ def _lookup_inner(
     return response
 
 
+#: PHASE 0 PROTOTYPE switch for the single-path fast path.
+_SINGLE_PATH_FAST = True
+
 #: How many results to build between wall-clock checks in _build_response.
 _DEADLINE_CHECK_INTERVAL = 4096
 
@@ -861,6 +864,14 @@ def _build_response(
     # into every result that binds the edge.
     edge_templates: dict[int, InFlightEdge] = {}
 
+    # PHASE 0 PROTOTYPE: single-path fast path.
+    fast_single = _SINGLE_PATH_FAST
+    plain_edge_cols = [
+        (col, qedge_id, s, o) for col, qedge_id, s, o, sc in edge_cols if not sc
+    ]
+    subclass_col_ends = [(s, o) for _c, _q, s, o, sc in edge_cols if sc]
+    minimal_edges: dict[int, InFlightEdge] = {}
+
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
     # Edge dicts are created only for unique edges (not per-path).
@@ -939,6 +950,58 @@ def _build_response(
                             kg_nodes[sc_node_id] = sc_node
 
                 result["node_bindings"][qnode_id] = {"ids": [bound_id]}
+
+        # PHASE 0 PROTOTYPE: a single path with every subclass match an
+        # identity binds each plain column's edge once, with no dedup and no
+        # composite edges.
+        if (
+            fast_single
+            and len(rows_nodes) == 1
+            and all(first_nodes[s] == first_nodes[o] for s, o in subclass_col_ends)
+        ):
+            fwd_eidx_row = rows_fwd_eidx[0]
+            edge_bindings = result["analyses"][0]["edge_bindings"]
+            for col, qedge_id, subj_col_e, obj_col_e in plain_edge_cols:
+                fwd_eidx = fwd_eidx_row[col]
+                if lightweight:
+                    edge = minimal_edges.get(fwd_eidx)
+                else:
+                    edge = edge_templates.get(fwd_eidx)
+                if edge is None:
+                    if rows_via_inv[0][col]:
+                        actual_subj_idx = first_nodes[obj_col_e]
+                        actual_obj_idx = first_nodes[subj_col_e]
+                    else:
+                        actual_subj_idx = first_nodes[subj_col_e]
+                        actual_obj_idx = first_nodes[obj_col_e]
+                    predicate = idx_to_predicate[rows_preds[0][col]]
+                    subj_id = node_id_cache[actual_subj_idx]
+                    obj_id = node_id_cache[actual_obj_idx]
+                    if lightweight:
+                        edge = _minimal_edge(
+                            graph, fwd_eidx, predicate, subj_id, obj_id
+                        )
+                        minimal_edges[fwd_eidx] = edge
+                    else:
+                        edge = _full_edge(
+                            graph,
+                            fwd_eidx,
+                            predicate,
+                            subj_id,
+                            obj_id,
+                            edge_detail_map.get(fwd_eidx, {}),
+                        )
+                        edge_templates[fwd_eidx] = edge
+                edge_kg_id = edge_id_map.get(fwd_eidx)
+                if not edge_kg_id:
+                    edge_kg_id = str(uuid.uuid4())[:8]
+                    edge = edge.copy()
+                kg_edges[edge_kg_id] = edge
+                edge_bindings[qedge_id] = {"ids": [edge_kg_id]}
+            if not edge_bindings:
+                del result["analyses"]
+            response["message"]["results"].append(result)
+            continue
 
         # Aggregate edge bindings from all paths in group.
         # Edge dicts are created only for unique (subj, pred, obj,
