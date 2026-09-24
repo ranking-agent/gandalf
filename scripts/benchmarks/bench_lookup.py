@@ -149,36 +149,22 @@ def lookup_kwargs(body: dict) -> dict:
     }
 
 
-def run_once(
-    graph, body: dict, bmt, profile: bool = False, json_results: bool = False
-) -> tuple[float, dict]:
+def run_once(graph, body: dict, bmt, profile: bool = False) -> tuple[float, dict]:
     """Run one lookup and return ``(wall_ms, response)``.
 
     Collects garbage first (outside the timer) so one run's leftovers are not
-    billed to the next; ``lookup`` itself disables GC while it runs.  With
-    *json_results*, asks ``lookup`` for its results pre-serialized, as the
-    server does (only passed when set, so the runner still works on commits
-    that predate the option).
+    billed to the next; ``lookup`` itself disables GC while it runs.
     """
     from gandalf.search.lookup import lookup
 
-    kwargs = lookup_kwargs(body)
-    if json_results:
-        kwargs["serialize_results"] = True
     gc.collect()
     t0 = time.perf_counter()
-    response = lookup(graph, body, bmt=bmt, profile=profile, **kwargs)
+    response = lookup(graph, body, bmt=bmt, profile=profile, **lookup_kwargs(body))
     return (time.perf_counter() - t0) * 1000.0, response
 
 
 def _serialize_default(obj):
-    """orjson ``default`` matching the server's: sets, pre-serialized results.
-
-    Duck-typed rather than imported from ``gandalf.trapi``, so the runner
-    works on commits that predate ``SerializedResults``.
-    """
-    if hasattr(obj, "to_list") and hasattr(obj, "json"):
-        return orjson.Fragment(obj.json)
+    """orjson ``default`` matching the server's (it serializes sets as lists)."""
     if isinstance(obj, set):
         return list(obj)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
@@ -259,11 +245,8 @@ def fingerprint(response: dict) -> str:
             support,
         )
 
-    results = message["results"]
-    if hasattr(results, "to_list"):
-        results = results.to_list()
     canon = []
-    for result in results:
+    for result in message["results"]:
         nodes = tuple(
             sorted(
                 (qnode, tuple(sorted(binding["ids"])))
@@ -282,12 +265,12 @@ def fingerprint(response: dict) -> str:
     return hashlib.sha256(json.dumps(canon).encode()).hexdigest()[:16]
 
 
-def peak_alloc_mb(graph, body: dict, bmt, json_results: bool = False) -> float:
+def peak_alloc_mb(graph, body: dict, bmt) -> float:
     """Peak traced allocation (MB) over one lookup, measured with tracemalloc."""
     gc.collect()
     tracemalloc.start()
     try:
-        run_once(graph, body, bmt, json_results=json_results)
+        run_once(graph, body, bmt)
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -307,7 +290,6 @@ def bench_query(
     repeat: int,
     memory: bool = False,
     on_run=_print_run,
-    json_results: bool = False,
 ) -> dict:
     """Benchmark one query: warmup, timed runs, one profiled run, and
     optionally one memory-traced run.
@@ -322,20 +304,19 @@ def bench_query(
     # queries pushed the machine into swap and made each run slower than
     # the one before it.
     for _ in range(warmup):
-        ms = run_once(graph, body, bmt, json_results=json_results)[0]
+        ms = run_once(graph, body, bmt)[0]
         on_run("warmup ", ms)
 
     runs_ms = []
     response: dict = {}
     for _ in range(repeat):
         response = {}
-        ms, response = run_once(graph, body, bmt, json_results=json_results)
+        ms, response = run_once(graph, body, bmt)
         runs_ms.append(ms)
         on_run("", ms)
 
-    # Serializing is the rest of what the server does with a response, and
-    # with --json-results part of it has moved into lookup; time it so the
-    # two modes compare end to end.
+    # Serializing is the rest of what the server does with a response; time
+    # it too, since a change can move cost between the two.
     serialize_ms, response_bytes = serialize(response)
     on_run("serialize ", serialize_ms)
 
@@ -354,9 +335,7 @@ def bench_query(
     }
     del response, message
 
-    profiled_ms, profiled = run_once(
-        graph, body, bmt, profile=True, json_results=json_results
-    )
+    profiled_ms, profiled = run_once(graph, body, bmt, profile=True)
     on_run("profiled ", profiled_ms)
     tree = profile_tree(profiled) or {}
     del profiled
@@ -364,9 +343,7 @@ def bench_query(
     record["peak_alloc_mb"] = None
     if memory:
         t0 = time.perf_counter()
-        record["peak_alloc_mb"] = peak_alloc_mb(
-            graph, body, bmt, json_results=json_results
-        )
+        record["peak_alloc_mb"] = peak_alloc_mb(graph, body, bmt)
         on_run("memory ", (time.perf_counter() - t0) * 1000.0)
     record["stages_ms"] = {label: stage_ms(tree, path) for label, path in STAGE_COLUMNS}
     record["num_paths"] = tree.get("metrics", {}).get("num_paths")
@@ -434,9 +411,6 @@ def print_run(report: dict) -> None:
         f"\n== {env['label']}  @ {env['git_commit']}{dirty}  "
         f"graph: {env['graph_nodes']:,} nodes / {env['graph_edges']:,} edges"
     )
-    mode = " [json results]" if env.get("json_results") else ""
-    if mode:
-        print(f"  lookup wrote results straight to JSON{mode}")
     header = (
         f"{'query':<38}{'median':>10}{'min':>10}{'+serialize':>12}"
         f"{'results':>10}{'paths':>11}{'peak mem':>10}  fingerprint"
@@ -573,7 +547,6 @@ def cmd_run(args) -> int:
 
     label = args.label or _git("rev-parse", "--short", "HEAD") or "run"
     report = {"environment": environment(graph_dir, graph, label), "queries": []}
-    report["environment"]["json_results"] = args.json_results
     for query in queries:
         print(f"  {query['name']}:", end="", flush=True)
         record = bench_query(
@@ -583,7 +556,6 @@ def cmd_run(args) -> int:
             args.warmup,
             args.repeat,
             memory=args.memory,
-            json_results=args.json_results,
         )
         print(
             f"  -> median {_fmt_ms(record['median_ms'])}"
@@ -639,11 +611,6 @@ def main(argv=None) -> int:
         "--memory",
         action="store_true",
         help="also measure peak allocation with tracemalloc (one slow extra run)",
-    )
-    run.add_argument(
-        "--json-results",
-        action="store_true",
-        help="have lookup write results straight to JSON, as the server does",
     )
     run.add_argument("--label", help="name for this run (default: git commit)")
     run.add_argument("--out", help="save the report as JSON here")

@@ -430,52 +430,6 @@ def prune_retrieval_sources(
     return sources
 
 
-class SerializedResults:
-    """A ``Message.results`` array already serialized to JSON.
-
-    ``lookup(..., serialize_results=True)`` writes results straight to JSON
-    text rather than building a dict per result, which on a response of
-    millions of results saves both the dicts and orjson's walk over them.
-    The object stands in for the results list inside the response dict:
-    :func:`orjson_default` turns it into an ``orjson.Fragment``, so
-    ``orjson.dumps`` embeds the bytes verbatim, and :meth:`to_list` parses
-    it back for callers that need the results as dicts.
-
-    Examples:
-        >>> results = SerializedResults(b'[{"node_bindings":{}}]', 1)
-        >>> len(results), results.to_list()
-        (1, [{'node_bindings': {}}])
-        >>> orjson.dumps({"results": results}, default=orjson_default)
-        b'{"results":[{"node_bindings":{}}]}'
-    """
-
-    __slots__ = ("json", "_count")
-
-    def __init__(self, json: bytes, count: int):
-        self.json = json
-        self._count = count
-
-    def __len__(self) -> int:
-        return self._count
-
-    def to_list(self) -> list:
-        """The results as dicts (parses the JSON)."""
-        results: list = orjson.loads(self.json)
-        return results
-
-
-def orjson_default(obj: Any) -> Any:
-    """``default`` hook for ``orjson.dumps`` on gandalf responses.
-
-    Serializes sets as lists and embeds :class:`SerializedResults` verbatim.
-    """
-    if isinstance(obj, SerializedResults):
-        return orjson.Fragment(obj.json)
-    if isinstance(obj, set):
-        return list(obj)
-    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
-
 def finalize_response(
     response: ResponseDict,
     request: Optional[QueryDict] = None,

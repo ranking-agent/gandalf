@@ -155,16 +155,6 @@ Gandalf's `large_result_threshold` is 10M paths, and `server._trapi_response` /
 `_request_dict` exist precisely to keep per-result object materialization off
 the hot path.  Use the TypedDicts there instead.
 
-The server goes one step further for the results themselves:
-`lookup(..., serialize_results=True)` writes `message.results` straight to
-JSON (a `gandalf.trapi.SerializedResults`) without building a dict per
-result, and `gandalf.trapi.orjson_default` embeds those bytes verbatim when
-the response is serialized.  The rest of the response (knowledge graph,
-auxiliary graphs, logs) stays plain dicts, so annotators and enrichment work
-on it unchanged.  The server uses this whenever `validate_responses` is off;
-library callers get dicts by default.  The two paths must serialize to the
-same bytes -- `tests/test_serialized_results.py` holds them to that.
-
 TOM requires Python >= 3.10, which is why gandalf's floor is 3.10.
 
 ## TRAPI version

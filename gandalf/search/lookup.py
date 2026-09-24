@@ -10,7 +10,6 @@ from collections import defaultdict
 from typing import Any, Optional, Union, cast
 
 import numpy as np
-import orjson
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,6 @@ from gandalf.trapi import (
     Deadline,
     InFlightEdge,
     QueryTimeout,
-    SerializedResults,
     finalize_response,
     prune_edge,
     timeout_response,
@@ -57,7 +55,6 @@ def lookup(
     dehydrated=None,
     profile=False,
     deadline=None,
-    serialize_results=False,
 ):
     """Take an arbitrary Translator query graph and return all matching paths.
 
@@ -86,13 +83,6 @@ def lookup(
             client's ``parameters.timeout`` budget.  When it is exhausted the
             query stops and returns a Response with a ``Timeout`` status
             rather than partial results.
-        serialize_results: If True, ``message.results`` is a
-            :class:`~gandalf.trapi.SerializedResults` -- the results array
-            already serialized to JSON -- rather than a list of dicts.  It
-            serializes byte-for-byte the same, via
-            :func:`gandalf.trapi.orjson_default`, and skips building a dict
-            per result, which dominates large responses.  For callers that
-            only serialize the response, like the server.
 
     Returns:
         Complete TRAPI 2.0 Response dict: ``message`` (query_graph,
@@ -163,7 +153,6 @@ def lookup(
                     dehydrated=dehydrated,
                     logger=query_logger,
                     deadline=deadline,
-                    serialize_results=serialize_results,
                 )
             except QueryTimeout as exc:
                 # Report the overrun as a TRAPI outcome rather than an error:
@@ -202,7 +191,6 @@ def _lookup_inner(
     dehydrated=None,
     logger: Optional[logging.Logger] = None,
     deadline=None,
-    serialize_results=False,
 ):
     """Inner implementation of lookup with all the core logic.
 
@@ -479,7 +467,6 @@ def _lookup_inner(
                 original_query_graph=original_query_graph,
                 logger=logger,
                 deadline=deadline,
-                serialize_results=serialize_results,
             )
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
@@ -507,7 +494,7 @@ def _lookup_inner(
 _DEADLINE_CHECK_INTERVAL = 4096
 
 
-def _append_edge_binding(binding: list, bound: set, edge_kg_id: str) -> None:
+def _append_edge_binding(binding: dict, bound: set, edge_kg_id: str) -> None:
     """Add ``edge_kg_id`` to a QEdge's EdgeBinding unless already present.
 
     A TRAPI 2.0 EdgeBinding lists every knowledge-graph edge bound to one
@@ -516,21 +503,20 @@ def _append_edge_binding(binding: list, bound: set, edge_kg_id: str) -> None:
     derived (real edge, composite inferred edge, or uuid fallback).
 
     Args:
-        binding: The ``ids`` of the EdgeBinding for one QEdge (mutated in
-            place).
-        bound: The ids already in *binding*, kept alongside it so the
+        binding: The EdgeBinding for one QEdge (mutated in place).
+        bound: The ids already in ``binding["ids"]``, kept alongside it so the
             membership test does not scan the list (mutated in place).
         edge_kg_id: The knowledge-graph edge id to bind.
 
-    >>> binding, bound = [], set()
+    >>> binding, bound = {"ids": []}, set()
     >>> for edge_id in ["e1", "e2", "e1"]:
     ...     _append_edge_binding(binding, bound, edge_id)
     >>> binding
-    ['e1', 'e2']
+    {'ids': ['e1', 'e2']}
     """
     if edge_kg_id not in bound:
         bound.add(edge_kg_id)
-        binding.append(edge_kg_id)
+        binding["ids"].append(edge_kg_id)
 
 
 def _group_rows(keys: np.ndarray) -> list[np.ndarray]:
@@ -556,134 +542,6 @@ def _group_rows(keys: np.ndarray) -> list[np.ndarray]:
     boundaries = np.cumsum(np.bincount(group_of_row))[:-1]
     groups = np.split(rows_by_group, boundaries)
     return [groups[g] for g in np.argsort(first_rows)]
-
-
-class _DictResults:
-    """Result emitter that builds each TRAPI Result as a dict.
-
-    Called with one result's ``{qnode id: [ids]}`` node bindings and
-    ``{qedge id: [ids]}`` edge bindings; :meth:`finish` returns the list.
-    """
-
-    def __init__(self, resource_id: str):
-        self._resource_id = resource_id
-        self._results: list = []
-
-    def add(self, node_bindings: dict, edge_bindings: dict) -> None:
-        result: dict[str, Any] = {
-            "node_bindings": {
-                qnode_id: {"ids": ids} for qnode_id, ids in node_bindings.items()
-            }
-        }
-        # A TRAPI 2.0 Analysis must bind at least one QEdge, and a Result's
-        # analyses list must not be empty.  A result whose every qedge was a
-        # synthetic subclass edge binds nothing, so it carries no analysis
-        # rather than an empty one (2.0 makes Result.analyses optional).
-        if edge_bindings:
-            result["analyses"] = [
-                {
-                    "resource_id": self._resource_id,
-                    "edge_bindings": {
-                        qedge_id: {"ids": ids}
-                        for qedge_id, ids in edge_bindings.items()
-                    },
-                }
-            ]
-        self._results.append(result)
-
-    def finish(self) -> list:
-        return self._results
-
-
-class _JSONStrings(dict):
-    """``str -> its JSON encoding``, computed on first use and cached."""
-
-    def __missing__(self, key: str) -> str:
-        encoded: str = orjson.dumps(key).decode()
-        self[key] = encoded
-        return encoded
-
-
-class _BindingOpeners(dict):
-    """``binding id -> '"<id>":{"ids":['``, computed on first use and cached."""
-
-    def __missing__(self, key: str) -> str:
-        opener: str = orjson.dumps(key).decode() + ':{"ids":['
-        self[key] = opener
-        return opener
-
-
-class _JSONResults:
-    """Result emitter that writes each TRAPI Result straight to JSON text.
-
-    Produces exactly the bytes ``orjson.dumps`` would for the list
-    :class:`_DictResults` builds, without the per-result dicts: on a response
-    of millions of results those dicts, and orjson's walk over them, are
-    most of the cost of building and serializing it.  Every id and binding
-    key is JSON-encoded once and reused.  Text is encoded to bytes in chunks,
-    so the whole array exists at most twice at once.
-
-    >>> bindings = [
-    ...     ({"n0": ["A:1"], "n1": ["B:1"]}, {"e0": ["e1", "e2"]}),
-    ...     ({"n0": ['C:"quoted"\\slash', "é:1"]}, {}),
-    ... ]
-    >>> as_json, as_dicts = _JSONResults("infores:x"), _DictResults("infores:x")
-    >>> for node_bindings, edge_bindings in bindings:
-    ...     as_json.add(node_bindings, edge_bindings)
-    ...     as_dicts.add(node_bindings, edge_bindings)
-    >>> as_json.finish().json == orjson.dumps(as_dicts.finish())
-    True
-    """
-
-    #: Results joined and encoded per chunk.
-    CHUNK = 8192
-
-    def __init__(self, resource_id: str):
-        self._encode = _JSONStrings().__getitem__
-        self._opener = _BindingOpeners().__getitem__
-        self._analysis_open = (
-            ',"analyses":[{"resource_id":'
-            + orjson.dumps(resource_id).decode()
-            + ',"edge_bindings":{'
-        )
-        self._pending: list[str] = []
-        self._chunks: list[bytes] = []
-        self._count = 0
-
-    def _bindings(self, bindings: dict) -> str:
-        encode, opener = self._encode, self._opener
-        return ",".join(
-            [
-                opener(binding_id) + ",".join(map(encode, ids)) + "]}"
-                for binding_id, ids in bindings.items()
-            ]
-        )
-
-    def add(self, node_bindings: dict, edge_bindings: dict) -> None:
-        # Same keys, order and omissions as _DictResults.add
-        text = '{"node_bindings":{' + self._bindings(node_bindings) + "}"
-        if edge_bindings:
-            text += self._analysis_open + self._bindings(edge_bindings) + "}}]"
-        self._pending.append(text + "}")
-        self._count += 1
-        if len(self._pending) >= self.CHUNK:
-            self._flush()
-
-    def _flush(self) -> None:
-        if self._pending:
-            self._chunks.append(",".join(self._pending).encode())
-            self._pending.clear()
-
-    def finish(self) -> SerializedResults:
-        self._flush()
-        pieces = [b"["]
-        for i, chunk in enumerate(self._chunks):
-            if i:
-                pieces.append(b",")
-            pieces.append(chunk)
-        pieces.append(b"]")
-        self._chunks = []
-        return SerializedResults(b"".join(pieces), self._count)
 
 
 #: Rows converted to Python lists per block in ``_build_response``.
@@ -827,14 +685,10 @@ def _build_response(
     original_query_graph=None,
     logger: Optional[logging.Logger] = None,
     deadline=None,
-    serialize_results: bool = False,
 ):
     """Build the TRAPI response from path data.
 
     Args:
-        serialize_results: Write ``message.results`` as a
-            :class:`~gandalf.trapi.SerializedResults` (JSON bytes) instead
-            of a list of dicts.
         logger: Logger to emit this query's records to.  Defaults to the
             module logger.
         deadline: The query's :class:`~gandalf.trapi.Deadline`, checked every
@@ -1010,13 +864,6 @@ def _build_response(
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
     # Edge dicts are created only for unique edges (not per-path).
-    emitter = (
-        _JSONResults(settings.infores)
-        if serialize_results
-        else _DictResults(settings.infores)
-    )
-    emit = emitter.add
-
     # Each group's rows arrive as Python lists, converted a block of groups
     # at a time rather than with a NumPy scalar lookup per cell.
     group_rows = _iter_group_rows(
@@ -1035,10 +882,15 @@ def _build_response(
 
         first_nodes = rows_nodes[0]
 
-        # This result's bindings as {qnode/qedge id: [bound ids]}, turned
-        # into the Result by ``emit`` once the group is done.
-        node_bindings: dict[str, list] = {}
-        edge_bindings: dict[str, list] = {}
+        result: dict[str, Any] = {
+            "node_bindings": {},
+            "analyses": [
+                {
+                    "resource_id": settings.infores,
+                    "edge_bindings": {},
+                }
+            ],
+        }
 
         # Add node bindings -- skip superclass nodes, substitute IDs.
         # For ALL-mode nodes, emit all required IDs.
@@ -1056,7 +908,7 @@ def _build_response(
                     if rid_idx is not None and rid_idx in node_cache:
                         kg_nodes[rid] = node_cache[rid_idx]
                     bound_ids.append(rid)
-                node_bindings[qnode_id] = bound_ids
+                result["node_bindings"][qnode_id] = {"ids": bound_ids}
             elif qnode_id in collate_mode_nodes:
                 # COLLATE: collect all distinct bound entities across paths
                 seen_ids = {}
@@ -1067,7 +919,7 @@ def _build_response(
                         seen_ids[nid] = nidx
                 for nid, nidx in seen_ids.items():
                     kg_nodes[nid] = node_cache[nidx]
-                node_bindings[qnode_id] = list(seen_ids)
+                result["node_bindings"][qnode_id] = {"ids": list(seen_ids)}
             else:
                 # BATCH (default): single binding from first path
                 node_idx = first_nodes[col]
@@ -1086,7 +938,7 @@ def _build_response(
                             bound_id = sc_node_id
                             kg_nodes[sc_node_id] = sc_node
 
-                node_bindings[qnode_id] = [bound_id]
+                result["node_bindings"][qnode_id] = {"ids": [bound_id]}
 
         # Aggregate edge bindings from all paths in group.
         # Edge dicts are created only for unique (subj, pred, obj,
@@ -1179,9 +1031,9 @@ def _build_response(
             if edge_id in subclass_qedges:
                 continue
 
-            binding: list = []
+            binding: dict = {"ids": []}
             bound_kg_ids: set = set()
-            edge_bindings[edge_id] = binding
+            result["analyses"][0]["edge_bindings"][edge_id] = binding
 
             attached = qedge_attached_subclass.get(edge_id, [])
 
@@ -1305,9 +1157,14 @@ def _build_response(
                 else:
                     _append_edge_binding(binding, bound_kg_ids, edge_kg_id)
 
-        emit(node_bindings, edge_bindings)
+        # A TRAPI 2.0 Analysis must bind at least one QEdge, and a Result's
+        # analyses list must not be empty.  A result whose every qedge was a
+        # synthetic subclass edge binds nothing, so it carries no analysis
+        # rather than an empty one (2.0 makes Result.analyses optional).
+        if not result["analyses"][0]["edge_bindings"]:
+            del result["analyses"]
 
-    response["message"]["results"] = emitter.finish()
+        response["message"]["results"].append(result)
 
     # Free path arrays now that results are built
     del path_data
