@@ -113,8 +113,10 @@ ways, and the split between them is deliberate:
    so full Pydantic validation there costs microseconds.
 2. **TypedDicts for internals** (`translator_tom.model_dicts`): gandalf keeps
    building plain dicts and serializing them with orjson, but the dicts are
-   *typed*.  A `TypedDict` is free at runtime -- `cast` compiles to nothing --
-   so this is static checking at zero cost, and mypy (which CI runs) catches
+   *typed*.  A `TypedDict` is free at runtime, so this is static checking at
+   almost no cost.  (`typing.cast` is not free, though: it is a real function
+   call, so keep it out of per-result and per-path loops -- an annotated
+   assignment types a value without one.)  mypy (which CI runs) catches
    binding-shape mistakes, nulls where 2.0 admits none, and misspelled
    properties.  Two gandalf-specific subclasses live in `gandalf/trapi.py`:
    `InFlightEdge` (an Edge plus the `_edge_id` / `_query_*` markers stripped
@@ -152,6 +154,16 @@ the peak RSS of building dicts and calling `orjson.dumps` (and going through
 Gandalf's `large_result_threshold` is 10M paths, and `server._trapi_response` /
 `_request_dict` exist precisely to keep per-result object materialization off
 the hot path.  Use the TypedDicts there instead.
+
+The server goes one step further for the results themselves:
+`lookup(..., serialize_results=True)` writes `message.results` straight to
+JSON (a `gandalf.trapi.SerializedResults`) without building a dict per
+result, and `gandalf.trapi.orjson_default` embeds those bytes verbatim when
+the response is serialized.  The rest of the response (knowledge graph,
+auxiliary graphs, logs) stays plain dicts, so annotators and enrichment work
+on it unchanged.  The server uses this whenever `validate_responses` is off;
+library callers get dicts by default.  The two paths must serialize to the
+same bytes -- `tests/test_serialized_results.py` holds them to that.
 
 TOM requires Python >= 3.10, which is why gandalf's floor is 3.10.
 

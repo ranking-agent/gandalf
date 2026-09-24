@@ -66,6 +66,7 @@ from gandalf.trapi import (
     Deadline,
     TimeoutNotSatisfiable,
     finalize_response,
+    orjson_default,
     query_parameters,
     resolve_timeout,
 )
@@ -80,10 +81,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _orjson_default(obj):
-    if isinstance(obj, set):
-        return list(obj)
-    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+#: ``default`` hook for orjson: sets, and results already serialized by lookup
+_orjson_default = orjson_default
 
 
 class CustomORJSONResponse(JSONResponse):
@@ -646,6 +645,8 @@ def sync_lookup(
         dehydrated=dehydrated_param,
         profile=profile_param,
         deadline=deadline,
+        # Results straight to JSON unless they must be validated as models
+        serialize_results=not _validate,
     )
     if annotator_config:
         annotate_response(response, GRAPH, annotator_config)
@@ -700,6 +701,8 @@ def _async_lookup(
             dehydrated=dehydrated,
             profile=profile,
             deadline=deadline,
+            # The callback body is serialized with orjson, never validated
+            serialize_results=True,
         )
         if annotator_config:
             annotate_response(response, GRAPH, annotator_config)

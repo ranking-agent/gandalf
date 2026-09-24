@@ -65,6 +65,8 @@ import tracemalloc
 from pathlib import Path
 from typing import Any, Optional
 
+import orjson
+
 _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parents[1]
 sys.path.insert(0, str(_REPO))
@@ -147,18 +149,48 @@ def lookup_kwargs(body: dict) -> dict:
     }
 
 
-def run_once(graph, body: dict, bmt, profile: bool = False) -> tuple[float, dict]:
+def run_once(
+    graph, body: dict, bmt, profile: bool = False, json_results: bool = False
+) -> tuple[float, dict]:
     """Run one lookup and return ``(wall_ms, response)``.
 
     Collects garbage first (outside the timer) so one run's leftovers are not
-    billed to the next; ``lookup`` itself disables GC while it runs.
+    billed to the next; ``lookup`` itself disables GC while it runs.  With
+    *json_results*, asks ``lookup`` for its results pre-serialized, as the
+    server does (only passed when set, so the runner still works on commits
+    that predate the option).
     """
     from gandalf.search.lookup import lookup
 
+    kwargs = lookup_kwargs(body)
+    if json_results:
+        kwargs["serialize_results"] = True
     gc.collect()
     t0 = time.perf_counter()
-    response = lookup(graph, body, bmt=bmt, profile=profile, **lookup_kwargs(body))
+    response = lookup(graph, body, bmt=bmt, profile=profile, **kwargs)
     return (time.perf_counter() - t0) * 1000.0, response
+
+
+def _serialize_default(obj):
+    """orjson ``default`` matching the server's: sets, pre-serialized results.
+
+    Duck-typed rather than imported from ``gandalf.trapi``, so the runner
+    works on commits that predate ``SerializedResults``.
+    """
+    if hasattr(obj, "to_list") and hasattr(obj, "json"):
+        return orjson.Fragment(obj.json)
+    if isinstance(obj, set):
+        return list(obj)
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+def serialize(response: dict) -> tuple[float, int]:
+    """Serialize a response as the server does; return ``(ms, bytes)``."""
+    t0 = time.perf_counter()
+    data = orjson.dumps(
+        response, default=_serialize_default, option=orjson.OPT_SERIALIZE_NUMPY
+    )
+    return (time.perf_counter() - t0) * 1000.0, len(data)
 
 
 def profile_tree(response: dict) -> Optional[dict]:
@@ -227,8 +259,11 @@ def fingerprint(response: dict) -> str:
             support,
         )
 
+    results = message["results"]
+    if hasattr(results, "to_list"):
+        results = results.to_list()
     canon = []
-    for result in message["results"]:
+    for result in results:
         nodes = tuple(
             sorted(
                 (qnode, tuple(sorted(binding["ids"])))
@@ -247,12 +282,12 @@ def fingerprint(response: dict) -> str:
     return hashlib.sha256(json.dumps(canon).encode()).hexdigest()[:16]
 
 
-def peak_alloc_mb(graph, body: dict, bmt) -> float:
+def peak_alloc_mb(graph, body: dict, bmt, json_results: bool = False) -> float:
     """Peak traced allocation (MB) over one lookup, measured with tracemalloc."""
     gc.collect()
     tracemalloc.start()
     try:
-        run_once(graph, body, bmt)
+        run_once(graph, body, bmt, json_results=json_results)
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -272,6 +307,7 @@ def bench_query(
     repeat: int,
     memory: bool = False,
     on_run=_print_run,
+    json_results: bool = False,
 ) -> dict:
     """Benchmark one query: warmup, timed runs, one profiled run, and
     optionally one memory-traced run.
@@ -286,16 +322,22 @@ def bench_query(
     # queries pushed the machine into swap and made each run slower than
     # the one before it.
     for _ in range(warmup):
-        ms = run_once(graph, body, bmt)[0]
+        ms = run_once(graph, body, bmt, json_results=json_results)[0]
         on_run("warmup ", ms)
 
     runs_ms = []
     response: dict = {}
     for _ in range(repeat):
         response = {}
-        ms, response = run_once(graph, body, bmt)
+        ms, response = run_once(graph, body, bmt, json_results=json_results)
         runs_ms.append(ms)
         on_run("", ms)
+
+    # Serializing is the rest of what the server does with a response, and
+    # with --json-results part of it has moved into lookup; time it so the
+    # two modes compare end to end.
+    serialize_ms, response_bytes = serialize(response)
+    on_run("serialize ", serialize_ms)
 
     message = response["message"]
     record: dict[str, Any] = {
@@ -307,10 +349,14 @@ def bench_query(
         "kg_nodes": len(message["knowledge_graph"]["nodes"]),
         "kg_edges": len(message["knowledge_graph"]["edges"]),
         "fingerprint": fingerprint(response),
+        "serialize_ms": serialize_ms,
+        "response_bytes": response_bytes,
     }
     del response, message
 
-    profiled_ms, profiled = run_once(graph, body, bmt, profile=True)
+    profiled_ms, profiled = run_once(
+        graph, body, bmt, profile=True, json_results=json_results
+    )
     on_run("profiled ", profiled_ms)
     tree = profile_tree(profiled) or {}
     del profiled
@@ -318,7 +364,9 @@ def bench_query(
     record["peak_alloc_mb"] = None
     if memory:
         t0 = time.perf_counter()
-        record["peak_alloc_mb"] = peak_alloc_mb(graph, body, bmt)
+        record["peak_alloc_mb"] = peak_alloc_mb(
+            graph, body, bmt, json_results=json_results
+        )
         on_run("memory ", (time.perf_counter() - t0) * 1000.0)
     record["stages_ms"] = {label: stage_ms(tree, path) for label, path in STAGE_COLUMNS}
     record["num_paths"] = tree.get("metrics", {}).get("num_paths")
@@ -372,6 +420,12 @@ def _fmt_mb(mb: Optional[float]) -> str:
     return "-" if mb is None else f"{mb:.0f}MB"
 
 
+def _with_serialize(q: dict) -> Optional[float]:
+    """Median lookup time plus serialization, or None for runs without it."""
+    serialize_ms = q.get("serialize_ms")
+    return None if serialize_ms is None else q["median_ms"] + serialize_ms
+
+
 def print_run(report: dict) -> None:
     """Print one run's per-query table and stage breakdown."""
     env = report["environment"]
@@ -380,18 +434,32 @@ def print_run(report: dict) -> None:
         f"\n== {env['label']}  @ {env['git_commit']}{dirty}  "
         f"graph: {env['graph_nodes']:,} nodes / {env['graph_edges']:,} edges"
     )
-    header = f"{'query':<38}{'median':>10}{'min':>10}{'results':>10}{'paths':>11}{'peak mem':>10}  fingerprint"
+    mode = " [json results]" if env.get("json_results") else ""
+    if mode:
+        print(f"  lookup wrote results straight to JSON{mode}")
+    header = (
+        f"{'query':<38}{'median':>10}{'min':>10}{'+serialize':>12}"
+        f"{'results':>10}{'paths':>11}{'peak mem':>10}  fingerprint"
+    )
     print(header)
     print("-" * len(header))
     for q in report["queries"]:
         paths = q.get("num_paths")
         print(
             f"{q['name']:<38}{_fmt_ms(q['median_ms']):>10}{_fmt_ms(q['min_ms']):>10}"
+            f"{_fmt_ms(_with_serialize(q)):>12}"
             f"{q['results']:>10,}{(paths if paths is not None else 0):>11,}"
             f"{_fmt_mb(q.get('peak_alloc_mb')):>10}  {q['fingerprint']}"
         )
     total = sum(q["median_ms"] for q in report["queries"])
-    print(f"{'TOTAL (sum of medians)':<38}{_fmt_ms(total):>10}")
+    totals = [_with_serialize(q) for q in report["queries"]]
+    total_ser = (
+        None if any(t is None for t in totals) else sum(t or 0.0 for t in totals)
+    )
+    print(
+        f"{'TOTAL (sum of medians)':<38}{_fmt_ms(total):>10}{'':>10}"
+        f"{_fmt_ms(total_ser):>12}"
+    )
 
     print("\nStage breakdown (profiled run):")
     labels = [label for label, _ in STAGE_COLUMNS]
@@ -401,6 +469,13 @@ def print_run(report: dict) -> None:
             f"{q['name']:<38}"
             + "".join(f"{_fmt_ms(q['stages_ms'][label]):>15}" for label in labels)
         )
+
+
+def _ratio(before: Optional[float], after: Optional[float]) -> str:
+    """``before / after`` as a speedup, or ``-`` when either is missing."""
+    if before is None or not after:
+        return "-"
+    return f"{before / after:.2f}x"
 
 
 def print_compare(base: dict, new: dict) -> bool:
@@ -419,12 +494,15 @@ def print_compare(base: dict, new: dict) -> bool:
     base_by_name = {q["name"]: q for q in base["queries"]}
     header = (
         f"{'query':<38}{'before':>10}{'after':>10}{'speedup':>9}"
+        f"{'+ser before':>13}{'+ser after':>12}{'speedup':>9}"
         f"{'mem before':>12}{'mem after':>11}  results"
     )
     print(header)
     print("-" * len(header))
     all_same = True
     tot_before = tot_after = 0.0
+    ser_before: Optional[float] = 0.0
+    ser_after: Optional[float] = 0.0
     for q in new["queries"]:
         b = base_by_name.get(q["name"])
         if b is None:
@@ -432,12 +510,16 @@ def print_compare(base: dict, new: dict) -> bool:
             continue
         tot_before += b["median_ms"]
         tot_after += q["median_ms"]
+        b_ser, q_ser = _with_serialize(b), _with_serialize(q)
+        ser_before = None if ser_before is None or b_ser is None else ser_before + b_ser
+        ser_after = None if ser_after is None or q_ser is None else ser_after + q_ser
         same = b["fingerprint"] == q["fingerprint"]
         all_same &= same
         verdict = "same" if same else f"CHANGED ({b['results']:,} -> {q['results']:,})"
         print(
             f"{q['name']:<38}{_fmt_ms(b['median_ms']):>10}{_fmt_ms(q['median_ms']):>10}"
             f"{b['median_ms'] / q['median_ms']:>8.2f}x"
+            f"{_fmt_ms(b_ser):>13}{_fmt_ms(q_ser):>12}{_ratio(b_ser, q_ser):>9}"
             f"{_fmt_mb(b.get('peak_alloc_mb')):>12}{_fmt_mb(q.get('peak_alloc_mb')):>11}"
             f"  {verdict}"
         )
@@ -445,6 +527,8 @@ def print_compare(base: dict, new: dict) -> bool:
         print(
             f"{'TOTAL (sum of medians)':<38}{_fmt_ms(tot_before):>10}"
             f"{_fmt_ms(tot_after):>10}{tot_before / tot_after:>8.2f}x"
+            f"{_fmt_ms(ser_before):>13}{_fmt_ms(ser_after):>12}"
+            f"{_ratio(ser_before, ser_after):>9}"
         )
 
     print("\nStage deltas (profiled run, before -> after):")
@@ -489,10 +573,17 @@ def cmd_run(args) -> int:
 
     label = args.label or _git("rev-parse", "--short", "HEAD") or "run"
     report = {"environment": environment(graph_dir, graph, label), "queries": []}
+    report["environment"]["json_results"] = args.json_results
     for query in queries:
         print(f"  {query['name']}:", end="", flush=True)
         record = bench_query(
-            graph, query, bmt, args.warmup, args.repeat, memory=args.memory
+            graph,
+            query,
+            bmt,
+            args.warmup,
+            args.repeat,
+            memory=args.memory,
+            json_results=args.json_results,
         )
         print(
             f"  -> median {_fmt_ms(record['median_ms'])}"
@@ -548,6 +639,11 @@ def main(argv=None) -> int:
         "--memory",
         action="store_true",
         help="also measure peak allocation with tracemalloc (one slow extra run)",
+    )
+    run.add_argument(
+        "--json-results",
+        action="store_true",
+        help="have lookup write results straight to JSON, as the server does",
     )
     run.add_argument("--label", help="name for this run (default: git commit)")
     run.add_argument("--out", help="save the report as JSON here")
