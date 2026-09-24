@@ -49,8 +49,13 @@ and assigned to the tier its result count falls in (see ``TIERS``).  A
 candidate that times out is discarded.  When the only tiers still short are
 the large ones, sampling shifts toward hub anchors and broader filters (and
 the reverse for small tiers), so rare sizes are found without a huge number
-of probes.  Generation stops when every tier has ``--per-tier`` queries, or
-``--max-probes`` / ``--time-budget`` is reached.
+of probes.  Generation stops when every tier has ``--per-tier`` queries; when
+``--patience`` probes in a row accept nothing (the remaining tiers are out of
+reach under the probe limits -- a smaller graph may simply have no queries
+that large); at ``--max-probes`` / ``--time-budget``; or on Ctrl-C.  The
+output file is rewritten after every accepted query, so an interrupted run
+keeps what it found.  A candidate with the same shape and result count as
+an accepted query is skipped as a likely duplicate workload.
 
 The timeout is checked at pipeline stage boundaries, so one huge probe can
 overrun it; ``--max-probes`` and ``--time-budget`` bound the whole run.
@@ -66,6 +71,7 @@ import json
 import math
 import multiprocessing
 import random
+import signal
 import sys
 import time
 from dataclasses import dataclass, field
@@ -261,6 +267,10 @@ def _probe_worker(conn, graph_dir: str, path_cap: int) -> None:
     expired) or ``"over_cap"`` (a join hit ``path_cap`` rows, so the count
     would be a truncated one).  ``None`` ends the loop.
     """
+    # Ctrl-C reaches the whole process group; the parent handles it and
+    # shuts this process down, so it must not die mid-probe with a traceback.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     from gandalf.biolink import make_toolkit
     from gandalf.graph import CSRGraph
     from gandalf.search import reconstruct
@@ -432,8 +442,25 @@ def pick_mode(fill: TierFill) -> tuple[str, list, list]:
     return "any", [0.3, 0.3, 0.15, 0.25], [0.5, 0.3, 0.2]
 
 
-def generate(graph, worker: ProbeWorker, args) -> tuple[list, dict]:
-    """Propose and probe candidates until the tiers fill or a budget runs out.
+def write_queries(fill: "TierFill", out: Path) -> list:
+    """Write the accepted queries, in tier order, to *out* (atomically).
+
+    Called after every acceptance, so an interrupted or killed run keeps
+    what it found.
+    """
+    queries = [q for name, _, _ in TIERS for q in fill.queries[name]]
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text(json.dumps(queries, indent=2))
+    tmp.replace(out)
+    return queries
+
+
+def generate(graph, worker: ProbeWorker, args, out: Path) -> tuple[list, dict]:
+    """Propose and probe candidates until the tiers fill or a limit is hit.
+
+    Stops when every tier is full, at ``--max-probes`` or ``--time-budget``,
+    after ``--patience`` probes in a row accept nothing (the tiers still
+    short are out of reach under the probe limits), or on Ctrl-C.
 
     Returns:
         ``(queries, stats)``: the accepted queries in tier order, and counts
@@ -443,70 +470,92 @@ def generate(graph, worker: ProbeWorker, args) -> tuple[list, dict]:
     sampler = GraphSampler(graph, rng)
     fill = TierFill(args.per_tier)
     seen: set = set()
+    # (shape, result count) of every accepted query: a candidate matching
+    # one is almost certainly the same workload again -- typically the same
+    # walk with categories that happened not to narrow anything.
+    accepted_sizes: set = set()
     stats = {
         "probes": 0,
         "discarded": {},
         "empty": 0,
         "tier_full": 0,
+        "duplicate": 0,
         "stuck": 0,
+        "stopped": "all tiers full",
     }
     t_start = time.perf_counter()
+    since_accept = 0
 
-    while not fill.done():
-        if stats["probes"] >= args.max_probes:
-            print(f"Stopping: reached --max-probes {args.max_probes}")
-            break
-        if time.perf_counter() - t_start > args.time_budget:
-            print(f"Stopping: reached --time-budget {args.time_budget:.0f}s")
-            break
+    try:
+        while not fill.done():
+            if stats["probes"] >= args.max_probes:
+                stats["stopped"] = f"reached --max-probes {args.max_probes}"
+                break
+            if time.perf_counter() - t_start > args.time_budget:
+                stats["stopped"] = f"reached --time-budget {args.time_budget:.0f}s"
+                break
+            if since_accept >= args.patience:
+                stats["stopped"] = (
+                    f"{args.patience} probes in a row accepted nothing " f"(--patience)"
+                )
+                break
 
-        mode, shape_weights, breadth_weights = pick_mode(fill)
-        shape = rng.choices(list(SHAPES), weights=shape_weights)[0]
-        breadth = rng.choices(BREADTHS, weights=breadth_weights)[0]
-        walked = sampler.walk(sampler.anchor(mode), SHAPES[shape])
-        if walked is None:
-            stats["stuck"] += 1
-            continue
-        body = build_query(sampler, *walked, shape, breadth)
-        key = json.dumps(body, sort_keys=True)
-        if key in seen:
-            continue
-        seen.add(key)
+            mode, shape_weights, breadth_weights = pick_mode(fill)
+            shape = rng.choices(list(SHAPES), weights=shape_weights)[0]
+            breadth = rng.choices(BREADTHS, weights=breadth_weights)[0]
+            walked = sampler.walk(sampler.anchor(mode), SHAPES[shape])
+            if walked is None:
+                stats["stuck"] += 1
+                continue
+            body = build_query(sampler, *walked, shape, breadth)
+            key = json.dumps(body, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
 
-        stats["probes"] += 1
-        status, count, ms = worker.probe(body, args.probe_timeout)
-        if status != "ok":
-            stats["discarded"][status] = stats["discarded"].get(status, 0) + 1
-            outcome = status
-        else:
-            tier = tier_of(count)
-            if tier is None:
-                stats["empty"] += 1
-                outcome = "empty"
-            elif fill.accepts(tier, shape):
-                n = len(fill.queries[tier]) + 1
-                body["name"] = f"{tier}_{shape}_{breadth}_{n}"
-                body["generated"] = {
-                    "tier": tier,
-                    "shape": shape,
-                    "breadth": breadth,
-                    "probe_results": count,
-                    "probe_ms": round(ms, 1),
-                    "seed": args.seed,
-                }
-                fill.queries[tier].append(body)
-                outcome = f"-> {body['name']}"
+            stats["probes"] += 1
+            since_accept += 1
+            status, count, ms = worker.probe(body, args.probe_timeout)
+            if status != "ok":
+                stats["discarded"][status] = stats["discarded"].get(status, 0) + 1
+                outcome = status
             else:
-                stats["tier_full"] += 1
-                outcome = f"{tier} (full)"
-        print(
-            f"  probe {stats['probes']:>3}: {shape:<16}{breadth:<11}"
-            f"{'-' if count is None else f'{count:,}':>11} results "
-            f"{ms / 1000:>7.2f}s  {outcome}",
-            flush=True,
-        )
+                tier = tier_of(count)
+                if tier is None:
+                    stats["empty"] += 1
+                    outcome = "empty"
+                elif not fill.accepts(tier, shape):
+                    stats["tier_full"] += 1
+                    outcome = f"{tier} (full)"
+                elif (shape, count) in accepted_sizes:
+                    stats["duplicate"] += 1
+                    outcome = "duplicate size"
+                else:
+                    n = len(fill.queries[tier]) + 1
+                    body["name"] = f"{tier}_{shape}_{breadth}_{n}"
+                    body["generated"] = {
+                        "tier": tier,
+                        "shape": shape,
+                        "breadth": breadth,
+                        "probe_results": count,
+                        "probe_ms": round(ms, 1),
+                        "seed": args.seed,
+                    }
+                    fill.queries[tier].append(body)
+                    accepted_sizes.add((shape, count))
+                    write_queries(fill, out)
+                    since_accept = 0
+                    outcome = f"-> {body['name']}"
+            print(
+                f"  probe {stats['probes']:>3}: {shape:<16}{breadth:<11}"
+                f"{'-' if count is None else f'{count:,}':>11} results "
+                f"{ms / 1000:>7.2f}s  {outcome}",
+                flush=True,
+            )
+    except KeyboardInterrupt:
+        stats["stopped"] = "interrupted"
 
-    queries = [q for name, _, _ in TIERS for q in fill.queries[name]]
+    queries = write_queries(fill, out)
     stats["elapsed_s"] = round(time.perf_counter() - t_start, 1)
     stats["per_tier"] = {name: len(fill.queries[name]) for name, _, _ in TIERS}
     return queries, stats
@@ -553,6 +602,12 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--max-probes", type=int, default=300)
     parser.add_argument(
+        "--patience",
+        type=int,
+        default=20,
+        help="stop after this many probes in a row accept nothing",
+    )
+    parser.add_argument(
         "--time-budget", type=float, default=3600.0, help="seconds for the whole run"
     )
     parser.add_argument("--seed", type=int, default=0, help="query sampling seed")
@@ -580,20 +635,20 @@ def main(argv=None) -> int:
         f"{args.per_tier} each; limits: {args.probe_timeout:.0f}s, "
         f"{args.probe_mem_gb:.1f}GB, {args.path_cap:,} paths) ..."
     )
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        queries, stats = generate(graph, worker, args)
+        queries, stats = generate(graph, worker, args, out)
     finally:
         worker.close()
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(queries, indent=2))
-
-    print(f"\nWrote {len(queries)} queries to {out}")
+    print(f"\nStopped: {stats['stopped']}")
+    print(f"Wrote {len(queries)} queries to {out}")
     discarded = ", ".join(f"{n} {k}" for k, n in stats["discarded"].items())
     print(
         f"  {stats['probes']} probes in {stats['elapsed_s']}s: "
-        f"{stats['tier_full']} landed in a full tier, {stats['empty']} empty"
+        f"{stats['tier_full']} landed in a full tier, "
+        f"{stats['duplicate']} duplicate sizes, {stats['empty']} empty"
         + (f", discarded: {discarded}" if discarded else "")
         + (f" ({worker.restarts} worker restarts)" if worker.restarts else "")
     )
