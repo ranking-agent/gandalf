@@ -3,6 +3,7 @@
 | Script | Measures |
 |---|---|
 | `bench_lookup.py` | `lookup()` in-process: per-query wall time, per-stage breakdown, peak allocation, and a results fingerprint. Use this to track the effect of a code change. |
+| `fast_path_ab.py` | Whether `_build_response`'s single-path fast path leaves a response byte-identical (including key order) on a given graph and query set, how many results take it, and how much faster it builds them. |
 | `generate_queries.py` | Builds a query set for any graph, spread across result-size tiers from under 100 results to over a million. |
 | `profile_query.py` | One query against a running server, end to end (includes serialization and transport). |
 | `run_benchmark.py` | The shared query set against deployed Gandalf / Retriever instances. |

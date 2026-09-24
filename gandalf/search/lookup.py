@@ -490,7 +490,8 @@ def _lookup_inner(
     return response
 
 
-#: PHASE 0 PROTOTYPE switch for the single-path fast path.
+#: Build single-path results directly in _build_response (see there).  Only
+#: tests turn it off, to compare against the general per-group loop.
 _SINGLE_PATH_FAST = True
 
 #: How many results to build between wall-clock checks in _build_response.
@@ -860,16 +861,25 @@ def _build_response(
     edge_content_keys: dict[int, tuple] = {}
     content_keys_by_pools: dict[tuple, tuple] = {}
 
-    # Each real edge's Edge dict for a full response, built once and copied
-    # into every result that binds the edge.
+    # Each real edge's Edge dict for a full response, built once.  The
+    # general loop copies it into every result that binds the edge; the
+    # single-path fast path uses it as is.
     edge_templates: dict[int, InFlightEdge] = {}
 
-    # PHASE 0 PROTOTYPE: single-path fast path.
-    fast_single = _SINGLE_PATH_FAST
+    # For the single-path fast path below: the non-subclass edge columns, the
+    # node columns at each end of every subclass edge column, and each real
+    # edge's dehydrated Edge dict (built once, like edge_templates).
+    single_path_fast = _SINGLE_PATH_FAST
     plain_edge_cols = [
-        (col, qedge_id, s, o) for col, qedge_id, s, o, sc in edge_cols if not sc
+        (col, qedge_id, subj_col_e, obj_col_e)
+        for col, qedge_id, subj_col_e, obj_col_e, is_subclass in edge_cols
+        if not is_subclass
     ]
-    subclass_col_ends = [(s, o) for _c, _q, s, o, sc in edge_cols if sc]
+    subclass_col_ends = [
+        (subj_col_e, obj_col_e)
+        for _col, _qedge_id, subj_col_e, obj_col_e, is_subclass in edge_cols
+        if is_subclass
+    ]
     minimal_edges: dict[int, InFlightEdge] = {}
 
     # GC is already disabled for the entire query (see top of lookup()).
@@ -951,23 +961,35 @@ def _build_response(
 
                 result["node_bindings"][qnode_id] = {"ids": [bound_id]}
 
-        # PHASE 0 PROTOTYPE: a single path with every subclass match an
-        # identity binds each plain column's edge once, with no dedup and no
-        # composite edges.
+        # Single-path fast path.  Nearly every result on a real graph comes
+        # from one path whose subclass matches are all identities (child ==
+        # parent).  Such a result needs no edge dedup (each qedge has one
+        # column, so one edge) and no composite inferred edges, so each
+        # non-subclass column binds its edge directly.  The output is exactly
+        # what the general loop below would build, in the same order.
+        #
+        # The edge dict itself goes into kg_edges rather than a copy: it sits
+        # under one KG ID only (its edge's), the general loop only ever
+        # changes copies of it, and the cache holding it is dropped when this
+        # function returns.  An edge with no ID gets a fresh uuid per result,
+        # as in the general loop, and so a copy of its own.
         if (
-            fast_single
+            single_path_fast
             and len(rows_nodes) == 1
             and all(first_nodes[s] == first_nodes[o] for s, o in subclass_col_ends)
         ):
             fwd_eidx_row = rows_fwd_eidx[0]
             edge_bindings = result["analyses"][0]["edge_bindings"]
             for col, qedge_id, subj_col_e, obj_col_e in plain_edge_cols:
+                # Only subclass identity matches are synthetic (fwd_eidx <
+                # 0), so every edge here is real.
                 fwd_eidx = fwd_eidx_row[col]
                 if lightweight:
                     edge = minimal_edges.get(fwd_eidx)
                 else:
                     edge = edge_templates.get(fwd_eidx)
                 if edge is None:
+                    # Stored direction, as in the general loop.
                     if rows_via_inv[0][col]:
                         actual_subj_idx = first_nodes[obj_col_e]
                         actual_obj_idx = first_nodes[subj_col_e]
@@ -998,6 +1020,7 @@ def _build_response(
                     edge = edge.copy()
                 kg_edges[edge_kg_id] = edge
                 edge_bindings[qedge_id] = {"ids": [edge_kg_id]}
+            # As below: a result binding no edge carries no analysis.
             if not edge_bindings:
                 del result["analyses"]
             response["message"]["results"].append(result)

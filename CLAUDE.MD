@@ -162,6 +162,18 @@ Gandalf's `large_result_threshold` is 10M paths, and `server._trapi_response` /
 `_request_dict` exist precisely to keep per-result object materialization off
 the hot path.  Use the TypedDicts there instead.
 
+**Single-path results skip the general per-group loop.**  In
+`_build_response`, a result built from one path whose subclass matches are all
+identities (child == parent) needs no edge dedup and no composite inferred
+edge, so it binds each column's edge directly.  On the real Translator graph
+94-100% of xl/xxl results take this path, and it makes response building
+1.4-1.5x faster.  The output must stay byte-identical to the general loop's,
+including result, binding and knowledge-graph key order: the benchmark
+fingerprint ignores order, so `tests/test_single_path_fast_path.py` runs each
+query with `_SINGLE_PATH_FAST` off and on and compares the serialized bytes.
+`scripts/benchmarks/fast_path_ab.py` does the same comparison, with timings,
+on any graph and query set.
+
 TOM requires Python >= 3.10, which is why gandalf's floor is 3.10.
 
 ## TRAPI version
