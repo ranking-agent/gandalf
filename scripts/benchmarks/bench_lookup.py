@@ -280,13 +280,19 @@ def bench_query(
     slower, with *memory*); ``on_run(label, ms)`` is called as each finishes.
     """
     body = query["body"]
+    # Only one response is ever alive at a time: a run starts only after the
+    # previous run's response is released.  Holding the last one while the
+    # next is built doubled peak memory, which on multi-million-result
+    # queries pushed the machine into swap and made each run slower than
+    # the one before it.
     for _ in range(warmup):
-        ms, _ = run_once(graph, body, bmt)
+        ms = run_once(graph, body, bmt)[0]
         on_run("warmup ", ms)
 
     runs_ms = []
     response: dict = {}
     for _ in range(repeat):
+        response = {}
         ms, response = run_once(graph, body, bmt)
         runs_ms.append(ms)
         on_run("", ms)
