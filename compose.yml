@@ -1,0 +1,28 @@
+services:
+  gandalf:
+    container_name: gandalf
+    build: .
+    image: gandalf
+    restart: unless-stopped
+    ports:
+      - "6429:6429"
+    environment:
+      GANDALF_GRAPH_PATH: /data/graph
+      # Traces go to Shepherd's Jaeger (OTLP gRPC) over the shared network.
+      # Set GANDALF_OTEL_ENABLED=false to run without a collector.
+      GANDALF_OTEL_ENABLED: ${GANDALF_OTEL_ENABLED:-true}
+      GANDALF_JAEGER_HOST: ${GANDALF_JAEGER_HOST:-http://jaeger}
+      GANDALF_JAEGER_PORT: ${GANDALF_JAEGER_PORT:-4317}
+    volumes:
+      # Host directory holding the built graph; override with GANDALF_GRAPH_DIR.
+      - ${GANDALF_GRAPH_DIR:-./graph}:/data/graph:ro
+    networks:
+      - shepherd
+
+networks:
+  # Shepherd's compose network, so Gandalf can reach its `jaeger` service and
+  # the retriever/Shepherd can reach Gandalf at http://gandalf:6429. Start
+  # Shepherd first, or create the network with `docker network create shepherd_default`.
+  shepherd:
+    name: ${SHEPHERD_NETWORK:-shepherd_default}
+    external: true
