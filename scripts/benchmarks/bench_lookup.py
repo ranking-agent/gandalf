@@ -259,20 +259,37 @@ def peak_alloc_mb(graph, body: dict, bmt) -> float:
     return peak / 2**20
 
 
+def _print_run(label: str, ms: float) -> None:
+    """Report one finished run inline, so a slow query shows progress."""
+    print(f" {label}{_fmt_ms(ms)}", end="", flush=True)
+
+
 def bench_query(
-    graph, query: dict, bmt, warmup: int, repeat: int, memory: bool = False
+    graph,
+    query: dict,
+    bmt,
+    warmup: int,
+    repeat: int,
+    memory: bool = False,
+    on_run=_print_run,
 ) -> dict:
     """Benchmark one query: warmup, timed runs, one profiled run, and
-    optionally one memory-traced run."""
+    optionally one memory-traced run.
+
+    That is ``warmup + repeat + 1`` runs (``+ 1`` more, several times
+    slower, with *memory*); ``on_run(label, ms)`` is called as each finishes.
+    """
     body = query["body"]
     for _ in range(warmup):
-        run_once(graph, body, bmt)
+        ms, _ = run_once(graph, body, bmt)
+        on_run("warmup ", ms)
 
     runs_ms = []
     response: dict = {}
     for _ in range(repeat):
         ms, response = run_once(graph, body, bmt)
         runs_ms.append(ms)
+        on_run("", ms)
 
     message = response["message"]
     record: dict[str, Any] = {
@@ -288,10 +305,15 @@ def bench_query(
     del response, message
 
     profiled_ms, profiled = run_once(graph, body, bmt, profile=True)
+    on_run("profiled ", profiled_ms)
     tree = profile_tree(profiled) or {}
     del profiled
     record["profiled_ms"] = profiled_ms
-    record["peak_alloc_mb"] = peak_alloc_mb(graph, body, bmt) if memory else None
+    record["peak_alloc_mb"] = None
+    if memory:
+        t0 = time.perf_counter()
+        record["peak_alloc_mb"] = peak_alloc_mb(graph, body, bmt)
+        on_run("memory ", (time.perf_counter() - t0) * 1000.0)
     record["stages_ms"] = {label: stage_ms(tree, path) for label, path in STAGE_COLUMNS}
     record["num_paths"] = tree.get("metrics", {}).get("num_paths")
     lmdb = tree.get("lmdb") or {}
@@ -462,11 +484,14 @@ def cmd_run(args) -> int:
     label = args.label or _git("rev-parse", "--short", "HEAD") or "run"
     report = {"environment": environment(graph_dir, graph, label), "queries": []}
     for query in queries:
-        print(f"  {query['name']} ...", end="", flush=True)
+        print(f"  {query['name']}:", end="", flush=True)
         record = bench_query(
             graph, query, bmt, args.warmup, args.repeat, memory=args.memory
         )
-        print(f" {_fmt_ms(record['median_ms'])}  ({record['results']:,} results)")
+        print(
+            f"  -> median {_fmt_ms(record['median_ms'])}"
+            f"  ({record['results']:,} results)"
+        )
         report["queries"].append(record)
 
     print_run(report)
@@ -506,7 +531,12 @@ def main(argv=None) -> int:
     run.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     run.add_argument("--rebuild", action="store_true", help="rebuild synthetic graph")
     run.add_argument("--only", nargs="+", help="run queries whose name contains any")
-    run.add_argument("--warmup", type=int, default=1, help="untimed runs per query")
+    run.add_argument(
+        "--warmup",
+        type=int,
+        default=1,
+        help="untimed runs per query (each query runs warmup + repeat + 1 times)",
+    )
     run.add_argument("--repeat", type=int, default=3, help="timed runs per query")
     run.add_argument(
         "--memory",

@@ -54,8 +54,14 @@ generated edge IDs. `compare` flags any query whose fingerprint changed and
 exits non-zero, so an optimization that alters the answer can't pass as a
 speed-up.
 
-On a very large query, `--repeat 1 --warmup 0` keeps the run short, at the
-cost of noisier numbers.
+So each query runs `warmup + repeat + 1` times, 5 by default (6 with
+`--memory`, and the memory run is several times slower). Each run prints its
+time as it finishes. A query's generation-time probe (`generated.probe_ms`)
+is one run on the code that generated it. The same query on older, slower
+code, like a pre-optimization baseline, can take many times longer.
+
+On a very large query, `--repeat 1 --warmup 0` cuts that to 2 runs, at the
+cost of noisier numbers. Use the same flags for the before and after runs.
 
 ### Generating a query set
 
