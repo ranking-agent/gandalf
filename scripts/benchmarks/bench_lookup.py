@@ -100,24 +100,25 @@ def load_queries(path: Path) -> list[dict]:
 
 
 def _named(body: dict, default_name: str) -> dict:
-    """Split the optional ``name`` label off a request body."""
+    """Split the optional ``name`` label (and generator metadata) off a body.
+
+    ``generate_queries.py`` records how each query was made under a
+    ``generated`` key; like ``name``, it is not part of the request.
+    """
     body = dict(body)
     name = body.pop("name", None) or default_name
+    body.pop("generated", None)
     return {"name": name, "body": body}
 
 
 def resolve_graph(args) -> tuple[Path, list[dict]]:
     """Find (or build) the graph directory and the queries to run on it."""
     if args.synthetic:
-        from synthetic_graph import build_graph_dir, synthetic_queries
+        from synthetic_graph import cached_graph_dir, synthetic_queries
 
-        out_dir = Path(args.cache_dir) / f"synthetic_{args.synthetic}_s{args.seed}"
-        graph_dir = out_dir / "graph"
-        if args.rebuild or not (graph_dir / "metadata.pkl").exists():
-            print(f"Building synthetic '{args.synthetic}' graph in {out_dir} ...")
-            t0 = time.perf_counter()
-            build_graph_dir(out_dir, args.synthetic, args.seed)
-            print(f"  built in {time.perf_counter() - t0:.1f}s")
+        graph_dir = cached_graph_dir(
+            args.synthetic, args.seed, Path(args.cache_dir), args.rebuild
+        )
         queries = (
             load_queries(Path(args.queries))
             if args.queries

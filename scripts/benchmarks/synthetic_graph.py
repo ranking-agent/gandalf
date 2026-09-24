@@ -25,6 +25,7 @@ Examples:
 
 import json
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -220,6 +221,24 @@ def build_graph_dir(out_dir: Path, scale: str, seed: int = 42) -> Path:
     nodes_path, edges_path = write_kgx(kgx_dir, scale, seed)
     graph = build_graph_from_jsonl(str(edges_path), str(nodes_path))
     graph.save_mmap(graph_dir)
+    return graph_dir
+
+
+def cached_graph_dir(
+    scale: str, seed: int, cache_dir: Path, rebuild: bool = False
+) -> Path:
+    """The graph directory for (*scale*, *seed*) under *cache_dir*, built if needed.
+
+    Shared by the benchmark runner and the query generator so both use the
+    same cached graph.
+    """
+    out_dir = Path(cache_dir) / f"synthetic_{scale}_s{seed}"
+    graph_dir = out_dir / "graph"
+    if rebuild or not (graph_dir / "metadata.pkl").exists():
+        print(f"Building synthetic '{scale}' graph in {out_dir} ...")
+        t0 = time.perf_counter()
+        build_graph_dir(out_dir, scale, seed)
+        print(f"  built in {time.perf_counter() - t0:.1f}s")
     return graph_dir
 
 

@@ -3,6 +3,7 @@
 | Script | Measures |
 |---|---|
 | `bench_lookup.py` | `lookup()` in-process: per-query wall time, per-stage breakdown, peak allocation, and a results fingerprint. Use this to track the effect of a code change. |
+| `generate_queries.py` | Builds a query set for any graph, spread across result-size tiers from under 100 results to over a million. |
 | `profile_query.py` | One query against a running server, end to end (includes serialization and transport). |
 | `run_benchmark.py` | The shared query set against deployed Gandalf / Retriever instances. |
 
@@ -55,6 +56,48 @@ speed-up.
 
 On a very large query, `--repeat 1 --warmup 0` keeps the run short, at the
 cost of noisier numbers.
+
+### Generating a query set
+
+`generate_queries.py` builds queries from paths that exist in the graph,
+runs each candidate once, and keeps it in the size tier its result count
+falls in:
+
+| tier | results |
+|---|---|
+| xs | 1–99 |
+| s | 100–999 |
+| m | 1,000–9,999 |
+| l | 10,000–99,999 |
+| xl | 100,000–999,999 |
+| xxl | 1,000,000+ |
+
+```bash
+python scripts/benchmarks/generate_queries.py \
+    --graph /data/graph_mmap --out bench_results/real_queries.json
+```
+
+It mixes four shapes (1-hop, 2-hop, 3-hop chain, and 3-hop Pathfinder
+pinned at both ends) with three filter levels. The levels are exact
+categories on the free nodes, no categories, and `biolink:related_to`
+everywhere. Anchor nodes range from leaves to the biggest hubs. Once only
+the large tiers (or only the small ones) are still short, it steers
+sampling toward them.
+
+Candidates run in a separate worker process, so a runaway one can't take
+the run down. A candidate is discarded when it:
+
+* times out (`--probe-timeout`, default 120s),
+* exceeds `--probe-mem-gb` of memory (default: half of RAM), or
+* builds more than `--path-cap` intermediate paths (default 5M).
+
+A killed worker restarts, which costs one graph load. The run stops when
+every tier has `--per-tier` queries (default 3), or at `--max-probes` or
+`--time-budget`. The summary lists any tiers left short.
+
+Generate once per graph and commit to the file: the point is to run the
+same queries before and after a change. Don't compare the same file across
+different graphs. A tier is a result count measured on one graph.
 
 ### Without a real graph
 
