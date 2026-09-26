@@ -25,6 +25,9 @@ dependencies = [
     "lmdb>=1.4.0",
     "msgpack>=1.0.0",
     "numpy>=1.20.0",
+    # Edge attributes are stored as JSON and passed into responses as
+    # orjson.Fragment (new in 3.9.0); orjson also serializes every response.
+    "orjson>=3.9.0",
     # The Translator-wide TRAPI object model: request models and the
     # OpenAPI schema come from here, and its TypedDicts type gandalf's
     # internals.  Requires Python 3.10, hence the floor above.
@@ -42,7 +45,6 @@ dev = [
 server = [
     "fastapi>=0.100.0",
     "httpx>=0.24.0",
-    "orjson>=3.9.0",
     "psutil>=5.9.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.12.0",

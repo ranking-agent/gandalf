@@ -4,6 +4,12 @@ These are the "cold path" properties — only accessed during response enrichmen
 for the small set of result edges. Qualifiers and sources (hot path, needed during
 traversal filtering) are kept in-memory via the dedup store in graph.py.
 
+Each edge's value is its attributes array, stored as the JSON a TRAPI response
+carries (see ``EDGE_ATTRIBUTES_FORMAT``).  A full response can then hand the
+stored bytes to the serializer as they are (``get_json_batch``) rather than
+decoding them into Python objects only to encode them again; readers that need
+the attributes themselves parse them with orjson (``get`` / ``get_batch``).
+
 LMDB is a memory-mapped B-tree. Multiple worker processes share the same physical
 memory pages via the OS, identical to how numpy mmap works. No per-process
 duplication.
@@ -15,9 +21,24 @@ import struct
 from pathlib import Path
 
 import lmdb
-import msgpack
+import orjson
 
 logger = logging.getLogger(__name__)
+
+#: How edge attributes are stored, recorded in a saved graph's metadata.
+#: ``load_mmap`` refuses a graph without it: one built before attributes
+#: were stored as JSON holds msgpack blobs instead.
+EDGE_ATTRIBUTES_FORMAT = "json"
+
+
+def encode_attributes(attributes) -> bytes:
+    """An edge's attributes array as its stored value.
+
+    >>> encode_attributes([{"attribute_type_id": "biolink:x", "value": 1}])
+    b'[{"attribute_type_id":"biolink:x","value":1}]'
+    """
+    data: bytes = orjson.dumps(attributes)
+    return data
 
 
 # Read-only map size — large enough to cover any pre-built database.
@@ -71,7 +92,7 @@ def _decode_key(key: bytes) -> int:
 class LMDBPropertyStore:
     """Disk-backed edge property storage using LMDB.
 
-    Stores attributes per edge as msgpack blobs.
+    Stores each edge's attributes array as JSON (see ``encode_attributes``).
     Keys are edge indices (matching CSR array positions) encoded as 4-byte
     big-endian integers for correct sort order.
 
@@ -93,15 +114,15 @@ class LMDBPropertyStore:
     def get(self, edge_idx):
         """Get all detail properties for a single edge.
 
-        Returns dict with an 'attributes' key (and any other stored keys),
-        or empty dict if edge not found.
+        Returns ``{"attributes": [...]}``, or an empty dict if the edge has no
+        stored detail.
         """
         key = _encode_key(edge_idx)
         with self._env.begin(buffers=True) as txn:
             val = txn.get(key)
             if val is None:
                 return {}
-            return msgpack.unpackb(val, raw=False)
+            return {"attributes": orjson.loads(val)}
 
     def get_batch(self, edge_indices):
         """Get detail properties for multiple edges in a single transaction.
@@ -111,8 +132,8 @@ class LMDBPropertyStore:
         lookups -- a large win for big, scattered result sets with a cold
         page cache.
 
-        Returns dict mapping edge_idx -> properties dict (missing edges
-        are simply absent).
+        Returns dict mapping edge_idx -> ``{"attributes": [...]}`` (missing
+        edges are simply absent).
         """
         results = {}
         with self._env.begin(buffers=True) as txn:
@@ -120,7 +141,25 @@ class LMDBPropertyStore:
                 key = _encode_key(idx)
                 val = txn.get(key)
                 if val is not None:
-                    results[idx] = msgpack.unpackb(val, raw=False)
+                    results[idx] = {"attributes": orjson.loads(val)}
+        return results
+
+    def get_json_batch(self, edge_indices):
+        """Each edge's attributes as the stored JSON bytes, undecoded.
+
+        Like :meth:`get_batch`, but for a response that serializes the
+        attributes straight away: copying the bytes out of the read
+        transaction is all the work per edge.
+
+        Returns dict mapping edge_idx -> bytes (missing edges are absent).
+        """
+        results = {}
+        with self._env.begin(buffers=True) as txn:
+            get = txn.get
+            for idx in sorted({int(i) for i in edge_indices}):
+                val = get(_encode_key(idx))
+                if val is not None:
+                    results[idx] = bytes(val)
         return results
 
     def close(self):
@@ -146,7 +185,8 @@ class LMDBPropertyStore:
         Args:
             db_path: Path for the LMDB directory.
             edge_iterator: Yields (edge_idx, props_dict) tuples where
-                props_dict has an 'attributes' key (TRAPI Attribute list).
+                props_dict has an 'attributes' key (TRAPI Attribute list);
+                only the attributes are stored.
                 Must yield in edge_idx order (0, 1, 2, ...).
             num_edges: Total number of edges (for progress reporting).
             commit_every: Commit transaction every N edges to limit memory.
@@ -173,7 +213,7 @@ class LMDBPropertyStore:
         try:
             for edge_idx, props in edge_iterator:
                 key = _encode_key(edge_idx)
-                val = msgpack.packb(props, use_bin_type=True)
+                val = encode_attributes(props.get("attributes", []))
                 txn = _put_with_resize(env, txn, key, val, pending)
                 count += 1
 

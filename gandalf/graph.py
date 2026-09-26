@@ -9,11 +9,11 @@ import time
 from pathlib import Path
 from typing import Literal, Optional, Union
 
-import msgpack
+import orjson
 import numpy as np
 
 from gandalf.config import settings
-from gandalf.lmdb_store import LMDBPropertyStore
+from gandalf.lmdb_store import EDGE_ATTRIBUTES_FORMAT, LMDBPropertyStore
 from gandalf.node_store import NodeStore
 
 logger = logging.getLogger(__name__)
@@ -1247,8 +1247,7 @@ class CSRGraph:
                     triple_key = edge_to_triple.get(edge_idx)
                     if triple_key is None:
                         continue
-                    detail = msgpack.unpackb(val_buf, raw=False)
-                    for attr in detail.get("attributes", []):
+                    for attr in orjson.loads(val_buf):
                         type_id = attr.get("attribute_type_id", "biolink:Attribute")
                         source = attr.get("attribute_source", None)
                         orig_name = attr.get("original_attribute_name")
@@ -1452,6 +1451,7 @@ class CSRGraph:
         metadata = {
             "num_nodes": self.num_nodes,
             "predicate_to_idx": self.predicate_to_idx,
+            "edge_attributes_format": EDGE_ATTRIBUTES_FORMAT,
         }
         with open(directory / "metadata.pkl", "wb") as f:
             pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1642,6 +1642,14 @@ class CSRGraph:
 
         # Load LMDB store if present
         if lmdb_path.exists():
+            stored_format = metadata.get("edge_attributes_format")
+            if stored_format != EDGE_ATTRIBUTES_FORMAT:
+                raise GraphFormatError(
+                    f"{directory} stores its edge attributes as "
+                    f"{stored_format or 'msgpack'}, from before gandalf stored "
+                    f"them as {EDGE_ATTRIBUTES_FORMAT}. Rebuild the graph with "
+                    f"gandalf-build to serve it."
+                )
             graph.lmdb_store = LMDBPropertyStore(lmdb_path, readonly=True)
         else:
             graph.lmdb_store = None

@@ -25,6 +25,7 @@ Examples:
 
 import json
 import random
+import pickle
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -224,6 +225,19 @@ def build_graph_dir(out_dir: Path, scale: str, seed: int = 42) -> Path:
     return graph_dir
 
 
+def _stale(graph_dir: Path) -> bool:
+    """Whether a cached graph predates the current edge-attribute format
+    (``load_mmap`` would refuse it)."""
+    from gandalf.lmdb_store import EDGE_ATTRIBUTES_FORMAT
+
+    metadata_path = graph_dir / "metadata.pkl"
+    if not metadata_path.exists():
+        return False
+    with open(metadata_path, "rb") as f:
+        metadata = pickle.load(f)
+    return metadata.get("edge_attributes_format") != EDGE_ATTRIBUTES_FORMAT
+
+
 def cached_graph_dir(
     scale: str, seed: int, cache_dir: Path, rebuild: bool = False
 ) -> Path:
@@ -234,6 +248,9 @@ def cached_graph_dir(
     """
     out_dir = Path(cache_dir) / f"synthetic_{scale}_s{seed}"
     graph_dir = out_dir / "graph"
+    if not rebuild and _stale(graph_dir):
+        print(f"Cached graph in {out_dir} is from an older format; rebuilding.")
+        rebuild = True
     if rebuild or not (graph_dir / "metadata.pkl").exists():
         print(f"Building synthetic '{scale}' graph in {out_dir} ...")
         t0 = time.perf_counter()
