@@ -323,6 +323,25 @@ Run them explicitly with `python -m pytest -m integration`.
 - CI/CD pipeline configured via `.github/workflows/ci.yml` (lint, test, typecheck)
 - Dockerfile available for containerized deployment
 - Server configurable via environment variables (see README.md)
+- **Response compression stays on the event loop, on one thread (decided).**
+  `ZstdCompressionMiddleware` compresses each response inline, so a worker
+  can't accept or serve anything else while it compresses (about 4s for a
+  2.3 GB response at ~600 MB/s, level 4).  Both alternatives were weighed and
+  turned down:
+  - *zstd's own threads* (`ZstdCompressor(threads=...)`): about 3x faster,
+    but production runs 7 gunicorn workers on 8 CPUs, so extra compression
+    threads would take cores from queries running in other workers.
+  - *Compressing on a worker thread* (`anyio.to_thread.run_sync`; zstd
+    releases the GIL): no extra CPU, and the worker stays responsive, but it
+    could then start a new query while the old response is still in memory
+    (the serialized body plus its compressed copy, several GB on the largest
+    queries).  Those queries peak around 11 GB each, so overlapping two in
+    one worker makes an OOM kill more likely.  Today's blocking loop means
+    a worker never accepts a new query until the previous body is compressed
+    and freed.
+  Revisit only if workers stall in practice (e.g. health checks failing
+  during large queries).  In that case take the worker-thread version with
+  `threads=0`.
 
 ## Best practice:
 
