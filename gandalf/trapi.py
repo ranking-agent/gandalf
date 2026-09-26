@@ -299,6 +299,11 @@ def attributes_to_fragments(response: Any) -> None:
     message = response.get("message") or {}
     edges = (message.get("knowledge_graph") or {}).get("edges") or {}
     fragment = orjson.Fragment
+    results = message.get("results") or []
+    for i, result in enumerate(results):
+        # Results written as JSON (lookup(results_as_json=True)).
+        if type(result) is bytes:
+            results[i] = fragment(result)
     for edge in edges.values():
         attributes = edge.get("attributes")
         if type(attributes) is bytes:

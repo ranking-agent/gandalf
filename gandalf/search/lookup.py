@@ -9,6 +9,7 @@ from collections import defaultdict
 from typing import Any, Optional, Union, cast
 
 import numpy as np
+import orjson
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ def lookup(
     profile=False,
     deadline=None,
     attributes_as_json: bool = False,
+    results_as_json: bool = False,
 ):
     """Take an arbitrary Translator query graph and return all matching paths.
 
@@ -164,6 +166,7 @@ def lookup(
                     logger=query_logger,
                     deadline=deadline,
                     attributes_as_json=attributes_as_json,
+                    results_as_json=results_as_json,
                 )
             except QueryTimeout as exc:
                 # Report the overrun as a TRAPI outcome rather than an error:
@@ -202,6 +205,7 @@ def _lookup_inner(
     logger: Optional[logging.Logger] = None,
     deadline=None,
     attributes_as_json: bool = False,
+    results_as_json: bool = False,
 ):
     """Inner implementation of lookup with all the core logic.
 
@@ -454,6 +458,7 @@ def _lookup_inner(
         }
     }
 
+    num_results = 0
     if num_paths == 0:
         t_built = time.perf_counter()
         logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
@@ -466,7 +471,7 @@ def _lookup_inner(
         }
 
         with prof.stage("build_response"):
-            _build_response(
+            num_results = _build_response(
                 graph,
                 response,
                 path_data,
@@ -479,6 +484,7 @@ def _lookup_inner(
                 logger=logger,
                 deadline=deadline,
                 attributes_as_json=attributes_as_json,
+                results_as_json=results_as_json,
             )
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
@@ -496,15 +502,17 @@ def _lookup_inner(
     prof.add_metric("total_ms", (t_stop - t_start) * 1000.0)
     if gc_summary:
         prof.add_metric("gc", gc_summary)
-    logger.info(
-        f"Returning {len(response['message']['results'])} results in {t_stop - t_start} seconds."
-    )
+    logger.info(f"Returning {num_results} results in {t_stop - t_start} seconds.")
     return response
 
 
 #: Build single-path results directly in _build_response (see there).  Only
 #: tests turn it off, to compare against the general per-group loop.
 _SINGLE_PATH_FAST = True
+
+#: With ``results_as_json``, how many consecutive single-path results share
+#: one ``bytes`` entry of the results list (1: an entry per result).
+_RESULTS_BLOCK = 4096
 
 #: How many results to build between wall-clock checks in _build_response.
 _DEADLINE_CHECK_INTERVAL = 4096
@@ -720,12 +728,18 @@ def _build_response(
     logger: Optional[logging.Logger] = None,
     deadline=None,
     attributes_as_json: bool = False,
+    results_as_json: bool = False,
 ):
     """Build the TRAPI response from path data.
 
     Args:
         attributes_as_json: Give each real edge its stored attributes JSON as
             ``bytes`` (see ``lookup``).
+        results_as_json: Write single-path results as JSON ``bytes`` (see
+            ``lookup``).
+
+    Returns:
+        The number of results built (``bytes`` entries hold several).
         logger: Logger to emit this query's records to.  Defaults to the
             module logger.
         deadline: The query's :class:`~gandalf.trapi.Deadline`, checked every
@@ -929,6 +943,52 @@ def _build_response(
     # internal markers stripped once all results are built.
     marked_edges: list[InFlightEdge] = []
 
+    # results_as_json: single-path results written straight to JSON from a
+    # template fixed by the query graph -- node bindings in column order
+    # (superclass qnodes left out), then the analysis's edge bindings in
+    # plain_edge_cols order, exactly as the dict path orders them -- with
+    # each bound ID encoded once.  Consecutive ones are joined into one
+    # ``bytes`` entry of the results list (up to _RESULTS_BLOCK), which the
+    # server hands to orjson as a Fragment.  ALL/COLLATE bindings vary in
+    # shape, so those queries stay on dicts.
+    json_template: Optional[bytes] = None
+    json_node_cols: list[int] = []
+    encoded_ids: dict[str, bytes] = {}
+    pending_json: list[bytes] = []
+    results = response["message"]["results"]
+    num_results = 0
+    if (
+        results_as_json
+        and single_path_fast
+        and not all_mode_nodes
+        and not collate_mode_nodes
+    ):
+        json_node_cols = [
+            col
+            for col in range(pa_num_node_cols)
+            if col_to_qnode[col] not in superclass_qnodes
+        ]
+
+        def _key(key: str) -> bytes:
+            # A literal part of a %-template: any "%" in it must be doubled.
+            encoded: bytes = orjson.dumps(key)
+            return encoded.replace(b"%", b"%%") + b':{"ids":[%s]}'
+
+        json_template = (
+            b'{"node_bindings":{'
+            + b",".join(_key(col_to_qnode[col]) for col in json_node_cols)
+            + b"}"
+        )
+        if plain_edge_cols:
+            json_template += (
+                b',"analyses":[{"resource_id":'
+                + orjson.dumps(settings.infores).replace(b"%", b"%%")
+                + b',"edge_bindings":{'
+                + b",".join(_key(qedge_id) for _c, qedge_id, _s, _o in plain_edge_cols)
+                + b"}}]"
+            )
+        json_template += b"}"
+
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
     # Edge dicts are created only for unique edges (not per-path).
@@ -949,6 +1009,76 @@ def _build_response(
             deadline.check("response building")
 
         first_nodes = rows_nodes[0]
+
+        if (
+            json_template is not None
+            and len(rows_nodes) == 1
+            and all(first_nodes[s] == first_nodes[o] for s, o in subclass_col_ends)
+        ):
+            # The single-path fast path below, written as JSON.  KG nodes and
+            # edges are filed exactly as there, so their order is unchanged.
+            ids: list[bytes] = []
+            for col in json_node_cols:
+                node_idx = first_nodes[col]
+                node_id = node_id_cache[node_idx]
+                kg_nodes[node_id] = node_cache[node_idx]
+                encoded = encoded_ids.get(node_id)
+                if encoded is None:
+                    encoded = encoded_ids[node_id] = orjson.dumps(node_id)
+                ids.append(encoded)
+            fwd_eidx_row = rows_fwd_eidx[0]
+            for col, _qedge_id, subj_col_e, obj_col_e in plain_edge_cols:
+                fwd_eidx = fwd_eidx_row[col]
+                if lightweight:
+                    edge = minimal_edges.get(fwd_eidx)
+                else:
+                    edge = edge_templates.get(fwd_eidx)
+                if edge is None:
+                    if rows_via_inv[0][col]:
+                        actual_subj_idx = first_nodes[obj_col_e]
+                        actual_obj_idx = first_nodes[subj_col_e]
+                    else:
+                        actual_subj_idx = first_nodes[subj_col_e]
+                        actual_obj_idx = first_nodes[obj_col_e]
+                    predicate = idx_to_predicate[rows_preds[0][col]]
+                    subj_id = node_id_cache[actual_subj_idx]
+                    obj_id = node_id_cache[actual_obj_idx]
+                    if lightweight:
+                        edge = _minimal_edge(
+                            graph, fwd_eidx, predicate, subj_id, obj_id
+                        )
+                        minimal_edges[fwd_eidx] = edge
+                    else:
+                        edge = _full_edge(
+                            graph,
+                            fwd_eidx,
+                            predicate,
+                            subj_id,
+                            obj_id,
+                            edge_detail_map.get(fwd_eidx, {}),
+                        )
+                        edge_templates[fwd_eidx] = edge
+                edge_kg_id = edge_id_map.get(fwd_eidx)
+                if not edge_kg_id:
+                    edge_kg_id = str(uuid.uuid4())[:8]
+                    kg_edges[edge_kg_id] = edge.copy()
+                    ids.append(orjson.dumps(edge_kg_id))
+                    continue
+                kg_edges[edge_kg_id] = edge
+                encoded = encoded_ids.get(edge_kg_id)
+                if encoded is None:
+                    encoded = encoded_ids[edge_kg_id] = orjson.dumps(edge_kg_id)
+                ids.append(encoded)
+            pending_json.append(json_template % tuple(ids))
+            num_results += 1
+            if len(pending_json) >= _RESULTS_BLOCK:
+                results.append(b",".join(pending_json))
+                pending_json.clear()
+            continue
+        if pending_json:
+            # A dict result comes next: keep the order.
+            results.append(b",".join(pending_json))
+            pending_json.clear()
 
         result: dict[str, Any] = {
             "node_bindings": {},
@@ -1077,6 +1207,7 @@ def _build_response(
             if not edge_bindings:
                 del result["analyses"]
             response["message"]["results"].append(result)
+            num_results += 1
             continue
 
         # Aggregate edge bindings from all paths in group.
@@ -1305,6 +1436,11 @@ def _build_response(
             del result["analyses"]
 
         response["message"]["results"].append(result)
+        num_results += 1
+
+    if pending_json:
+        results.append(b",".join(pending_json))
+        pending_json.clear()
 
     # Free path arrays now that results are built
     del path_data
@@ -1320,10 +1456,11 @@ def _build_response(
     t_built = time.perf_counter()
     logger.debug(
         "  Built %s results (%.2fs)",
-        f"{len(response['message']['results']):,}",
+        f"{num_results:,}",
         t_built - t_grouped,
     )
     logger.debug("  Post-processing total: %.2fs", t_built - t_post_start)
+    return num_results
 
 
 #: Predicate and qualifier expanders per BMT instance.  Each caches the BMT
