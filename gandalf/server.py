@@ -64,8 +64,10 @@ from gandalf.request_validation import (
 from gandalf.search.edge_constraints import ConstraintError, EdgeConstraints
 from gandalf.search.gc_utils import gc_disabled
 from gandalf.trapi import (
+    AttributesJSON,
     Deadline,
     TimeoutNotSatisfiable,
+    attributes_to_fragments,
     finalize_response,
     query_parameters,
     resolve_timeout,
@@ -84,6 +86,10 @@ logger = logging.getLogger(__name__)
 def _orjson_default(obj):
     if isinstance(obj, set):
         return list(obj)
+    if isinstance(obj, AttributesJSON):
+        # Correct, but slow per edge: responses convert these up front with
+        # attributes_to_fragments; this only catches one that was missed.
+        return orjson.Fragment(obj.json)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
@@ -655,9 +661,13 @@ def sync_lookup(
             dehydrated=dehydrated_param,
             profile=profile_param,
             deadline=deadline,
+            # Serialized straight from the graph's JSON, unless FastAPI is to
+            # validate the response, which needs the attributes as lists.
+            attributes_as_json=not _validate,
         )
         if annotator_config:
             annotate_response(response, GRAPH, annotator_config)
+        attributes_to_fragments(response)
         rendered = _trapi_response(response)
         del response
     return rendered
@@ -714,9 +724,11 @@ def _async_lookup(
                 dehydrated=dehydrated,
                 profile=profile,
                 deadline=deadline,
+                attributes_as_json=True,
             )
             if annotator_config:
                 annotate_response(response, GRAPH, annotator_config)
+            attributes_to_fragments(response)
         try:
             # Serialize with orjson rather than httpx's stdlib-json ``json=``
             # path, which is markedly slower for large result sets.

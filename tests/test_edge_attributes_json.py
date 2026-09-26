@@ -82,3 +82,149 @@ def test_graph_from_before_json_attributes_is_refused(graph, tmp_path):  # noqa:
         pickle.dump(metadata, f)
     with pytest.raises(GraphFormatError, match="Rebuild the graph"):
         CSRGraph.load_mmap(tmp_path / "graph")
+
+
+# ---------------------------------------------------------------------------
+# JSON mode: lookup(attributes_as_json=True) as the server runs it
+# ---------------------------------------------------------------------------
+
+from gandalf.search import lookup  # noqa: E402
+from gandalf.trapi import (  # noqa: E402
+    AttributesJSON,
+    attributes_to_fragments,
+    edge_attributes,
+)
+
+METFORMIN = "CHEBI:6801"
+T2D = "MONDO:0005148"
+DIABETES = "MONDO:0005015"
+
+
+def _query(nodes: dict, edges: dict) -> dict:
+    return {"message": {"query_graph": {"nodes": nodes, "edges": edges}}}
+
+
+def _edge(subject: str, obj: str, predicate: str) -> dict:
+    return {"subject": subject, "object": obj, "predicates": [predicate]}
+
+
+QUERIES = {
+    # single-path and multi-path results over two edge columns
+    "two_hop": _query(
+        {
+            "n0": {"ids": [METFORMIN]},
+            "n1": {"categories": ["biolink:Gene"]},
+            "n2": {"ids": [T2D]},
+        },
+        {
+            "e0": _edge("n0", "n1", "biolink:affects"),
+            "e1": _edge("n1", "n2", "biolink:gene_associated_with_condition"),
+        },
+    ),
+    # direct and inferred (subclass) edges
+    "subclass": _query(
+        {"n0": {"ids": [METFORMIN]}, "n1": {"ids": [DIABETES]}},
+        {"e0": _edge("n0", "n1", "biolink:treats")},
+    ),
+    # several predicates between the same pair; found through inverses
+    "related_to": _query(
+        {"n0": {"ids": [T2D]}, "n1": {"ids": [METFORMIN]}},
+        {"e0": _edge("n0", "n1", "biolink:related_to")},
+    ),
+}
+
+
+def _message_bytes(response: dict) -> bytes:
+    attributes_to_fragments(response)
+    return orjson.dumps(response["message"])
+
+
+@pytest.mark.parametrize("dehydrated", [False, True])
+@pytest.mark.parametrize("name", list(QUERIES))
+def test_json_mode_serializes_to_the_same_bytes(
+    graph, bmt, name, dehydrated  # noqa: F811
+):
+    query = QUERIES[name]
+    parsed = lookup(graph, query, bmt=bmt, dehydrated=dehydrated)
+    as_json = lookup(
+        graph, query, bmt=bmt, dehydrated=dehydrated, attributes_as_json=True
+    )
+    encoded = [
+        edge
+        for edge in as_json["message"]["knowledge_graph"]["edges"].values()
+        if type(edge.get("attributes")) is AttributesJSON
+    ]
+    if dehydrated:
+        assert not encoded, "a dehydrated response carries no attributes"
+    else:
+        assert encoded, "a full response should carry stored JSON"
+    assert _message_bytes(as_json) == orjson.dumps(parsed["message"])
+
+
+def test_edge_attributes_reads_and_edits_in_place(graph, bmt):  # noqa: F811
+    query = QUERIES["two_hop"]
+    parsed = lookup(graph, query, bmt=bmt)
+    as_json = lookup(graph, query, bmt=bmt, attributes_as_json=True)
+    added = {"attribute_type_id": "biolink:has_count", "value": 7}
+
+    for response in (parsed, as_json):
+        edges = response["message"]["knowledge_graph"]["edges"]
+        first = next(iter(edges.values()))
+        edge_attributes(first).append(added)
+
+    parsed_edges = parsed["message"]["knowledge_graph"]["edges"]
+    json_edges = as_json["message"]["knowledge_graph"]["edges"]
+    for edge_id, edge in json_edges.items():
+        assert edge_attributes(edge) == parsed_edges[edge_id].get("attributes", [])
+    assert _message_bytes(as_json) == orjson.dumps(parsed["message"])
+
+
+@pytest.fixture
+def server(graph, bmt, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("GANDALF_SKIP_PRELOAD", "true")
+    monkeypatch.setenv("GANDALF_OTEL_ENABLED", "false")
+    from gandalf import server as gandalf_server
+
+    monkeypatch.setattr(gandalf_server, "GRAPH", graph)
+    monkeypatch.setattr(gandalf_server, "BMT", bmt)
+    return gandalf_server
+
+
+def test_server_serves_the_same_message(server, graph, bmt):  # noqa: F811
+    query = QUERIES["two_hop"]
+    rendered = server.sync_lookup(request=dict(query), profile=None)
+    served = orjson.loads(rendered.body)["message"]
+    assert served == lookup(graph, query, bmt=bmt)["message"]
+
+
+def test_server_annotators_read_edge_attributes(server, monkeypatch):
+    seen = []
+    added = {"attribute_type_id": "biolink:has_count", "value": 7}
+
+    def annotate(response, graph, config):
+        for edge in response["message"]["knowledge_graph"]["edges"].values():
+            attributes = edge_attributes(edge)
+            seen.append(type(attributes))
+            attributes.append(added)
+
+    monkeypatch.setattr(server, "annotate_response", annotate)
+    query = dict(QUERIES["two_hop"], parameters={"annotator_config": {"any": {}}})
+    rendered = server.sync_lookup(request=query, profile=None)
+    assert seen and set(seen) == {list}
+    edges = orjson.loads(rendered.body)["message"]["knowledge_graph"]["edges"]
+    assert all(edge["attributes"][-1] == added for edge in edges.values())
+
+
+def test_validating_server_gets_attributes_as_lists(server, monkeypatch):
+    monkeypatch.setattr(server, "_validate", True)
+    response = server.sync_lookup(request=dict(QUERIES["two_hop"]), profile=None)
+    edges = response["message"]["knowledge_graph"]["edges"]
+    assert all(isinstance(e.get("attributes", []), list) for e in edges.values())
+
+
+def test_server_default_serializes_a_stray_wrapper(server):
+    data = orjson.dumps(
+        {"attributes": AttributesJSON(b'[{"attribute_type_id":"biolink:x"}]')},
+        default=server._orjson_default,
+    )
+    assert data == b'{"attributes":[{"attribute_type_id":"biolink:x"}]}'

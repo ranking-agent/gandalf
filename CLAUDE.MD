@@ -182,6 +182,26 @@ it is in a result; build a new one instead.
 `tests/test_single_path_fast_path.py::test_single_id_bindings_are_shared`
 pins the sharing.
 
+**Edge attributes reach the server's responses undecoded.**  Each edge's
+attributes are stored as the JSON array a response carries.  The server calls
+`lookup(..., attributes_as_json=True)`, so a real edge's `attributes` is
+`gandalf.trapi.AttributesJSON` (the stored bytes) rather than a list.  Just
+before serializing, `attributes_to_fragments` turns those into
+`orjson.Fragment`, which orjson copies into its output as they are.  Decoding
+them and encoding them again was the costliest step of a large full response.
+Two rules follow:
+- **Read or change an edge's attributes through
+  `gandalf.trapi.edge_attributes(edge)`** (response annotator plugins
+  included), which decodes them in place.  A Fragment cannot be read back, so
+  nothing may need them after `attributes_to_fragments`.
+- **Output stays byte-identical to decoding them:** the stored bytes are
+  exactly what orjson makes of the decoded list, and the attributes key keeps
+  its place in the edge.  `tests/test_edge_attributes_json.py` checks both
+  modes serialize to the same bytes.
+
+Library callers get plain lists by default, and so does the server when
+`validate_responses` is on, since FastAPI's validation needs them.
+
 **GC stays paused until the response is freed.**  `lookup()` pauses the
 cyclic GC while it runs (`gandalf.search.gc_utils.pause_gc`), and the server's
 query handlers hold the same pause until the response has been serialized
@@ -254,8 +274,11 @@ a client asked for is worse than an error.  So is a query graph with no
 Some 2.0 requirements are satisfied in the serialized graph and only change
 on a rebuild: `knowledge_level`/`agent_type` interning, `Node.name` /
 `Node.categories` normalization, `RetrievalSource.upstream_resource_ids`
-pruning (done in the loader so it covers both graph sources), and the
-persisted `meta_kg.json` / `sri_testing_data.json`.  Everything else is
+pruning (done in the loader so it covers both graph sources), the persisted
+`meta_kg.json` / `sri_testing_data.json`, and the storage format of edge
+attributes (JSON arrays in `edge_properties.lmdb`, recorded as
+`edge_attributes_format` in `metadata.pkl`; `load_mmap` refuses a graph
+without it).  Everything else is
 computed per query.  When changing a serialization rule, check which side it
 lands on -- a fix applied only in the loader will not reach an already-built
 graph.

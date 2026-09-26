@@ -28,6 +28,7 @@ from gandalf.query_planner import get_next_qedge, remove_orphaned
 from translator_tom.model_dicts import QueryDict
 
 from gandalf.trapi import (
+    AttributesJSON,
     Deadline,
     InFlightEdge,
     QueryTimeout,
@@ -54,6 +55,7 @@ def lookup(
     dehydrated=None,
     profile=False,
     deadline=None,
+    attributes_as_json: bool = False,
 ):
     """Take an arbitrary Translator query graph and return all matching paths.
 
@@ -74,6 +76,15 @@ def lookup(
             If False, force full enrichment.  If None (default), automatically
             enable lightweight mode when path count exceeds the large result
             threshold.
+        attributes_as_json: If True, each real edge's ``attributes`` in a
+            full response is :class:`~gandalf.trapi.AttributesJSON` -- the
+            JSON stored in the graph, not decoded -- for a caller that
+            serializes with orjson after
+            :func:`~gandalf.trapi.attributes_to_fragments`, as the server
+            does.  Decoding and re-encoding them costs more than any other
+            step of a large full response.  Read one through
+            :func:`~gandalf.trapi.edge_attributes`.  If False (default), they
+            are plain lists.
         profile: If True, capture per-stage timings (BMT init, per-qedge
             query, path reconstruction, response building, LMDB enrichment,
             annotators) and append them to ``response["logs"]`` as TRAPI
@@ -153,6 +164,7 @@ def lookup(
                     dehydrated=dehydrated,
                     logger=query_logger,
                     deadline=deadline,
+                    attributes_as_json=attributes_as_json,
                 )
             except QueryTimeout as exc:
                 # Report the overrun as a TRAPI outcome rather than an error:
@@ -190,6 +202,7 @@ def _lookup_inner(
     dehydrated=None,
     logger: Optional[logging.Logger] = None,
     deadline=None,
+    attributes_as_json: bool = False,
 ):
     """Inner implementation of lookup with all the core logic.
 
@@ -466,6 +479,7 @@ def _lookup_inner(
                 original_query_graph=original_query_graph,
                 logger=logger,
                 deadline=deadline,
+                attributes_as_json=attributes_as_json,
             )
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
@@ -589,19 +603,37 @@ def _iter_group_rows(arrays: list, groups: list, block: int = _ROWS_BLOCK):
         start = end
 
 
+#: Detail to merge into an edge whose attributes are set separately.
+_NO_DETAIL: dict = {}
+
+
 def _full_edge(
-    graph, fwd_eidx: int, predicate: str, subj_id: str, obj_id: str, detail: dict
+    graph,
+    fwd_eidx: int,
+    predicate: str,
+    subj_id: str,
+    obj_id: str,
+    detail: Union[dict, bytes],
 ) -> InFlightEdge:
     """A real edge's knowledge-graph Edge for a full response, pruned for 2.0.
 
     Args:
         fwd_eidx: The edge's forward-CSR position.
         predicate, subj_id, obj_id: The edge as stored (not query-aligned).
-        detail: The edge's prefetched cold-path detail (``{}`` if none).
+        detail: The edge's prefetched cold-path detail: ``{"attributes":
+            [...]}``, its attributes' stored JSON (``attributes_as_json``),
+            or ``{}`` if it has none.
     """
-    edge_props: InFlightEdge = graph.get_edge_properties_by_index(
-        fwd_eidx, lmdb_detail=detail
-    )
+    edge_props: InFlightEdge
+    if type(detail) is bytes:
+        edge_props = graph.get_edge_properties_by_index(
+            fwd_eidx, lmdb_detail=_NO_DETAIL
+        )
+        # Where merging the parsed detail would have put it, so the key
+        # order of the served Edge is the same either way.
+        edge_props["attributes"] = AttributesJSON(detail)
+    else:
+        edge_props = graph.get_edge_properties_by_index(fwd_eidx, lmdb_detail=detail)
     edge_props["predicate"] = predicate
     edge_props["subject"] = subj_id
     edge_props["object"] = obj_id
@@ -688,10 +720,13 @@ def _build_response(
     original_query_graph=None,
     logger: Optional[logging.Logger] = None,
     deadline=None,
+    attributes_as_json: bool = False,
 ):
     """Build the TRAPI response from path data.
 
     Args:
+        attributes_as_json: Give each real edge its stored attributes JSON as
+            :class:`~gandalf.trapi.AttributesJSON` (see ``lookup``).
         logger: Logger to emit this query's records to.  Defaults to the
             module logger.
         deadline: The query's :class:`~gandalf.trapi.Deadline`, checked every
@@ -824,7 +859,10 @@ def _build_response(
         unique_eidx = [int(e) for e in np.unique(pa_fwd_eidx) if e >= 0]
         if unique_eidx:
             if not lightweight and graph.lmdb_store is not None:
-                edge_detail_map = graph.lmdb_store.get_batch(unique_eidx)
+                if attributes_as_json:
+                    edge_detail_map = graph.lmdb_store.get_json_batch(unique_eidx)
+                else:
+                    edge_detail_map = graph.lmdb_store.get_batch(unique_eidx)
             edge_id_map = graph.get_edge_ids_batch(unique_eidx)
 
     kg_nodes = response["message"]["knowledge_graph"]["nodes"]

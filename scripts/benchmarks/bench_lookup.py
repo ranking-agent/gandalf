@@ -72,6 +72,8 @@ _REPO = _HERE.parents[1]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_HERE))
 
+from gandalf.trapi import AttributesJSON, attributes_to_fragments  # noqa: E402
+
 #: Where ``--synthetic`` graphs are cached between runs.
 DEFAULT_CACHE_DIR = _REPO / "bench_results" / "cache"
 
@@ -139,13 +141,18 @@ def resolve_graph(args) -> tuple[Path, list[dict]]:
 
 
 def lookup_kwargs(body: dict) -> dict:
-    """Map a request's ``parameters`` onto ``lookup()`` arguments, as the server does."""
+    """Map a request's ``parameters`` onto ``lookup()`` arguments, as the server does.
+
+    Like the server, this asks for edge attributes as their stored JSON
+    (``attributes_as_json``); ``serialize`` turns them into orjson Fragments.
+    """
     params = body.get("parameters") or {}
     return {
         "subclass": params.get("subclass", True),
         "subclass_depth": params.get("subclass_depth", 1),
         "dehydrated": params.get("dehydrated"),
         "filter_config": params.get("filter_config"),
+        "attributes_as_json": True,
     }
 
 
@@ -167,12 +174,20 @@ def _serialize_default(obj):
     """orjson ``default`` matching the server's (it serializes sets as lists)."""
     if isinstance(obj, set):
         return list(obj)
+    if isinstance(obj, AttributesJSON):
+        return orjson.Fragment(obj.json)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
 def serialize(response: dict) -> tuple[float, int]:
-    """Serialize a response as the server does; return ``(ms, bytes)``."""
+    """Serialize a response as the server does; return ``(ms, bytes)``.
+
+    Hands the edge attributes to orjson as Fragments first, as the server
+    does (and counts that in the time); the response's edge attributes can
+    not be read afterwards.
+    """
     t0 = time.perf_counter()
+    attributes_to_fragments(response)
     data = orjson.dumps(
         response, default=_serialize_default, option=orjson.OPT_SERIALIZE_NUMPY
     )
@@ -222,7 +237,10 @@ def fingerprint(response: dict) -> str:
     def describe(edge_id: str) -> tuple:
         edge = kg_edges[edge_id]
         support: tuple = ()
-        for attr in edge.get("attributes") or []:
+        attributes = edge.get("attributes")
+        # Only inferred edges carry support graphs, and theirs are lists; a
+        # real edge's may be stored JSON (or an orjson.Fragment by now).
+        for attr in attributes if isinstance(attributes, list) else []:
             if attr.get("attribute_type_id") == "biolink:support_graphs":
                 support = tuple(
                     sorted(

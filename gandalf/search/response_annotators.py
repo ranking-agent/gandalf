@@ -12,6 +12,14 @@ owns the type aliases, the registry list, and the build helper used by
 Annotators are opt-in per request: each plugin's factory pulls its own key
 out of the per-request ``annotator_config`` dict and returns ``None`` when
 the key is missing — exactly the same pattern as ``NodeFilter`` factories.
+
+**Reading edge attributes.**  In a response built for the server, a
+knowledge-graph edge's ``attributes`` is not a list but
+``gandalf.trapi.AttributesJSON``: the JSON stored in the graph, left
+undecoded so the server can serialize it as it is.  Read (and change) an
+edge's attributes through ``gandalf.trapi.edge_attributes(edge)``, which
+decodes them in place and returns the list; or assign a new list.  Node
+attributes and edges an annotator adds are plain lists as always.
 """
 
 from typing import Any, Callable, Optional

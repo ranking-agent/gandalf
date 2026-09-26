@@ -73,6 +73,8 @@ from bench_lookup import (  # noqa: E402
     stage_ms,
 )
 
+from gandalf.trapi import AttributesJSON, attributes_to_fragments  # noqa: E402
+
 try:
     import psutil
 except ImportError:  # psutil comes with the server extra
@@ -585,7 +587,14 @@ class RssSampler:
 
 
 def _serialize_parts(response: dict) -> dict:
-    """Serialize each part of the message as the server would; time and size."""
+    """Serialize each part of the message as the server would; time and size.
+
+    First hands the edge attributes to orjson as Fragments, as the server
+    does, timed as its own part.
+    """
+    start = time.perf_counter()
+    attributes_to_fragments(response)
+    out = {"convert": {"seconds": time.perf_counter() - start, "bytes": 0}}
     message = response["message"]
     kg = message.get("knowledge_graph") or {}
     parts = {
@@ -594,7 +603,6 @@ def _serialize_parts(response: dict) -> dict:
         "kg_edges": kg.get("edges") or {},
         "aux_graphs": message.get("auxiliary_graphs") or {},
     }
-    out = {}
     for name, part in parts.items():
         start = time.perf_counter()
         data = orjson.dumps(
@@ -695,15 +703,17 @@ def _instrumented_run(graph, bmt, body, kwargs, build: InstrumentedBuild):
             patches.append((obj, attr, tracker.wrap(name, getattr(obj, attr))))
     store = getattr(graph, "lmdb_store", None)
     if store is not None:
-        get_batch = store.get_batch
+        for attr, name in (
+            ("get_batch", "LMDB get_batch"),
+            ("get_json_batch", "LMDB get_json_batch"),
+        ):
+            read = getattr(store, attr)
 
-        def keep_detail(*args, **kw):
-            cap["edge_detail"] = detail = get_batch(*args, **kw)
-            return detail
+            def keep_detail(*args, _read=read, **kw):
+                cap["edge_detail"] = detail = _read(*args, **kw)
+                return detail
 
-        patches.append(
-            (store, "get_batch", tracker.wrap("LMDB get_batch", keep_detail))
-        )
+            patches.append((store, attr, tracker.wrap(name, keep_detail)))
 
     gc.collect()
     with build.installed(), _patched(patches):
@@ -730,6 +740,7 @@ def _tracemalloc_run(graph, bmt, body, kwargs, top: int = 12) -> dict:
             response = L.lookup(graph, body, bmt=bmt, **kwargs)
         current, peak = tracemalloc.get_traced_memory()
         tracemalloc.reset_peak()
+        attributes_to_fragments(response)
         data = orjson.dumps(
             response, default=_serialize_default, option=orjson.OPT_SERIALIZE_NUMPY
         )
@@ -830,6 +841,8 @@ def _deep_size(items, sample: int, rng, skip_strings=False, exclude=()) -> dict:
                 stack.extend(obj.values())
             elif isinstance(obj, (list, tuple, set, frozenset)):
                 stack.extend(obj)
+            elif isinstance(obj, AttributesJSON):
+                stack.append(obj.json)
     k = len(picks)
     return {
         "bytes": total * n / k,
@@ -1244,6 +1257,7 @@ def print_report(rec: dict, out=print, fold: float = 0.005) -> None:
     out("")
     out(f"{'AFTER THE LOOKUP':<52}{'seconds':>8}{'':>6}{'size':>12}")
     labels = {
+        "convert": "hand edge attributes to orjson (Fragments)",
         "results": "serialize results",
         "kg_nodes": "serialize knowledge graph nodes",
         "kg_edges": "serialize knowledge graph edges",

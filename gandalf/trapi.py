@@ -52,7 +52,7 @@ one either: each value is kept valid where it is produced.
 
 import logging
 import time
-from typing import Any, Optional, cast
+from typing import Any, Optional, Union, cast
 
 import orjson
 from translator_tom import CURIE
@@ -259,6 +259,63 @@ def query_parameters(query: QueryDict) -> GandalfParametersDict:
     return cast("GandalfParametersDict", query.get("parameters") or {})
 
 
+class AttributesJSON:
+    """An Edge's ``attributes``, still the JSON array stored in the graph.
+
+    A full response built for the server (``lookup(attributes_as_json=True)``)
+    carries each real edge's attributes this way rather than as a list: the
+    server hands them to orjson as :class:`orjson.Fragment` just before
+    serializing (:func:`attributes_to_fragments`), so they go from the graph
+    into the response without ever being decoded.  Code that reads or changes
+    an edge's attributes before that -- a response annotator plugin -- calls
+    :func:`edge_attributes`, which decodes them in place.
+    """
+
+    __slots__ = ("json",)
+
+    def __init__(self, data: bytes) -> None:
+        self.json = data
+
+    def __repr__(self) -> str:
+        return f"AttributesJSON({self.json!r})"
+
+
+def edge_attributes(edge: Any) -> list:
+    """An edge's attributes as a list, decoding them in place if they are
+    still :class:`AttributesJSON`, so the caller may change the list.
+
+    >>> edge = {"attributes": AttributesJSON(b'[{"attribute_type_id": "biolink:x"}]')}
+    >>> edge_attributes(edge)
+    [{'attribute_type_id': 'biolink:x'}]
+    >>> edge["attributes"]
+    [{'attribute_type_id': 'biolink:x'}]
+    >>> edge_attributes({})  # no attributes: an empty list, not attached
+    []
+    """
+    attributes = edge.get("attributes")
+    if type(attributes) is AttributesJSON:
+        attributes = edge["attributes"] = orjson.loads(attributes.json)
+    return attributes if attributes is not None else []
+
+
+def attributes_to_fragments(response: Any) -> None:
+    """Turn every knowledge-graph edge's :class:`AttributesJSON` into an
+    :class:`orjson.Fragment`, in place.
+
+    The last step before serializing: orjson copies a Fragment's bytes into
+    its output as they are, where going through a ``default`` hook per edge
+    would cost as much as encoding the decoded lists.  A Fragment cannot be
+    read back, so nothing may need an edge's attributes afterwards.
+    """
+    message = response.get("message") or {}
+    edges = (message.get("knowledge_graph") or {}).get("edges") or {}
+    fragment = orjson.Fragment
+    for edge in edges.values():
+        attributes = edge.get("attributes")
+        if type(attributes) is AttributesJSON:
+            edge["attributes"] = fragment(attributes.json)
+
+
 class InFlightEdge(TypedDict):
     """An Edge as gandalf assembles it, which is not always a full TRAPI Edge.
 
@@ -274,6 +331,9 @@ class InFlightEdge(TypedDict):
       :func:`gandalf.search.lookup.lookup`, and the note in
       ``tests/test_trapi_conformance.py`` on why those responses are excluded
       from conformance checks.
+    * ``attributes`` may be :class:`AttributesJSON` -- the stored JSON, not
+      yet decoded -- in a response built for the server; read it through
+      :func:`edge_attributes`.
     * Three bookkeeping properties hang off an edge while a response is built
       -- the knowledge-graph id it should be filed under, and the
       subject/object in *query* direction rather than the stored direction --
@@ -292,7 +352,7 @@ class InFlightEdge(TypedDict):
     knowledge_level: str
     agent_type: str
     sources: NotRequired[list[RetrievalSourceDict]]
-    attributes: NotRequired[list[AttributeDict]]
+    attributes: NotRequired[Union[list[AttributeDict], AttributesJSON]]
     qualifiers: NotRequired[list[QualifierDict]]
     _edge_id: NotRequired[str]
     _query_subject: NotRequired[str]

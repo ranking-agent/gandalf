@@ -37,6 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bench_lookup import load_queries, lookup_kwargs  # noqa: E402
 
+from gandalf.trapi import attributes_to_fragments  # noqa: E402
+
 # ``gandalf.search`` re-exports a ``lookup`` function under the module's name.
 L = importlib.import_module("gandalf.search.lookup")
 
@@ -98,6 +100,7 @@ def _default(obj):
 
 
 def _canonical(response) -> tuple:
+    attributes_to_fragments(response)  # as the server does before serializing
     msg = response["message"]
     kg = msg.get("knowledge_graph") or {}
     return (

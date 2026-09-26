@@ -35,7 +35,10 @@ python scripts/benchmarks/bench_lookup.py compare \
 ```
 
 The query file holds either one TRAPI request body or a JSON list of them,
-the same JSON you would POST to `/query`. An optional top-level `"name"` key
+the same JSON you would POST to `/query`.  Like the server, the benchmark
+scripts ask `lookup()` for edge attributes as their stored JSON
+(`attributes_as_json`), and the serialization they time includes turning
+them into orjson Fragments. An optional top-level `"name"` key
 labels a query in the report. `parameters` (`subclass`, `subclass_depth`,
 `dehydrated`, `filter_config`) are applied exactly as the server applies them.
 
