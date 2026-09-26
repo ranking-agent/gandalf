@@ -62,6 +62,7 @@ from gandalf.request_validation import (
     validate_set_interpretation,
 )
 from gandalf.search.edge_constraints import ConstraintError, EdgeConstraints
+from gandalf.search.gc_utils import gc_disabled
 from gandalf.trapi import (
     Deadline,
     TimeoutNotSatisfiable,
@@ -635,21 +636,31 @@ def sync_lookup(
     annotator_config = params.get("annotator_config") or {}
     profile_param = bool(profile)
 
-    response = lookup(
-        GRAPH,
-        raw,
-        bmt=BMT,
-        subclass=sc,
-        subclass_depth=subclass_depth,
-        filter_config=filter_config,
-        log_level=params.get("log_level"),
-        dehydrated=dehydrated_param,
-        profile=profile_param,
-        deadline=deadline,
-    )
-    if annotator_config:
-        annotate_response(response, GRAPH, annotator_config)
-    return _trapi_response(response)
+    # Keep GC paused until the response has been serialized and freed.
+    # lookup() pauses it too, but lets it resume as it returns; the next
+    # allocation would then trigger a collection over every object of the
+    # response (millions, several seconds on a large query, with the GIL
+    # held) just before the response is thrown away.  Freed while paused, it
+    # never gets scanned: it holds no reference cycles, so dropping it frees
+    # it, and the collection that runs on resuming finds little left.
+    with gc_disabled():
+        response = lookup(
+            GRAPH,
+            raw,
+            bmt=BMT,
+            subclass=sc,
+            subclass_depth=subclass_depth,
+            filter_config=filter_config,
+            log_level=params.get("log_level"),
+            dehydrated=dehydrated_param,
+            profile=profile_param,
+            deadline=deadline,
+        )
+        if annotator_config:
+            annotate_response(response, GRAPH, annotator_config)
+        rendered = _trapi_response(response)
+        del response
+    return rendered
 
 
 # ---------------------------------------------------------------------------
@@ -679,37 +690,46 @@ def _async_lookup(
         raise HTTPException(503, "Graph not loaded")
     params = query_parameters(query)
 
-    # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
-    if params.get("rehydrate") is not None:
-        enrich_knowledge_graph(query, GRAPH)
-        response = finalize_response({"message": query["message"]}, query)
-    else:
-        subclass = params.get("subclass", True)
-        subclass_depth = params.get("subclass_depth", 1)
-        dehydrated = params.get("dehydrated")
-        filter_config = params.get("filter_config")
-        annotator_config = params.get("annotator_config") or {}
-        response = lookup(
-            GRAPH,
-            query,
-            bmt=BMT,
-            subclass=subclass,
-            subclass_depth=subclass_depth,
-            filter_config=filter_config,
-            log_level=params.get("log_level"),
-            dehydrated=dehydrated,
-            profile=profile,
-            deadline=deadline,
-        )
-        if annotator_config:
-            annotate_response(response, GRAPH, annotator_config)
+    # GC stays paused until the response is serialized and freed, as in
+    # sync_lookup.
+    with gc_disabled():
+        # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
+        if params.get("rehydrate") is not None:
+            enrich_knowledge_graph(query, GRAPH)
+            response = finalize_response({"message": query["message"]}, query)
+        else:
+            subclass = params.get("subclass", True)
+            subclass_depth = params.get("subclass_depth", 1)
+            dehydrated = params.get("dehydrated")
+            filter_config = params.get("filter_config")
+            annotator_config = params.get("annotator_config") or {}
+            response = lookup(
+                GRAPH,
+                query,
+                bmt=BMT,
+                subclass=subclass,
+                subclass_depth=subclass_depth,
+                filter_config=filter_config,
+                log_level=params.get("log_level"),
+                dehydrated=dehydrated,
+                profile=profile,
+                deadline=deadline,
+            )
+            if annotator_config:
+                annotate_response(response, GRAPH, annotator_config)
+        try:
+            # Serialize with orjson rather than httpx's stdlib-json ``json=``
+            # path, which is markedly slower for large result sets.
+            body = orjson.dumps(
+                response, default=_orjson_default, option=orjson.OPT_SERIALIZE_NUMPY
+            )
+        except Exception:
+            logger.exception("Callback to %s failed", callback_url)
+            return
+        finally:
+            del response
 
     try:
-        # Serialize with orjson rather than httpx's stdlib-json ``json=`` path,
-        # which is markedly slower for large result sets.
-        body = orjson.dumps(
-            response, default=_orjson_default, option=orjson.OPT_SERIALIZE_NUMPY
-        )
         headers = dict(trace_headers or {})
         headers["Content-Type"] = "application/json"
         with httpx.Client(timeout=httpx.Timeout(timeout=600.0)) as client:

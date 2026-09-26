@@ -1,7 +1,6 @@
 """Main TRAPI query lookup implementation."""
 
 import copy
-import gc
 import logging
 import time
 import uuid
@@ -38,7 +37,7 @@ from gandalf.trapi import (
 )
 from gandalf.search.edge_constraints import EdgeConstraints
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
-from gandalf.search.gc_utils import GCMonitor
+from gandalf.search.gc_utils import GCMonitor, pause_gc, resume_gc
 from gandalf.search.node_filters import build_node_filters
 from gandalf.search.query_edge import query_edge, query_subclass_edge
 from gandalf.search.reconstruct import reconstruct_paths
@@ -111,12 +110,13 @@ def lookup(
     gc_monitor = GCMonitor(logger=query_logger)
     gc_monitor.start()
 
-    # Disable GC for the entire query to prevent expensive Gen 2 collections
-    # during traversal.  The graph's long-lived numpy/CSR arrays cause Gen 2
-    # scans to take 1-3s each while collecting 0 objects.  We re-enable and
-    # run a single collection at the end of the query.
-    gc_was_enabled_at_start = gc.isenabled()
-    gc.disable()
+    # Pause GC for the entire query to prevent expensive collections while
+    # it builds millions of objects (and, unless the graph was frozen,
+    # Gen 2 scans of its long-lived numpy/CSR arrays that collect nothing).
+    # The pause is shared with concurrent queries and with a caller that
+    # holds it past the return -- the server does, until the response has
+    # been serialized and freed (see gc_utils.pause_gc).
+    pause_gc()
 
     node_filters = build_node_filters(filter_config or {})
 
@@ -175,8 +175,7 @@ def lookup(
         # No handler to detach and no level to restore: query_logger is private
         # to this call and is discarded with it.
         gc_monitor.stop()
-        if gc_was_enabled_at_start:
-            gc.enable()
+        resume_gc()
 
 
 def _lookup_inner(

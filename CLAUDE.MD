@@ -182,6 +182,17 @@ it is in a result; build a new one instead.
 `tests/test_single_path_fast_path.py::test_single_id_bindings_are_shared`
 pins the sharing.
 
+**GC stays paused until the response is freed.**  `lookup()` pauses the
+cyclic GC while it runs (`gandalf.search.gc_utils.pause_gc`), and the server's
+query handlers hold the same pause until the response has been serialized
+and freed.  Were GC to resume as `lookup()` returns, the next allocation
+would trigger a collection over every object of the response -- measured at
+4-6s on the 1-2M-result queries, with the GIL held -- just before the
+response is thrown away.  The response holds no reference cycles, so freeing
+it needs no collection.  The pause is counted, so concurrent queries share
+it; never call `gc.disable()`/`gc.enable()` around a lookup directly, or the
+first query to finish turns GC back on under the others.
+
 TOM requires Python >= 3.10, which is why gandalf's floor is 3.10.
 
 ## TRAPI version

@@ -148,11 +148,13 @@ For each query it prints three blocks:
   the untimed run, and the report warns when the two differ by more than
   15%.
 * **AFTER THE LOOKUP.**  Serializing each part of the message, and two
-  garbage-collection costs.  `lookup()` turns GC off while it runs and back
-  on without collecting, so the caller's next allocation triggers a
+  garbage-collection costs.  `lookup()` pauses GC while it runs and resumes
+  it without collecting, so a caller's next allocation triggers a
   collection over everything the lookup created: "first GC collection after
-  the lookup" is that cost.  Then a full collection, and freeing the
-  response.
+  the lookup" is that cost for a library caller.  The server does not pay
+  it: its query handlers hold the pause (`gc_utils.gc_disabled`) until the
+  response has been serialized and freed.  Then a full collection, and
+  freeing the response.
 * **MEMORY.**  Process RSS before, at its peak during, and after the
   lookup (needs `psutil`, from the server extra); the path arrays; the
   per-result group arrays; the edge data read from LMDB (most of it ends up
