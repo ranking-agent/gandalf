@@ -2,6 +2,7 @@
 
 import gc
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from typing import Optional
@@ -68,13 +69,59 @@ class GCMonitor:
         }
 
 
+# Holders of the GC pause (see pause_gc), and whether GC was on when the
+# first of them arrived.
+_pause_lock = threading.Lock()
+_pause_holders = 0
+_pause_restores_gc = False
+
+
+def pause_gc() -> None:
+    """Turn the cyclic GC off until every ``pause_gc`` has its ``resume_gc``.
+
+    A lookup builds millions of container objects; with GC on, collections
+    would keep scanning them while they are built.  The pause is counted, so
+    concurrent queries (the server runs them on a thread pool) share it: GC
+    comes back on only when the last holder resumes, and only if it was on
+    when the first one paused.  Deciding per caller instead would let the
+    first query to finish turn GC back on under a query still running.
+    """
+    global _pause_holders, _pause_restores_gc
+    with _pause_lock:
+        if _pause_holders == 0:
+            _pause_restores_gc = gc.isenabled()
+            gc.disable()
+        _pause_holders += 1
+
+
+def resume_gc() -> None:
+    """Release one ``pause_gc``; the last release turns GC back on."""
+    global _pause_holders
+    with _pause_lock:
+        if _pause_holders == 0:
+            raise RuntimeError("resume_gc() without a matching pause_gc()")
+        _pause_holders -= 1
+        if _pause_holders == 0 and _pause_restores_gc:
+            gc.enable()
+
+
 @contextmanager
 def gc_disabled():
-    """Context manager to temporarily disable GC."""
-    was_enabled = gc.isenabled()
-    gc.disable()
+    """Pause the cyclic GC for the duration of the block (see ``pause_gc``).
+
+    >>> import gc
+    >>> gc.isenabled()
+    True
+    >>> with gc_disabled():
+    ...     with gc_disabled():
+    ...         pass
+    ...     gc.isenabled()
+    False
+    >>> gc.isenabled()
+    True
+    """
+    pause_gc()
     try:
         yield
     finally:
-        if was_enabled:
-            gc.enable()
+        resume_gc()

@@ -162,6 +162,37 @@ Gandalf's `large_result_threshold` is 10M paths, and `server._trapi_response` /
 `_request_dict` exist precisely to keep per-result object materialization off
 the hot path.  Use the TypedDicts there instead.
 
+**Single-path results skip the general per-group loop.**  In
+`_build_response`, a result built from one path whose subclass matches are all
+identities (child == parent) needs no edge dedup and no composite inferred
+edge, so it binds each column's edge directly.  On the real Translator graph
+94-100% of xl/xxl results take this path, and it makes response building
+1.4-1.5x faster.  The output must stay byte-identical to the general loop's,
+including result, binding and knowledge-graph key order: the benchmark
+fingerprint ignores order, so `tests/test_single_path_fast_path.py` runs each
+query with `_SINGLE_PATH_FAST` off and on and compares the serialized bytes.
+`scripts/benchmarks/fast_path_ab.py` does the same comparison, with timings,
+on any graph and query set.
+
+**Bindings are shared objects.**  A single-ID node binding, or a fast-path
+edge binding, is one `{"ids": [x]}` dict per ID, reused by every result that
+binds x: on a 2M-result query that is millions fewer objects to build,
+garbage-collect and free.  So a binding must never be changed in place once
+it is in a result; build a new one instead.
+`tests/test_single_path_fast_path.py::test_single_id_bindings_are_shared`
+pins the sharing.
+
+**GC stays paused until the response is freed.**  `lookup()` pauses the
+cyclic GC while it runs (`gandalf.search.gc_utils.pause_gc`), and the server's
+query handlers hold the same pause until the response has been serialized
+and freed.  Were GC to resume as `lookup()` returns, the next allocation
+would trigger a collection over every object of the response -- measured at
+4-6s on the 1-2M-result queries, with the GIL held -- just before the
+response is thrown away.  The response holds no reference cycles, so freeing
+it needs no collection.  The pause is counted, so concurrent queries share
+it; never call `gc.disable()`/`gc.enable()` around a lookup directly, or the
+first query to finish turns GC back on under the others.
+
 TOM requires Python >= 3.10, which is why gandalf's floor is 3.10.
 
 ## TRAPI version

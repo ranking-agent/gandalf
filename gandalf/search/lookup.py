@@ -1,7 +1,6 @@
 """Main TRAPI query lookup implementation."""
 
 import copy
-import gc
 import logging
 import time
 import uuid
@@ -38,7 +37,7 @@ from gandalf.trapi import (
 )
 from gandalf.search.edge_constraints import EdgeConstraints
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
-from gandalf.search.gc_utils import GCMonitor
+from gandalf.search.gc_utils import GCMonitor, pause_gc, resume_gc
 from gandalf.search.node_filters import build_node_filters
 from gandalf.search.query_edge import query_edge, query_subclass_edge
 from gandalf.search.reconstruct import reconstruct_paths
@@ -111,12 +110,13 @@ def lookup(
     gc_monitor = GCMonitor(logger=query_logger)
     gc_monitor.start()
 
-    # Disable GC for the entire query to prevent expensive Gen 2 collections
-    # during traversal.  The graph's long-lived numpy/CSR arrays cause Gen 2
-    # scans to take 1-3s each while collecting 0 objects.  We re-enable and
-    # run a single collection at the end of the query.
-    gc_was_enabled_at_start = gc.isenabled()
-    gc.disable()
+    # Pause GC for the entire query to prevent expensive collections while
+    # it builds millions of objects (and, unless the graph was frozen,
+    # Gen 2 scans of its long-lived numpy/CSR arrays that collect nothing).
+    # The pause is shared with concurrent queries and with a caller that
+    # holds it past the return -- the server does, until the response has
+    # been serialized and freed (see gc_utils.pause_gc).
+    pause_gc()
 
     node_filters = build_node_filters(filter_config or {})
 
@@ -175,8 +175,7 @@ def lookup(
         # No handler to detach and no level to restore: query_logger is private
         # to this call and is discarded with it.
         gc_monitor.stop()
-        if gc_was_enabled_at_start:
-            gc.enable()
+        resume_gc()
 
 
 def _lookup_inner(
@@ -489,6 +488,10 @@ def _lookup_inner(
     )
     return response
 
+
+#: Build single-path results directly in _build_response (see there).  Only
+#: tests turn it off, to compare against the general per-group loop.
+_SINGLE_PATH_FAST = True
 
 #: How many results to build between wall-clock checks in _build_response.
 _DEADLINE_CHECK_INTERVAL = 4096
@@ -857,9 +860,37 @@ def _build_response(
     edge_content_keys: dict[int, tuple] = {}
     content_keys_by_pools: dict[tuple, tuple] = {}
 
-    # Each real edge's Edge dict for a full response, built once and copied
-    # into every result that binds the edge.
+    # Each real edge's Edge dict for a full response, built once.  The
+    # general loop copies it into every result that binds the edge; the
+    # single-path fast path uses it as is.
     edge_templates: dict[int, InFlightEdge] = {}
+
+    # For the single-path fast path below: the non-subclass edge columns, the
+    # node columns at each end of every subclass edge column, and each real
+    # edge's dehydrated Edge dict (built once, like edge_templates).
+    single_path_fast = _SINGLE_PATH_FAST
+    plain_edge_cols = [
+        (col, qedge_id, subj_col_e, obj_col_e)
+        for col, qedge_id, subj_col_e, obj_col_e, is_subclass in edge_cols
+        if not is_subclass
+    ]
+    subclass_col_ends = [
+        (subj_col_e, obj_col_e)
+        for _col, _qedge_id, subj_col_e, obj_col_e, is_subclass in edge_cols
+        if is_subclass
+    ]
+    minimal_edges: dict[int, InFlightEdge] = {}
+
+    # One ``{"ids": [x]}`` binding per bound ID, shared by every result that
+    # binds x through a single-ID node binding or a fast-path edge binding:
+    # on a multi-million-result query that is millions fewer dicts and lists
+    # to build, garbage-collect and free.  A binding is therefore never
+    # changed in place once it is in a result.
+    shared_bindings: dict[str, dict] = {}
+
+    # The Edge dicts the general loop builds: the only ones that carry the
+    # internal markers stripped once all results are built.
+    marked_edges: list[InFlightEdge] = []
 
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
@@ -938,7 +969,78 @@ def _build_response(
                             bound_id = sc_node_id
                             kg_nodes[sc_node_id] = sc_node
 
-                result["node_bindings"][qnode_id] = {"ids": [bound_id]}
+                shared = shared_bindings.get(bound_id)
+                if shared is None:
+                    shared = shared_bindings[bound_id] = {"ids": [bound_id]}
+                result["node_bindings"][qnode_id] = shared
+
+        # Single-path fast path.  Nearly every result on a real graph comes
+        # from one path whose subclass matches are all identities (child ==
+        # parent).  Such a result needs no edge dedup (each qedge has one
+        # column, so one edge) and no composite inferred edges, so each
+        # non-subclass column binds its edge directly.  The output is exactly
+        # what the general loop below would build, in the same order.
+        #
+        # The edge dict itself goes into kg_edges rather than a copy: it sits
+        # under one KG ID only (its edge's), the general loop only ever
+        # changes copies of it, and the cache holding it is dropped when this
+        # function returns.  An edge with no ID gets a fresh uuid per result,
+        # as in the general loop, and so a copy of its own.
+        if (
+            single_path_fast
+            and len(rows_nodes) == 1
+            and all(first_nodes[s] == first_nodes[o] for s, o in subclass_col_ends)
+        ):
+            fwd_eidx_row = rows_fwd_eidx[0]
+            edge_bindings = result["analyses"][0]["edge_bindings"]
+            for col, qedge_id, subj_col_e, obj_col_e in plain_edge_cols:
+                # Only subclass identity matches are synthetic (fwd_eidx <
+                # 0), so every edge here is real.
+                fwd_eidx = fwd_eidx_row[col]
+                if lightweight:
+                    edge = minimal_edges.get(fwd_eidx)
+                else:
+                    edge = edge_templates.get(fwd_eidx)
+                if edge is None:
+                    # Stored direction, as in the general loop.
+                    if rows_via_inv[0][col]:
+                        actual_subj_idx = first_nodes[obj_col_e]
+                        actual_obj_idx = first_nodes[subj_col_e]
+                    else:
+                        actual_subj_idx = first_nodes[subj_col_e]
+                        actual_obj_idx = first_nodes[obj_col_e]
+                    predicate = idx_to_predicate[rows_preds[0][col]]
+                    subj_id = node_id_cache[actual_subj_idx]
+                    obj_id = node_id_cache[actual_obj_idx]
+                    if lightweight:
+                        edge = _minimal_edge(
+                            graph, fwd_eidx, predicate, subj_id, obj_id
+                        )
+                        minimal_edges[fwd_eidx] = edge
+                    else:
+                        edge = _full_edge(
+                            graph,
+                            fwd_eidx,
+                            predicate,
+                            subj_id,
+                            obj_id,
+                            edge_detail_map.get(fwd_eidx, {}),
+                        )
+                        edge_templates[fwd_eidx] = edge
+                edge_kg_id = edge_id_map.get(fwd_eidx)
+                if not edge_kg_id:
+                    edge_kg_id = str(uuid.uuid4())[:8]
+                    edge = edge.copy()
+                kg_edges[edge_kg_id] = edge
+                shared = shared_bindings.get(edge_kg_id)
+                if shared is None:
+                    shared = shared_bindings[edge_kg_id] = {"ids": [edge_kg_id]}
+                edge_bindings[qedge_id] = shared
+            # As below: a result binding no edge carries no analysis.
+            if not edge_bindings:
+                del result["analyses"]
+            response["message"]["results"].append(result)
+            continue
 
         # Aggregate edge bindings from all paths in group.
         # Edge dicts are created only for unique (subj, pred, obj,
@@ -1021,6 +1123,7 @@ def _build_response(
                     edge_props["_query_object"] = node_id_cache[query_obj_idx]
 
                     edge_bindings_by_qedge[qedge_id].append(edge_props)
+                    marked_edges.append(edge_props)
 
         # This group's subclass edges, indexed by the child they derive from
         # (built on first use, per subclass qedge).
@@ -1169,9 +1272,10 @@ def _build_response(
     # Free path arrays now that results are built
     del path_data
 
-    # Strip internal markers from KG edges so they don't leak
-    # into the TRAPI response.
-    for edge in response["message"]["knowledge_graph"]["edges"].values():
+    # Strip internal markers from KG edges so they don't leak into the TRAPI
+    # response.  Only the general loop's edges carry them, so only those are
+    # visited, not every edge in the knowledge graph.
+    for edge in marked_edges:
         edge.pop("_edge_id", None)
         edge.pop("_query_subject", None)
         edge.pop("_query_object", None)

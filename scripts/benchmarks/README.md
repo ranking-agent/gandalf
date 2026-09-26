@@ -3,6 +3,8 @@
 | Script | Measures |
 |---|---|
 | `bench_lookup.py` | `lookup()` in-process: per-query wall time, per-stage breakdown, peak allocation, and a results fingerprint. Use this to track the effect of a code change. |
+| `fast_path_ab.py` | Whether `_build_response`'s single-path fast path leaves a response byte-identical (including key order) on a given graph and query set, how many results take it, and how much faster it builds them. |
+| `lookup_breakdown.py` | Where one lookup's time and memory go: pipeline stages, then `_build_response` statement by statement, serialization, garbage collection, and the size of each part of the response. Use this to decide what to optimize next. |
 | `generate_queries.py` | Builds a query set for any graph, spread across result-size tiers from under 100 results to over a million. |
 | `profile_query.py` | One query against a running server, end to end (includes serialization and transport). |
 | `run_benchmark.py` | The shared query set against deployed Gandalf / Retriever instances. |
@@ -123,3 +125,52 @@ query returns ~245k results.
 
 Timings depend on the machine, so compare only runs from the same host.
 Each report records the commit, host, and graph size.
+
+## Finding where the time and memory go with `lookup_breakdown.py`
+
+```bash
+python scripts/benchmarks/lookup_breakdown.py \
+    --graph /data/graph_mmap --queries big_queries.json \
+    --only xl_ xxl_ --out bench_results/breakdown.json
+```
+
+For each query it prints three blocks:
+
+* **TIME.**  The pipeline stages, then `_build_response` broken down by
+  statement: each top-level statement, each statement of the per-result
+  loop (with its execution count and time per execution), fetching each
+  group's rows, and the costlier helpers credited to the statement that
+  called them (`_group_rows`, the LMDB prefetch, `_full_edge` and the
+  edge-properties read inside it).  The timers go into a copy of
+  `_build_response` compiled from its source, so `lookup.py` is not
+  modified.  Their cost is calibrated and subtracted, and the report shows
+  the timed build next to an untimed one.  Statement times are scaled to
+  the untimed run, and the report warns when the two differ by more than
+  15%.
+* **AFTER THE LOOKUP.**  Serializing each part of the message, and two
+  garbage-collection costs.  `lookup()` pauses GC while it runs and resumes
+  it without collecting, so a caller's next allocation triggers a
+  collection over everything the lookup created: "first GC collection after
+  the lookup" is that cost for a library caller.  The server does not pay
+  it: its query handlers hold the pause (`gc_utils.gc_disabled`) until the
+  response has been serialized and freed.  Then a full collection, and
+  freeing the response.
+* **MEMORY.**  Process RSS before, at its peak during, and after the
+  lookup (needs `psutil`, from the server extra); the path arrays; the
+  per-result group arrays; the edge data read from LMDB (most of it ends up
+  inside the KG edges, so don't add the two); each part of the response as Python objects, estimated from a sample (`~`); and how
+  many `{"ids": [x]}` binding objects the results hold against how many
+  distinct IDs they bind.
+
+Everything is measured inside a real lookup, never replayed on its own:
+replaying a step with warm caches and none of the lookup's memory churn can
+make it look several times cheaper than it is.
+
+`--tracemalloc` adds a run under `tracemalloc`: the peak of Python's own
+allocations and the source lines that allocated what is still alive when
+response building ends.  It is slow and needs a lot of memory, so run it
+with `--only` on one query at a time.
+
+Each query runs `--warmup` (default 1) + `--repeat` (default 1) untimed
+lookups, one timed lookup, and the analysis passes: about three times as
+long as one lookup, plus the tracemalloc run if asked for.
