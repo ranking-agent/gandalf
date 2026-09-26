@@ -174,6 +174,14 @@ query with `_SINGLE_PATH_FAST` off and on and compares the serialized bytes.
 `scripts/benchmarks/fast_path_ab.py` does the same comparison, with timings,
 on any graph and query set.
 
+**Bindings are shared objects.**  A single-ID node binding, or a fast-path
+edge binding, is one `{"ids": [x]}` dict per ID, reused by every result that
+binds x: on a 2M-result query that is millions fewer objects to build,
+garbage-collect and free.  So a binding must never be changed in place once
+it is in a result; build a new one instead.
+`tests/test_single_path_fast_path.py::test_single_id_bindings_are_shared`
+pins the sharing.
+
 TOM requires Python >= 3.10, which is why gandalf's floor is 3.10.
 
 ## TRAPI version

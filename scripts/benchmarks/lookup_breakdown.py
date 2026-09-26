@@ -1281,7 +1281,7 @@ def print_report(rec: dict, out=print, fold: float = 0.005) -> None:
     mem("  node cache tables", m["node_cache_tables"])
     prefetch = m["edge_detail_prefetch"]
     mem(
-        "  edge data prefetched from LMDB (transient)",
+        "  edge data read from LMDB (mostly reused in KG edges)",
         prefetch["bytes"],
         bool(prefetch["sampled"]),
     )

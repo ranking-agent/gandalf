@@ -155,8 +155,8 @@ For each query it prints three blocks:
   response.
 * **MEMORY.**  Process RSS before, at its peak during, and after the
   lookup (needs `psutil`, from the server extra); the path arrays; the
-  per-result group arrays; the edge data prefetched from LMDB; each part of
-  the response as Python objects, estimated from a sample (`~`); and how
+  per-result group arrays; the edge data read from LMDB (most of it ends up
+  inside the KG edges, so don't add the two); each part of the response as Python objects, estimated from a sample (`~`); and how
   many `{"ids": [x]}` binding objects the results hold against how many
   distinct IDs they bind.
 

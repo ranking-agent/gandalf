@@ -68,6 +68,9 @@ def _both_ways(monkeypatch, graph, query, bmt, **kwargs) -> dict:
     response = lookup(graph, query, bmt=bmt, **kwargs)
     assert response["message"]["results"], "the case should have results"
     assert _serialized(response) == _serialized(reference)
+    for edge_id, edge in response["message"]["knowledge_graph"]["edges"].items():
+        leaked = [key for key in edge if key.startswith("_")]
+        assert not leaked, f"KG edge {edge_id} leaks internal markers {leaked}"
     return response
 
 
@@ -249,3 +252,17 @@ def test_sibling_subclass_derivations(
 @pytest.mark.parametrize("subclass", [False, True])
 def test_query_shapes(monkeypatch, graph, bmt, dehydrated, query, subclass):
     _both_ways(monkeypatch, graph, query, bmt, subclass=subclass, dehydrated=dehydrated)
+
+
+def test_single_id_bindings_are_shared(graph, bmt):
+    """A ``{"ids": [x]}`` binding is one object per ID, reused by every
+    result that binds x, so nothing may change a binding in place."""
+    query = _query(
+        {"n0": {"ids": [METFORMIN]}, "n1": {"categories": ["biolink:Gene"]}},
+        {"e0": _edge("n0", "n1", "biolink:affects")},
+    )
+    results = lookup(graph, query, bmt=bmt, subclass=False)["message"]["results"]
+    assert len(results) > 1
+    first = results[0]["node_bindings"]["n0"]
+    assert first == {"ids": [METFORMIN]}
+    assert all(r["node_bindings"]["n0"] is first for r in results)

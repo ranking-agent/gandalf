@@ -882,6 +882,17 @@ def _build_response(
     ]
     minimal_edges: dict[int, InFlightEdge] = {}
 
+    # One ``{"ids": [x]}`` binding per bound ID, shared by every result that
+    # binds x through a single-ID node binding or a fast-path edge binding:
+    # on a multi-million-result query that is millions fewer dicts and lists
+    # to build, garbage-collect and free.  A binding is therefore never
+    # changed in place once it is in a result.
+    shared_bindings: dict[str, dict] = {}
+
+    # The Edge dicts the general loop builds: the only ones that carry the
+    # internal markers stripped once all results are built.
+    marked_edges: list[InFlightEdge] = []
+
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
     # Edge dicts are created only for unique edges (not per-path).
@@ -959,7 +970,10 @@ def _build_response(
                             bound_id = sc_node_id
                             kg_nodes[sc_node_id] = sc_node
 
-                result["node_bindings"][qnode_id] = {"ids": [bound_id]}
+                shared = shared_bindings.get(bound_id)
+                if shared is None:
+                    shared = shared_bindings[bound_id] = {"ids": [bound_id]}
+                result["node_bindings"][qnode_id] = shared
 
         # Single-path fast path.  Nearly every result on a real graph comes
         # from one path whose subclass matches are all identities (child ==
@@ -1019,7 +1033,10 @@ def _build_response(
                     edge_kg_id = str(uuid.uuid4())[:8]
                     edge = edge.copy()
                 kg_edges[edge_kg_id] = edge
-                edge_bindings[qedge_id] = {"ids": [edge_kg_id]}
+                shared = shared_bindings.get(edge_kg_id)
+                if shared is None:
+                    shared = shared_bindings[edge_kg_id] = {"ids": [edge_kg_id]}
+                edge_bindings[qedge_id] = shared
             # As below: a result binding no edge carries no analysis.
             if not edge_bindings:
                 del result["analyses"]
@@ -1107,6 +1124,7 @@ def _build_response(
                     edge_props["_query_object"] = node_id_cache[query_obj_idx]
 
                     edge_bindings_by_qedge[qedge_id].append(edge_props)
+                    marked_edges.append(edge_props)
 
         # This group's subclass edges, indexed by the child they derive from
         # (built on first use, per subclass qedge).
@@ -1255,9 +1273,10 @@ def _build_response(
     # Free path arrays now that results are built
     del path_data
 
-    # Strip internal markers from KG edges so they don't leak
-    # into the TRAPI response.
-    for edge in response["message"]["knowledge_graph"]["edges"].values():
+    # Strip internal markers from KG edges so they don't leak into the TRAPI
+    # response.  Only the general loop's edges carry them, so only those are
+    # visited, not every edge in the knowledge graph.
+    for edge in marked_edges:
         edge.pop("_edge_id", None)
         edge.pop("_query_subject", None)
         edge.pop("_query_object", None)
