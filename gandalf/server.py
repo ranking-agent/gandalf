@@ -64,7 +64,6 @@ from gandalf.request_validation import (
 from gandalf.search.edge_constraints import ConstraintError, EdgeConstraints
 from gandalf.search.gc_utils import gc_disabled
 from gandalf.trapi import (
-    AttributesJSON,
     Deadline,
     TimeoutNotSatisfiable,
     attributes_to_fragments,
@@ -86,10 +85,11 @@ logger = logging.getLogger(__name__)
 def _orjson_default(obj):
     if isinstance(obj, set):
         return list(obj)
-    if isinstance(obj, AttributesJSON):
-        # Correct, but slow per edge: responses convert these up front with
-        # attributes_to_fragments; this only catches one that was missed.
-        return orjson.Fragment(obj.json)
+    if isinstance(obj, bytes):
+        # Edge attributes' stored JSON.  Correct, but slow per edge: responses
+        # convert these up front with attributes_to_fragments; this only
+        # catches one that was missed.
+        return orjson.Fragment(obj)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 

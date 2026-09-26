@@ -72,7 +72,7 @@ _REPO = _HERE.parents[1]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_HERE))
 
-from gandalf.trapi import AttributesJSON, attributes_to_fragments  # noqa: E402
+from gandalf.trapi import attributes_to_fragments  # noqa: E402
 
 #: Where ``--synthetic`` graphs are cached between runs.
 DEFAULT_CACHE_DIR = _REPO / "bench_results" / "cache"
@@ -174,8 +174,8 @@ def _serialize_default(obj):
     """orjson ``default`` matching the server's (it serializes sets as lists)."""
     if isinstance(obj, set):
         return list(obj)
-    if isinstance(obj, AttributesJSON):
-        return orjson.Fragment(obj.json)
+    if isinstance(obj, bytes):
+        return orjson.Fragment(obj)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 

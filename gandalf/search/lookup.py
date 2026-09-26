@@ -28,7 +28,6 @@ from gandalf.query_planner import get_next_qedge, remove_orphaned
 from translator_tom.model_dicts import QueryDict
 
 from gandalf.trapi import (
-    AttributesJSON,
     Deadline,
     InFlightEdge,
     QueryTimeout,
@@ -77,8 +76,8 @@ def lookup(
             enable lightweight mode when path count exceeds the large result
             threshold.
         attributes_as_json: If True, each real edge's ``attributes`` in a
-            full response is :class:`~gandalf.trapi.AttributesJSON` -- the
-            JSON stored in the graph, not decoded -- for a caller that
+            full response is ``bytes`` -- the JSON stored in the graph, not
+            decoded -- for a caller that
             serializes with orjson after
             :func:`~gandalf.trapi.attributes_to_fragments`, as the server
             does.  Decoding and re-encoding them costs more than any other
@@ -631,7 +630,7 @@ def _full_edge(
         )
         # Where merging the parsed detail would have put it, so the key
         # order of the served Edge is the same either way.
-        edge_props["attributes"] = AttributesJSON(detail)
+        edge_props["attributes"] = detail
     else:
         edge_props = graph.get_edge_properties_by_index(fwd_eidx, lmdb_detail=detail)
     edge_props["predicate"] = predicate
@@ -726,7 +725,7 @@ def _build_response(
 
     Args:
         attributes_as_json: Give each real edge its stored attributes JSON as
-            :class:`~gandalf.trapi.AttributesJSON` (see ``lookup``).
+            ``bytes`` (see ``lookup``).
         logger: Logger to emit this query's records to.  Defaults to the
             module logger.
         deadline: The query's :class:`~gandalf.trapi.Deadline`, checked every

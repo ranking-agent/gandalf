@@ -15,7 +15,7 @@ the key is missing — exactly the same pattern as ``NodeFilter`` factories.
 
 **Reading edge attributes.**  In a response built for the server, a
 knowledge-graph edge's ``attributes`` is not a list but
-``gandalf.trapi.AttributesJSON``: the JSON stored in the graph, left
+``bytes``: the JSON array stored in the graph, left
 undecoded so the server can serialize it as it is.  Read (and change) an
 edge's attributes through ``gandalf.trapi.edge_attributes(edge)``, which
 decodes them in place and returns the list; or assign a new list.  Node

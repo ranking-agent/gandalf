@@ -259,32 +259,21 @@ def query_parameters(query: QueryDict) -> GandalfParametersDict:
     return cast("GandalfParametersDict", query.get("parameters") or {})
 
 
-class AttributesJSON:
-    """An Edge's ``attributes``, still the JSON array stored in the graph.
-
-    A full response built for the server (``lookup(attributes_as_json=True)``)
-    carries each real edge's attributes this way rather than as a list: the
-    server hands them to orjson as :class:`orjson.Fragment` just before
-    serializing (:func:`attributes_to_fragments`), so they go from the graph
-    into the response without ever being decoded.  Code that reads or changes
-    an edge's attributes before that -- a response annotator plugin -- calls
-    :func:`edge_attributes`, which decodes them in place.
-    """
-
-    __slots__ = ("json",)
-
-    def __init__(self, data: bytes) -> None:
-        self.json = data
-
-    def __repr__(self) -> str:
-        return f"AttributesJSON({self.json!r})"
-
-
 def edge_attributes(edge: Any) -> list:
     """An edge's attributes as a list, decoding them in place if they are
-    still :class:`AttributesJSON`, so the caller may change the list.
+    still the JSON stored in the graph, so the caller may change the list.
 
-    >>> edge = {"attributes": AttributesJSON(b'[{"attribute_type_id": "biolink:x"}]')}
+    A full response built for the server (``lookup(attributes_as_json=True)``)
+    carries each real edge's attributes as the ``bytes`` of the JSON array
+    stored in the graph rather than as a list: the server hands them to orjson
+    as :class:`orjson.Fragment` just before serializing
+    (:func:`attributes_to_fragments`), so they go from the graph into the
+    response without ever being decoded.  ``bytes`` is never a valid TRAPI
+    attribute list, so it cannot be mistaken for one.  Code that reads or
+    changes an edge's attributes before that -- a response annotator plugin
+    -- calls this, which decodes them in place.
+
+    >>> edge = {"attributes": b'[{"attribute_type_id": "biolink:x"}]'}
     >>> edge_attributes(edge)
     [{'attribute_type_id': 'biolink:x'}]
     >>> edge["attributes"]
@@ -293,14 +282,14 @@ def edge_attributes(edge: Any) -> list:
     []
     """
     attributes = edge.get("attributes")
-    if type(attributes) is AttributesJSON:
-        attributes = edge["attributes"] = orjson.loads(attributes.json)
+    if type(attributes) is bytes:
+        attributes = edge["attributes"] = orjson.loads(attributes)
     return attributes if attributes is not None else []
 
 
 def attributes_to_fragments(response: Any) -> None:
-    """Turn every knowledge-graph edge's :class:`AttributesJSON` into an
-    :class:`orjson.Fragment`, in place.
+    """Turn every knowledge-graph edge's stored attributes JSON (``bytes``;
+    see :func:`edge_attributes`) into an :class:`orjson.Fragment`, in place.
 
     The last step before serializing: orjson copies a Fragment's bytes into
     its output as they are, where going through a ``default`` hook per edge
@@ -312,8 +301,8 @@ def attributes_to_fragments(response: Any) -> None:
     fragment = orjson.Fragment
     for edge in edges.values():
         attributes = edge.get("attributes")
-        if type(attributes) is AttributesJSON:
-            edge["attributes"] = fragment(attributes.json)
+        if type(attributes) is bytes:
+            edge["attributes"] = fragment(attributes)
 
 
 class InFlightEdge(TypedDict):
@@ -331,8 +320,8 @@ class InFlightEdge(TypedDict):
       :func:`gandalf.search.lookup.lookup`, and the note in
       ``tests/test_trapi_conformance.py`` on why those responses are excluded
       from conformance checks.
-    * ``attributes`` may be :class:`AttributesJSON` -- the stored JSON, not
-      yet decoded -- in a response built for the server; read it through
+    * ``attributes`` may be ``bytes`` -- the stored JSON, not yet decoded --
+      in a response built for the server; read it through
       :func:`edge_attributes`.
     * Three bookkeeping properties hang off an edge while a response is built
       -- the knowledge-graph id it should be filed under, and the
@@ -352,7 +341,7 @@ class InFlightEdge(TypedDict):
     knowledge_level: str
     agent_type: str
     sources: NotRequired[list[RetrievalSourceDict]]
-    attributes: NotRequired[Union[list[AttributeDict], AttributesJSON]]
+    attributes: NotRequired[Union[list[AttributeDict], bytes]]
     qualifiers: NotRequired[list[QualifierDict]]
     _edge_id: NotRequired[str]
     _query_subject: NotRequired[str]

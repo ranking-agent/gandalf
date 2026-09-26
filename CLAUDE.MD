@@ -185,7 +185,7 @@ pins the sharing.
 **Edge attributes reach the server's responses undecoded.**  Each edge's
 attributes are stored as the JSON array a response carries.  The server calls
 `lookup(..., attributes_as_json=True)`, so a real edge's `attributes` is
-`gandalf.trapi.AttributesJSON` (the stored bytes) rather than a list.  Just
+`bytes` (the stored JSON) rather than a list.  Just
 before serializing, `attributes_to_fragments` turns those into
 `orjson.Fragment`, which orjson copies into its output as they are.  Decoding
 them and encoding them again was the costliest step of a large full response.

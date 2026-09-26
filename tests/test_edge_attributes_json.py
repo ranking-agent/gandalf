@@ -89,11 +89,7 @@ def test_graph_from_before_json_attributes_is_refused(graph, tmp_path):  # noqa:
 # ---------------------------------------------------------------------------
 
 from gandalf.search import lookup  # noqa: E402
-from gandalf.trapi import (  # noqa: E402
-    AttributesJSON,
-    attributes_to_fragments,
-    edge_attributes,
-)
+from gandalf.trapi import attributes_to_fragments, edge_attributes  # noqa: E402
 
 METFORMIN = "CHEBI:6801"
 T2D = "MONDO:0005148"
@@ -152,7 +148,7 @@ def test_json_mode_serializes_to_the_same_bytes(
     encoded = [
         edge
         for edge in as_json["message"]["knowledge_graph"]["edges"].values()
-        if type(edge.get("attributes")) is AttributesJSON
+        if type(edge.get("attributes")) is bytes
     ]
     if dehydrated:
         assert not encoded, "a dehydrated response carries no attributes"
@@ -224,7 +220,7 @@ def test_validating_server_gets_attributes_as_lists(server, monkeypatch):
 
 def test_server_default_serializes_a_stray_wrapper(server):
     data = orjson.dumps(
-        {"attributes": AttributesJSON(b'[{"attribute_type_id":"biolink:x"}]')},
+        {"attributes": b'[{"attribute_type_id":"biolink:x"}]'},
         default=server._orjson_default,
     )
     assert data == b'{"attributes":[{"attribute_type_id":"biolink:x"}]}'

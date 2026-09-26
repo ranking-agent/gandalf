@@ -73,7 +73,7 @@ from bench_lookup import (  # noqa: E402
     stage_ms,
 )
 
-from gandalf.trapi import AttributesJSON, attributes_to_fragments  # noqa: E402
+from gandalf.trapi import attributes_to_fragments  # noqa: E402
 
 try:
     import psutil
@@ -841,8 +841,6 @@ def _deep_size(items, sample: int, rng, skip_strings=False, exclude=()) -> dict:
                 stack.extend(obj.values())
             elif isinstance(obj, (list, tuple, set, frozenset)):
                 stack.extend(obj)
-            elif isinstance(obj, AttributesJSON):
-                stack.append(obj.json)
     k = len(picks)
     return {
         "bytes": total * n / k,
