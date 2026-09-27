@@ -185,19 +185,40 @@ pins the sharing.
 **Edge attributes reach the server's responses undecoded.**  Each edge's
 attributes are stored as the JSON array a response carries.  The server calls
 `lookup(..., attributes_as_json=True)`, so a real edge's `attributes` is
-`bytes` (the stored JSON) rather than a list.  Just
-before serializing, `attributes_to_fragments` turns those into
-`orjson.Fragment`, which orjson copies into its output as they are.  Decoding
+`bytes` (the stored JSON) rather than a list.  Just before serializing,
+`to_fragments` turns those into `orjson.Fragment`, which orjson copies into
+its output as they are.  Decoding
 them and encoding them again was the costliest step of a large full response.
 Two rules follow:
 - **Read or change an edge's attributes through
   `gandalf.trapi.edge_attributes(edge)`** (response annotator plugins
   included), which decodes them in place.  A Fragment cannot be read back, so
-  nothing may need them after `attributes_to_fragments`.
+  nothing may need them after `to_fragments`.
 - **Output stays byte-identical to decoding them:** the stored bytes are
   exactly what orjson makes of the decoded list, and the attributes key keeps
   its place in the edge.  `tests/test_edge_attributes_json.py` checks both
   modes serialize to the same bytes.
+
+**Single-path results are written straight to JSON.**  The server also calls
+`lookup(..., results_as_json=True)`.  Nearly every result on a large query
+comes from one path whose subclass matches are identities (the single-path
+fast path above); `_single_path_json` writes all of those at once rather
+than building them one by one: it picks them out with NumPy masks, builds
+each unique edge's KG entry once, and fills a JSON template fixed by the
+query graph with each result's IDs, encoded once each.  Runs of consecutive
+results become single `bytes` entries of `message["results"]`, among the
+results the per-group loop still builds as dicts (multi-path, inferred edges,
+edges without IDs, ALL/COLLATE queries); `to_fragments` hands them to orjson
+as Fragments.  The rules:
+- **Read or change results through `gandalf.trapi.response_results(response)`**
+  (response annotator plugins included), which decodes them in place.
+- **Output stays byte-identical to the dict path**, results and
+  knowledge-graph key order included: the loop files its KG entries into
+  dicts of its own, merged with the JSON results' entries in the order the
+  loop alone would have filed them (`_file_in_first_seen_order`).  A change to
+  the Result shape the loop builds must change the template in
+  `_single_path_json` too; `tests/test_results_as_json.py` compares the two
+  byte for byte across the query shapes.
 
 Library callers get plain lists by default, and so does the server when
 `validate_responses` is on, since FastAPI's validation needs them.

@@ -72,7 +72,7 @@ _REPO = _HERE.parents[1]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_HERE))
 
-from gandalf.trapi import attributes_to_fragments  # noqa: E402
+from gandalf.trapi import response_results, to_fragments  # noqa: E402
 
 #: Where ``--synthetic`` graphs are cached between runs.
 DEFAULT_CACHE_DIR = _REPO / "bench_results" / "cache"
@@ -144,7 +144,8 @@ def lookup_kwargs(body: dict) -> dict:
     """Map a request's ``parameters`` onto ``lookup()`` arguments, as the server does.
 
     Like the server, this asks for edge attributes as their stored JSON
-    (``attributes_as_json``); ``serialize`` turns them into orjson Fragments.
+    (``attributes_as_json``) and for results written as JSON
+    (``results_as_json``); ``serialize`` turns them into orjson Fragments.
     """
     params = body.get("parameters") or {}
     return {
@@ -153,6 +154,7 @@ def lookup_kwargs(body: dict) -> dict:
         "dehydrated": params.get("dehydrated"),
         "filter_config": params.get("filter_config"),
         "attributes_as_json": True,
+        "results_as_json": True,
     }
 
 
@@ -182,12 +184,12 @@ def _serialize_default(obj):
 def serialize(response: dict) -> tuple[float, int]:
     """Serialize a response as the server does; return ``(ms, bytes)``.
 
-    Hands the edge attributes to orjson as Fragments first, as the server
-    does (and counts that in the time); the response's edge attributes can
-    not be read afterwards.
+    Hands edge attributes and results still stored as JSON to orjson as
+    Fragments first, as the server does (and counts that in the time); they
+    cannot be read afterwards.
     """
     t0 = time.perf_counter()
-    attributes_to_fragments(response)
+    to_fragments(response)
     data = orjson.dumps(
         response, default=_serialize_default, option=orjson.OPT_SERIALIZE_NUMPY
     )
@@ -264,7 +266,7 @@ def fingerprint(response: dict) -> str:
         )
 
     canon = []
-    for result in message["results"]:
+    for result in response_results(response):
         nodes = tuple(
             sorted(
                 (qnode, tuple(sorted(binding["ids"])))
@@ -344,18 +346,21 @@ def bench_query(
         "runs_ms": runs_ms,
         "median_ms": statistics.median(runs_ms),
         "min_ms": min(runs_ms),
-        "results": len(message["results"]),
         "kg_nodes": len(message["knowledge_graph"]["nodes"]),
         "kg_edges": len(message["knowledge_graph"]["edges"]),
-        "fingerprint": fingerprint(response),
         "serialize_ms": serialize_ms,
         "response_bytes": response_bytes,
     }
     del response, message
 
+    # The serialized response's results are orjson Fragments by now, which
+    # cannot be read back: count and fingerprint the profiled run's instead,
+    # decoding any written as JSON.
     profiled_ms, profiled = run_once(graph, body, bmt, profile=True)
     on_run("profiled ", profiled_ms)
     tree = profile_tree(profiled) or {}
+    record["results"] = len(response_results(profiled))
+    record["fingerprint"] = fingerprint(profiled)
     del profiled
     record["profiled_ms"] = profiled_ms
     record["peak_alloc_mb"] = None

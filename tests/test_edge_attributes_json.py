@@ -89,7 +89,7 @@ def test_graph_from_before_json_attributes_is_refused(graph, tmp_path):  # noqa:
 # ---------------------------------------------------------------------------
 
 from gandalf.search import lookup  # noqa: E402
-from gandalf.trapi import attributes_to_fragments, edge_attributes  # noqa: E402
+from gandalf.trapi import to_fragments, edge_attributes  # noqa: E402
 
 METFORMIN = "CHEBI:6801"
 T2D = "MONDO:0005148"
@@ -131,7 +131,7 @@ QUERIES = {
 
 
 def _message_bytes(response: dict) -> bytes:
-    attributes_to_fragments(response)
+    to_fragments(response)
     return orjson.dumps(response["message"])
 
 

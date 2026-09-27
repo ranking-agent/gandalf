@@ -79,13 +79,22 @@ def lookup(
             threshold.
         attributes_as_json: If True, each real edge's ``attributes`` in a
             full response is ``bytes`` -- the JSON stored in the graph, not
-            decoded -- for a caller that
-            serializes with orjson after
-            :func:`~gandalf.trapi.attributes_to_fragments`, as the server
-            does.  Decoding and re-encoding them costs more than any other
-            step of a large full response.  Read one through
+            decoded -- for a caller that serializes with orjson after
+            :func:`~gandalf.trapi.to_fragments`, as the server does.
+            Decoding and re-encoding them costs more than any other step of a
+            large full response.  Read one through
             :func:`~gandalf.trapi.edge_attributes`.  If False (default), they
             are plain lists.
+        results_as_json: If True, results built from a single path whose
+            edges all have IDs -- nearly all of them on a large query -- are
+            written straight to JSON, all at once, rather than built one by
+            one as dicts: ``message["results"]`` then holds ``bytes``
+            entries, each a run of consecutive results, among the results
+            still built as dicts, for a caller that serializes with orjson
+            after :func:`~gandalf.trapi.to_fragments`, as the server does.
+            Read them through :func:`~gandalf.trapi.response_results`.  The
+            serialized response is byte-identical either way.  If False
+            (default), every result is a dict.
         profile: If True, capture per-stage timings (BMT init, per-qedge
             query, path reconstruction, response building, LMDB enrichment,
             annotators) and append them to ``response["logs"]`` as TRAPI
@@ -510,8 +519,8 @@ def _lookup_inner(
 #: tests turn it off, to compare against the general per-group loop.
 _SINGLE_PATH_FAST = True
 
-#: With ``results_as_json``, how many consecutive single-path results share
-#: one ``bytes`` entry of the results list (1: an entry per result).
+#: With ``results_as_json``, the most consecutive single-path results that
+#: share one ``bytes`` entry of the results list.
 _RESULTS_BLOCK = 4096
 
 #: How many results to build between wall-clock checks in _build_response.
@@ -556,16 +565,9 @@ def _group_rows(keys: np.ndarray) -> list[np.ndarray]:
     >>> [g.tolist() for g in _group_rows(np.empty((3, 0), dtype=np.int32))]
     [[0, 1, 2]]
     """
-    if keys.shape[1] == 0:
-        return [np.arange(len(keys))]
-    _, first_rows, group_of_row = np.unique(
-        keys, axis=0, return_index=True, return_inverse=True
-    )
-    group_of_row = group_of_row.reshape(-1)
-    rows_by_group = np.argsort(group_of_row, kind="stable")
-    boundaries = np.cumsum(np.bincount(group_of_row))[:-1]
-    groups = np.split(rows_by_group, boundaries)
-    return [groups[g] for g in np.argsort(first_rows)]
+    rows, starts, _sizes = _group_layout(keys)
+    groups: list[np.ndarray] = np.split(rows, starts[1:])
+    return groups
 
 
 def _group_layout(keys: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -639,8 +641,9 @@ def _single_path_json(
     into entries of at most *block* results, cut wherever a result the loop
     builds comes in between.
 
-    Returns None if the fast results' edge IDs are not unique (each edge would
-    then not own its KG entry), else a dict with:
+    Returns None if the query's edges do not all have distinct IDs (an edge
+    would then not own its KG entry, and which edge the entry holds would
+    depend on the order results are built in), else a dict with:
 
         dict_groups: the groups left to the loop, by group index
         cuts: for each of those, how many fast results come before it
@@ -650,6 +653,8 @@ def _single_path_json(
         nodes, edges: the KG entries to file, as ``(keys, values, group,
             position)`` in first-appearance order within the fast results
     """
+    if len(set(edge_id_map.values())) != len(edge_id_map):
+        return None
     rows, starts, sizes = layout
     first = rows[starts]
     fast = sizes == 1
@@ -679,8 +684,6 @@ def _single_path_json(
             fast_rows = fast_rows[with_ids]
             u_edges, e_first, e_inv = unique_edges(fast_rows)
             edge_ids = [edge_id_map.get(e) for e in u_edges.tolist()]
-        if len(set(edge_ids)) != len(edge_ids):
-            return None
     n = len(fast_rows)
     deadline.check("response building")
 
@@ -763,22 +766,19 @@ def _single_path_json(
     offsets = np.zeros(n + 1, dtype=np.int64)
     np.cumsum(lengths, out=offsets[1:])
 
+    # Entries end at every block boundary and wherever a loop-built result
+    # comes in between; chunks end on block boundaries too.
     dict_groups = np.setdiff1d(np.arange(len(sizes)), fast_groups, assume_unique=True)
     cuts = np.searchsorted(fast_groups, dict_groups)
-    bounds = np.union1d(
-        np.union1d(cuts, np.arange(0, n, max(block, 1))), [0, n]
-    ).tolist()
-    chunk = max(_JSON_CHUNK // max(block, 1), 1) * max(block, 1)
-    for extra in range(0, n, chunk):
-        bounds.append(extra)
-    bounds = sorted(set(bounds))
+    step = max(block, 1)
+    bounds = np.union1d(cuts, np.append(np.arange(0, n, step), n)).tolist()
+    chunk = max(_JSON_CHUNK // step, 1) * step
 
     entries: list[tuple[int, bytes]] = []
-    pieces = np.empty((0, 2 * (k + m) + 1), dtype=object)
     bi = 0
     for c0 in range(0, n, chunk):
         c1 = min(c0 + chunk, n)
-        pieces = np.empty((c1 - c0, 2 * (k + m) + 1), dtype=object)
+        pieces = np.empty((c1 - c0, len(literals) + k + m), dtype=object)
         for j, literal in enumerate(literals):
             pieces[:, 2 * j] = literal
         for j in range(k):
@@ -789,12 +789,11 @@ def _single_path_json(
         base = offsets[c0]
         while bi + 1 < len(bounds) and bounds[bi + 1] <= c1:
             a, b = bounds[bi], bounds[bi + 1]
-            if a >= c0 and b > a:
+            if b > a:
                 entries.append((b, joined[offsets[a] - base : offsets[b] - base - 1]))
             bi += 1
-        del joined
+        del pieces, joined
         deadline.check("response building")
-    del pieces
 
     return {
         "dict_groups": dict_groups,
@@ -1234,6 +1233,11 @@ def _build_response(
     # internal markers stripped once all results are built.
     marked_edges: list[InFlightEdge] = []
 
+    # results_as_json: write the single-path results as JSON first, then run
+    # the loop below over the other groups only.  The loop files into KG
+    # dicts and a results list of its own, merged with the JSON results'
+    # afterwards; marks records how many KG entries it held before each
+    # group, so each entry's first appearance can be placed.
     results_out = response["message"]["results"]
     num_results = 0
     fast_json = None
@@ -1265,24 +1269,21 @@ def _build_response(
             deadline=deadline,
         )
         g_rows, g_starts, g_sizes = layout
-        dict_groups = (
-            fast_json["dict_groups"]
-            if fast_json is not None
-            else np.arange(len(g_sizes))
-        )
-        path_groups = [
-            g_rows[start : start + size]
-            for start, size in zip(
-                g_starts[dict_groups].tolist(), g_sizes[dict_groups].tolist()
-            )
-        ]
-        # The loop files into dicts of its own, merged with the JSON
-        # results' entries afterwards in first-appearance order; marks
-        # records how many each held before each group.
-        final_nodes, final_edges = kg_nodes, kg_edges
-        kg_nodes, kg_edges = {}, {}
-        results_out = []
-        marks = []
+        if fast_json is None:
+            # An edge ID shared between edges: every group goes to the loop.
+            path_groups = np.split(g_rows, g_starts[1:])
+        else:
+            dict_groups = fast_json["dict_groups"]
+            path_groups = [
+                g_rows[start : start + size]
+                for start, size in zip(
+                    g_starts[dict_groups].tolist(), g_sizes[dict_groups].tolist()
+                )
+            ]
+            final_nodes, final_edges = kg_nodes, kg_edges
+            kg_nodes, kg_edges = {}, {}
+            results_out = []
+            marks = []
 
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
@@ -1665,42 +1666,27 @@ def _build_response(
         results_out.append(result)
         num_results += 1
 
-    if marks is not None:
-        # Put the JSON results and the loop's results together in group
-        # order, and file the KG entries in first-appearance order.
+    if fast_json is not None and marks is not None:
+        # The JSON results and the loop's, together in group order; KG
+        # entries filed in first-appearance order across both.
         marks.append((len(kg_nodes), len(kg_edges)))
         results = response["message"]["results"]
-        loop_groups = dict_groups
-        if fast_json is None:
-            results.extend(results_out)
-            loop_nodes_g = np.repeat(loop_groups, np.diff([n for n, _e in marks]))
-            loop_edges_g = np.repeat(loop_groups, np.diff([e for _n, e in marks]))
-            empty: tuple = (
-                [],
-                [],
-                np.zeros(0, dtype=np.int64),
-                np.zeros(0, dtype=np.int64),
-            )
-            _file_in_first_seen_order(final_nodes, empty, kg_nodes, loop_nodes_g)
-            _file_in_first_seen_order(final_edges, empty, kg_edges, loop_edges_g)
-        else:
-            entries = fast_json["entries"]
-            ei = 0
-            for cut, result in zip(fast_json["cuts"].tolist(), results_out):
-                while ei < len(entries) and entries[ei][0] <= cut:
-                    results.append(entries[ei][1])
-                    ei += 1
-                results.append(result)
-            results.extend(entry for _end, entry in entries[ei:])
-            num_results += fast_json["num_fast"]
-            loop_nodes_g = np.repeat(loop_groups, np.diff([n for n, _e in marks]))
-            loop_edges_g = np.repeat(loop_groups, np.diff([e for _n, e in marks]))
-            _file_in_first_seen_order(
-                final_nodes, fast_json["nodes"], kg_nodes, loop_nodes_g
-            )
-            _file_in_first_seen_order(
-                final_edges, fast_json["edges"], kg_edges, loop_edges_g
-            )
+        entries = fast_json["entries"]
+        ei = 0
+        for cut, result in zip(fast_json["cuts"].tolist(), results_out):
+            while ei < len(entries) and entries[ei][0] <= cut:
+                results.append(entries[ei][1])
+                ei += 1
+            results.append(result)
+        results.extend(entry for _end, entry in entries[ei:])
+        num_results += fast_json["num_fast"]
+        filed = np.array(marks, dtype=np.int64).reshape(-1, 2)
+        for target, fast, loop, column in (
+            (final_nodes, fast_json["nodes"], kg_nodes, 0),
+            (final_edges, fast_json["edges"], kg_edges, 1),
+        ):
+            loop_groups = np.repeat(dict_groups, np.diff(filed[:, column]))
+            _file_in_first_seen_order(target, fast, loop, loop_groups)
 
     # Free path arrays now that results are built
     del path_data

@@ -28,7 +28,7 @@ from tests.test_single_path_fast_path import (  # noqa: F401
 )
 
 from gandalf.search import lookup
-from gandalf.trapi import attributes_to_fragments
+from gandalf.trapi import response_results, to_fragments
 
 lookup_module = importlib.import_module("gandalf.search.lookup")
 
@@ -102,7 +102,7 @@ SIBLING_QUERIES = {
 
 def _served(response: dict) -> tuple:
     """The message as the server serializes it, plus the KG key order."""
-    attributes_to_fragments(response)
+    to_fragments(response)
     message = response["message"]
     return (
         orjson.dumps(message),
@@ -168,3 +168,135 @@ def test_mixed_results_keep_their_order(monkeypatch, graph, bmt):  # noqa: F811
     response = lookup(graph, TWO_HOP_MIXED, bmt=bmt, results_as_json=True)
     kinds = [type(r) for r in response["message"]["results"]]
     assert bytes in kinds and dict in kinds
+
+
+# ---------------------------------------------------------------------------
+# Edges without IDs, and IDs shared between edges: left to the loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def counting_uuids(monkeypatch):
+    """Deterministic uuid4s, so both modes name ID-less edges alike."""
+    import uuid
+
+    def reset():
+        counter = iter(range(10**6))
+        monkeypatch.setattr(
+            lookup_module.uuid, "uuid4", lambda: uuid.UUID(int=next(counter))
+        )
+
+    return reset
+
+
+def test_edges_without_ids(monkeypatch, graph, bmt, counting_uuids):  # noqa: F811
+    """An edge without an ID gets a fresh one per result, so its results go
+    to the loop; the others are still written as JSON."""
+    get_ids = graph.get_edge_ids_batch
+
+    def some_missing(indices):
+        ids = get_ids(indices)
+        return {idx: eid for idx, eid in ids.items() if idx % 2}
+
+    monkeypatch.setattr(graph, "get_edge_ids_batch", some_missing)
+    query = QUERIES["batch"]
+    counting_uuids()
+    reference = lookup(graph, query, bmt=bmt, attributes_as_json=True)
+    counting_uuids()
+    response = lookup(
+        graph, query, bmt=bmt, attributes_as_json=True, results_as_json=True
+    )
+    kinds = {type(r) for r in response["message"]["results"]}
+    assert kinds == {bytes, dict}
+    assert _served(response) == _served(reference)
+
+
+def test_shared_edge_ids_fall_back_to_dicts(monkeypatch, graph, bmt):  # noqa: F811
+    """Two edges under one ID would share a KG entry: every result is then
+    built by the loop, as without results_as_json.  The two need not both be
+    in results that could be written as JSON."""
+    get_ids = graph.get_edge_ids_batch
+
+    def shared(indices):
+        return {
+            idx: "shared" if i < 2 else eid
+            for i, (idx, eid) in enumerate(get_ids(indices).items())
+        }
+
+    monkeypatch.setattr(graph, "get_edge_ids_batch", shared)
+    query = QUERIES["batch"]
+    reference = lookup(graph, query, bmt=bmt, attributes_as_json=True)
+    response = lookup(
+        graph, query, bmt=bmt, attributes_as_json=True, results_as_json=True
+    )
+    assert all(type(r) is dict for r in response["message"]["results"])
+    assert _served(response) == _served(reference)
+
+
+# ---------------------------------------------------------------------------
+# Reading results: response_results, and the server
+# ---------------------------------------------------------------------------
+
+
+def test_response_results_decodes_in_place(graph, bmt):  # noqa: F811
+    query = TWO_HOP_MIXED
+    reference = lookup(graph, query, bmt=bmt, attributes_as_json=True)
+    response = lookup(
+        graph, query, bmt=bmt, attributes_as_json=True, results_as_json=True
+    )
+    results = response_results(response)
+    assert all(type(r) is dict for r in results)
+    assert response["message"]["results"] is results
+    assert results == reference["message"]["results"]
+
+    # Changes to the decoded results are served.
+    results[0]["node_bindings"]["n0"] = {"ids": ["CHEBI:changed"]}
+    served = orjson.loads(_served(response)[0])
+    assert served["results"][0]["node_bindings"]["n0"] == {"ids": ["CHEBI:changed"]}
+
+
+@pytest.fixture
+def server(graph, bmt, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("GANDALF_SKIP_PRELOAD", "true")
+    monkeypatch.setenv("GANDALF_OTEL_ENABLED", "false")
+    from gandalf import server as gandalf_server
+
+    monkeypatch.setattr(gandalf_server, "GRAPH", graph)
+    monkeypatch.setattr(gandalf_server, "BMT", bmt)
+    return gandalf_server
+
+
+def test_server_serves_the_same_bytes(server, graph, bmt):  # noqa: F811
+    rendered = server.sync_lookup(request=dict(TWO_HOP_MIXED), profile=None)
+    served = orjson.dumps(orjson.loads(rendered.body)["message"])
+    reference = lookup(graph, TWO_HOP_MIXED, bmt=bmt)
+    assert served == orjson.dumps(reference["message"])
+
+
+def test_server_annotators_read_results(server, monkeypatch):
+    seen = []
+
+    def annotate(response, graph, config):
+        for result in response_results(response):
+            seen.append(type(result))
+            result["analyses"][0]["score"] = 0.5
+
+    monkeypatch.setattr(server, "annotate_response", annotate)
+    query = dict(TWO_HOP_MIXED, parameters={"annotator_config": {"any": {}}})
+    rendered = server.sync_lookup(request=query, profile=None)
+    assert seen and set(seen) == {dict}
+    results = orjson.loads(rendered.body)["message"]["results"]
+    assert len(results) == len(seen)
+    assert all(r["analyses"][0]["score"] == 0.5 for r in results)
+
+
+def test_validating_server_gets_result_dicts(server, monkeypatch):
+    monkeypatch.setattr(server, "_validate", True)
+    response = server.sync_lookup(request=dict(TWO_HOP_MIXED), profile=None)
+    assert all(type(r) is dict for r in response["message"]["results"])
+
+
+def test_server_default_serializes_a_stray_block(server):
+    block = b'{"node_bindings":{}},{"node_bindings":{}}'
+    data = orjson.dumps({"results": [block]}, default=server._orjson_default)
+    assert data == b'{"results":[{"node_bindings":{}},{"node_bindings":{}}]}'

@@ -13,13 +13,20 @@ Annotators are opt-in per request: each plugin's factory pulls its own key
 out of the per-request ``annotator_config`` dict and returns ``None`` when
 the key is missing — exactly the same pattern as ``NodeFilter`` factories.
 
-**Reading edge attributes.**  In a response built for the server, a
-knowledge-graph edge's ``attributes`` is not a list but
-``bytes``: the JSON array stored in the graph, left
-undecoded so the server can serialize it as it is.  Read (and change) an
-edge's attributes through ``gandalf.trapi.edge_attributes(edge)``, which
-decodes them in place and returns the list; or assign a new list.  Node
-attributes and edges an annotator adds are plain lists as always.
+**Reading edge attributes and results.**  A response built for the server
+keeps some of itself as JSON, so the server can serialize it as it is:
+
+* a knowledge-graph edge's ``attributes`` is not a list but ``bytes``, the
+  JSON array stored in the graph.  Read (and change) an edge's attributes
+  through ``gandalf.trapi.edge_attributes(edge)``, which decodes them in
+  place and returns the list; or assign a new list.
+* ``message["results"]`` holds ``bytes`` entries, each a run of results
+  written as JSON, among Result dicts.  Read (and change) the results
+  through ``gandalf.trapi.response_results(response)``, which decodes them
+  in place and returns the list of Result dicts.
+
+Node attributes, and edges and results an annotator adds, are plain Python
+objects as always.
 """
 
 from typing import Any, Callable, Optional

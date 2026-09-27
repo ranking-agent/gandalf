@@ -73,7 +73,7 @@ from bench_lookup import (  # noqa: E402
     stage_ms,
 )
 
-from gandalf.trapi import attributes_to_fragments  # noqa: E402
+from gandalf.trapi import to_fragments  # noqa: E402
 
 try:
     import psutil
@@ -86,18 +86,28 @@ L = importlib.import_module("gandalf.search.lookup")
 # The real functions, whatever they are patched to while measuring.
 BUILD = L._build_response
 ITER_GROUP_ROWS = L._iter_group_rows
+GROUP_LAYOUT = getattr(L, "_group_layout", None)
 
 #: Helpers of ``_build_response`` to time, where they exist.  Only ones that
 #: take a few microseconds or more: a wrapper costs about one, so timing a
 #: cheaper helper (``_append_edge_binding``, ``prune_edge``, ...) would
 #: mostly measure the wrapper.  Their time stays in the calling statement.
-HELPERS = ("_group_rows", "_full_edge", "_minimal_edge")
+HELPERS = (
+    "_group_rows",
+    "_group_layout",
+    "_single_path_json",
+    "_file_in_first_seen_order",
+    "_full_edge",
+    "_minimal_edge",
+)
 
 #: Plain names for statements of ``_build_response``, matched on their code:
 #: ``(level, substring of the statement's code, name)``.  An unmatched
 #: statement is shown as its code.
 NAMES = (
     ("top", "_group_rows(", "group paths into results"),
+    ("top", "_single_path_json(", "write single-path results as JSON"),
+    ("top", "_file_in_first_seen_order(", "merge JSON and loop results; file KG"),
     ("top", "get_edge_ids_batch(", "prefetch edge data and IDs"),
     ("top", "node_idx_by_id = ", "index nodes by ID"),
     ("top", "pop('_edge_id'", "strip internal markers from KG edges"),
@@ -593,7 +603,7 @@ def _serialize_parts(response: dict) -> dict:
     does, timed as its own part.
     """
     start = time.perf_counter()
-    attributes_to_fragments(response)
+    to_fragments(response)
     out = {"convert": {"seconds": time.perf_counter() - start, "bytes": 0}}
     message = response["message"]
     kg = message.get("knowledge_graph") or {}
@@ -689,9 +699,15 @@ def _instrumented_run(graph, bmt, body, kwargs, build: InstrumentedBuild):
         (L, "_build_response", timed_build),
         (L, "_iter_group_rows", iter_group_rows),
     ]
+
+    def group_layout(keys):
+        cap["layout"] = layout = GROUP_LAYOUT(keys)
+        return layout
+
     for name in HELPERS:
         if hasattr(L, name):
-            patches.append((L, name, tracker.wrap(name, getattr(L, name))))
+            fn = group_layout if name == "_group_layout" else getattr(L, name)
+            patches.append((L, name, tracker.wrap(name, fn)))
     # The edge IDs batch, and the costly part of building an Edge dict
     # (credited to _full_edge).
     parts = (
@@ -740,7 +756,7 @@ def _tracemalloc_run(graph, bmt, body, kwargs, top: int = 12) -> dict:
             response = L.lookup(graph, body, bmt=bmt, **kwargs)
         current, peak = tracemalloc.get_traced_memory()
         tracemalloc.reset_peak()
-        attributes_to_fragments(response)
+        to_fragments(response)
         data = orjson.dumps(
             response, default=_serialize_default, option=orjson.OPT_SERIALIZE_NUMPY
         )
@@ -781,7 +797,7 @@ def _tracemalloc_run(graph, bmt, body, kwargs, top: int = 12) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _shape(path_data, query_graph, groups) -> dict:
+def _shape(path_data, query_graph, rows: np.ndarray, sizes: np.ndarray) -> dict:
     """How many results come from one path, and how many carry an inferred
     subclass edge (a subclass match that is not an identity)."""
     nodes = path_data.paths_nodes
@@ -794,7 +810,7 @@ def _shape(path_data, query_graph, groups) -> dict:
             subj = path_data.qnode_to_col[qedge["subject"]]
             obj = path_data.qnode_to_col[qedge["object"]]
             inferred |= nodes[:, subj] != nodes[:, obj]
-    n = len(groups)
+    n = len(sizes)
     if n == 0:
         return {
             "subclass_qedges": subclass_qedges,
@@ -802,8 +818,6 @@ def _shape(path_data, query_graph, groups) -> dict:
             "inferred": 0.0,
             "fast_path": 0.0,
         }
-    sizes = np.fromiter(map(len, groups), dtype=np.int64, count=n)
-    rows = np.concatenate(groups)
     group_of_row = np.repeat(np.arange(n), sizes)
     group_inferred = np.bincount(group_of_row, weights=inferred[rows], minlength=n) > 0
     return {
@@ -850,17 +864,33 @@ def _deep_size(items, sample: int, rng, skip_strings=False, exclude=()) -> dict:
     }
 
 
+def _count_written(results: list, marker: bytes) -> int:
+    """Occurrences of *marker* in the results written as JSON (``bytes``
+    entries).  orjson escapes the quotes in any string, so a marker such as
+    ``{"node_bindings":`` can only be the JSON's own structure."""
+    return sum(entry.count(marker) for entry in results if type(entry) is bytes)
+
+
+def _result_count(results: list) -> int:
+    """How many results *results* holds, counting those written as JSON."""
+    dicts = sum(1 for entry in results if type(entry) is not bytes)
+    return dicts + _count_written(results, b'{"node_bindings":')
+
+
 def _binding_stats(results: list) -> dict:
     """Binding objects in the results against the distinct IDs they bind.
 
     A binding of exactly ``{"ids": [x]}`` could be one object per ID shared
     by every result that binds ``x``; this counts how many separate objects
-    there are now and what sharing them would save.
+    there are now and what sharing them would save.  Results written as JSON
+    hold no binding objects, so only the dict results count.
     """
     first: dict = {}
     total = single = separate = 0
     each = 0
     for result in results:
+        if type(result) is bytes:
+            continue
         groups = [result["node_bindings"].values()]
         groups += [a["edge_bindings"].values() for a in result.get("analyses") or ()]
         for bindings in groups:
@@ -961,7 +991,7 @@ def breakdown(
     log("  instrumented run")
     response, tracker, cap = _instrumented_run(graph, bmt, body, kwargs, build)
     results = response["message"]["results"]
-    rec["results"] = len(results)
+    rec["results"] = _result_count(results)
     tree = profile_tree(response) or {}
     time_rec["stages"] = {
         "subclass_rewrite": stage_ms(tree, ("subclass_rewrite",)) / 1000,
@@ -981,7 +1011,15 @@ def breakdown(
         path_data, groups = cap["path_data"], cap.get("groups", [])
         rec["paths"] = int(path_data.paths_nodes.shape[0])
         rec["mode"] = "dehydrated" if path_data.lightweight else "full"
-        rec["shape"] = _shape(path_data, cap["query_graph"], groups)
+        layout = cap.get("layout")
+        if layout is not None:
+            # results_as_json: every group, as index arrays; the loop saw
+            # only some of them.
+            all_rows, _starts, all_sizes = layout
+        else:
+            all_sizes = np.fromiter(map(len, groups), dtype=np.int64, count=len(groups))
+            all_rows = np.concatenate(groups) if groups else np.zeros(0, dtype=np.int64)
+        rec["shape"] = _shape(path_data, cap["query_graph"], all_rows, all_sizes)
 
         seconds, helpers, rows_seconds, overhead = _corrected(
             build, tracker, cap["rows"], cal
@@ -1042,22 +1080,27 @@ def breakdown(
         message = response["message"]
         kg = message["knowledge_graph"]
         aux = message.get("auxiliary_graphs") or {}
+        dict_results = [r for r in results if type(r) is not bytes]
         node_bindings = sum(
-            len(b["ids"]) for r in results for b in r["node_bindings"].values()
+            len(b["ids"]) for r in dict_results for b in r["node_bindings"].values()
         )
         edge_bindings = sum(
             len(b["ids"])
-            for r in results
+            for r in dict_results
             for a in r.get("analyses") or ()
             for b in a["edge_bindings"].values()
         )
+        # Every binding a written result holds binds one ID.
+        written_bindings = _count_written(results, b'"ids":[')
         rec["kg"] = {
             "nodes": len(kg["nodes"]),
             "edges": len(kg["edges"]),
             "aux_graphs": len(aux),
         }
         rec["bindings_per_result"] = (
-            (node_bindings + edge_bindings) / len(results) if results else 0.0
+            (node_bindings + edge_bindings + written_bindings) / rec["results"]
+            if rec["results"]
+            else 0.0
         )
 
         memory = rec["memory"]
@@ -1071,6 +1114,8 @@ def breakdown(
             )
         )
         memory["groups"] = _groups_memory(groups)
+        if layout is not None:
+            memory["groups"]["bytes"] += sum(a.nbytes for a in layout)
         memory["node_cache_tables"] = sys.getsizeof(
             path_data.node_cache
         ) + sys.getsizeof(path_data.node_id_cache)
@@ -1237,6 +1282,18 @@ def print_report(rec: dict, out=print, fold: float = 0.005) -> None:
     )
     if abs(t["scale"] - 1) > 0.15:
         out("  (warning: the timers distort this query by more than 15%)")
+    json_helper = t["helpers"].get("_single_path_json")
+    if json_helper and json_helper["calls"]:
+        parts = [
+            f"{part['name']} {part['seconds']:.2f}s"
+            for part in sorted(json_helper["parts"], key=lambda part: -part["seconds"])
+        ]
+        rest = json_helper["seconds"] - sum(p["seconds"] for p in json_helper["parts"])
+        out(
+            f"  _single_path_json: {json_helper['seconds']:.2f}s = "
+            + "".join(f"{part} + " for part in parts)
+            + f"its own code {max(rest, 0.0):.2f}s"
+        )
     for name in ("_full_edge", "_minimal_edge"):
         helper = t["helpers"].get(name)
         if not helper or not helper["calls"] or not helper["parts"]:
@@ -1286,9 +1343,9 @@ def print_report(rec: dict, out=print, fold: float = 0.005) -> None:
 
     mem("  path arrays (numpy)", m["path_arrays"])
     mem(
-        "  result groups (one array per result)",
+        "  result groups (index arrays)",
         m["groups"]["bytes"],
-        note=f"{m['groups']['count']:,} arrays",
+        note=f"{m['groups']['count']:,} arrays for the per-result loop",
     )
     mem("  node cache tables", m["node_cache_tables"])
     prefetch = m["edge_detail_prefetch"]
@@ -1305,7 +1362,7 @@ def print_report(rec: dict, out=print, fold: float = 0.005) -> None:
         note=f"{ids['count']:,} strings",
     )
     for key, label, unit in (
-        ("results", "results (dicts and lists)", "result"),
+        ("results", "results (dicts, lists and JSON)", "list entry"),
         ("kg_nodes", "knowledge graph nodes", "node"),
         ("kg_edges", "knowledge graph edges", "edge"),
         ("aux_graphs", "auxiliary graphs", "graph"),
