@@ -116,6 +116,8 @@ def _check(monkeypatch, graph, query, bmt, block, **kwargs):  # noqa: F811
     kwargs["attributes_as_json"] = True
     reference = lookup(graph, query, bmt=bmt, **kwargs)
     monkeypatch.setattr(lookup_module, "_RESULTS_BLOCK", block)
+    # Small chunks, so results are joined and sliced across chunk boundaries.
+    monkeypatch.setattr(lookup_module, "_JSON_CHUNK", 3)
     response = lookup(graph, query, bmt=bmt, results_as_json=True, **kwargs)
     written = [r for r in response["message"]["results"] if type(r) is bytes]
     assert _served(response) == _served(reference)

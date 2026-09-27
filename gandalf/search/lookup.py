@@ -568,6 +568,283 @@ def _group_rows(keys: np.ndarray) -> list[np.ndarray]:
     return [groups[g] for g in np.argsort(first_rows)]
 
 
+def _group_layout(keys: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Group the row indices of *keys* as :func:`_group_rows` does, without
+    splitting them into an array per group.
+
+    Returns ``(rows, starts, sizes)``: group *g*'s rows are
+    ``rows[starts[g]:starts[g] + sizes[g]]``, ascending, and groups come in
+    order of their first row.
+
+    >>> keys = np.array([[5, 1], [2, 2], [5, 1], [2, 3], [2, 2]])
+    >>> rows, starts, sizes = _group_layout(keys)
+    >>> [rows[s : s + n].tolist() for s, n in zip(starts, sizes)]
+    [[0, 2], [1, 4], [3]]
+    """
+    if keys.shape[1] == 0:
+        return (
+            np.arange(len(keys)),
+            np.zeros(1, dtype=np.int64),
+            np.array([len(keys)], dtype=np.int64),
+        )
+    _, first_rows, group_of_row = np.unique(
+        keys, axis=0, return_index=True, return_inverse=True
+    )
+    group_of_row = group_of_row.reshape(-1)
+    rank = np.empty(len(first_rows), dtype=np.int64)
+    rank[np.argsort(first_rows)] = np.arange(len(first_rows))
+    group_of_row = rank[group_of_row]
+    rows = np.argsort(group_of_row, kind="stable")
+    sizes = np.bincount(group_of_row, minlength=len(first_rows))
+    starts = np.zeros(len(sizes), dtype=np.int64)
+    starts[1:] = np.cumsum(sizes)[:-1]
+    return rows, starts, sizes
+
+
+#: Single-path results joined into one bytes object at a time by
+#: ``_single_path_json`` (then sliced into results-list entries).
+_JSON_CHUNK = 65_536
+
+
+def _single_path_json(
+    graph,
+    layout: tuple[np.ndarray, np.ndarray, np.ndarray],
+    *,
+    pa_nodes: np.ndarray,
+    pa_preds: np.ndarray,
+    pa_via_inv: np.ndarray,
+    pa_fwd_eidx: np.ndarray,
+    node_cols: list[tuple[int, str]],
+    plain_edge_cols: list,
+    subclass_col_ends: list,
+    node_id_cache,
+    node_cache,
+    idx_to_predicate,
+    edge_id_map: dict,
+    edge_detail_map: dict,
+    edge_templates: dict,
+    minimal_edges: dict,
+    lightweight: bool,
+    block: int,
+    deadline,
+) -> Optional[dict]:
+    """Write every single-path result of a query as JSON, all at once.
+
+    The array counterpart of the single-path fast path in _build_response:
+    a group of one path whose subclass matches are all identities, and whose
+    edges all have IDs, binds each node column's node and each plain edge
+    column's edge.  Its JSON is a template fixed by the query graph with those
+    IDs filled in, so the IDs are encoded once each, looked up a column at a
+    time, and whole chunks of results are joined in one call, then sliced
+    into entries of at most *block* results, cut wherever a result the loop
+    builds comes in between.
+
+    Returns None if the fast results' edge IDs are not unique (each edge would
+    then not own its KG entry), else a dict with:
+
+        dict_groups: the groups left to the loop, by group index
+        cuts: for each of those, how many fast results come before it
+        entries: ``(end, bytes)`` per results-list entry, ``end`` being the
+            fast-result index it runs to
+        num_fast: how many results were written
+        nodes, edges: the KG entries to file, as ``(keys, values, group,
+            position)`` in first-appearance order within the fast results
+    """
+    rows, starts, sizes = layout
+    first = rows[starts]
+    fast = sizes == 1
+    for subj_col, obj_col in subclass_col_ends:
+        fast &= pa_nodes[first, subj_col] == pa_nodes[first, obj_col]
+    fast_groups = np.flatnonzero(fast)
+    edge_cols = [col for col, _q, _s, _o in plain_edge_cols]
+    k, m = len(node_cols), len(edge_cols)
+
+    def unique_edges(fast_rows):
+        eidx = pa_fwd_eidx[np.ix_(fast_rows, edge_cols)].reshape(-1)
+        unique, first_at, inverse = np.unique(
+            eidx, return_index=True, return_inverse=True
+        )
+        return unique, first_at, inverse.reshape(-1)
+
+    fast_rows = first[fast_groups]
+    edge_ids: list = []
+    if m:
+        u_edges, e_first, e_inv = unique_edges(fast_rows)
+        edge_ids = [edge_id_map.get(e) for e in u_edges.tolist()]
+        has_id = np.fromiter(map(bool, edge_ids), dtype=bool, count=len(edge_ids))
+        with_ids = has_id[e_inv].reshape(-1, m).all(axis=1)
+        if not with_ids.all():
+            # An edge without an ID gets a fresh one per result: the loop's.
+            fast_groups = fast_groups[with_ids]
+            fast_rows = fast_rows[with_ids]
+            u_edges, e_first, e_inv = unique_edges(fast_rows)
+            edge_ids = [edge_id_map.get(e) for e in u_edges.tolist()]
+        if len(set(edge_ids)) != len(edge_ids):
+            return None
+    n = len(fast_rows)
+    deadline.check("response building")
+
+    # Each edge's KG entry, built once, from its first appearance.
+    edge_values: list = []
+    if m:
+        at_row = fast_rows[e_first // m]
+        at_col = e_first % m
+        cols = np.asarray(edge_cols)[at_col]
+        subj_cols = np.asarray([s for _c, _q, s, _o in plain_edge_cols])[at_col]
+        obj_cols = np.asarray([o for _c, _q, _s, o in plain_edge_cols])[at_col]
+        inverse = pa_via_inv[at_row, cols].astype(bool)
+        query_subj = pa_nodes[at_row, subj_cols]
+        query_obj = pa_nodes[at_row, obj_cols]
+        stored_subj = np.where(inverse, query_obj, query_subj).tolist()
+        stored_obj = np.where(inverse, query_subj, query_obj).tolist()
+        preds = pa_preds[at_row, cols].tolist()
+        cache = minimal_edges if lightweight else edge_templates
+        for i, fwd_eidx in enumerate(u_edges.tolist()):
+            edge = cache.get(fwd_eidx)
+            if edge is None:
+                predicate = idx_to_predicate[preds[i]]
+                subj_id = node_id_cache[stored_subj[i]]
+                obj_id = node_id_cache[stored_obj[i]]
+                if lightweight:
+                    edge = _minimal_edge(graph, fwd_eidx, predicate, subj_id, obj_id)
+                else:
+                    edge = _full_edge(
+                        graph,
+                        fwd_eidx,
+                        predicate,
+                        subj_id,
+                        obj_id,
+                        edge_detail_map.get(fwd_eidx, {}),
+                    )
+                cache[fwd_eidx] = edge
+            edge_values.append(edge)
+        deadline.check("response building")
+
+    node_matrix = pa_nodes[np.ix_(fast_rows, [col for col, _q in node_cols])]
+    u_nodes, n_first, n_inv = np.unique(
+        node_matrix.reshape(-1), return_index=True, return_inverse=True
+    )
+    n_inv = n_inv.reshape(-1)
+    node_ids = [node_id_cache[i] for i in u_nodes.tolist()]
+
+    def encoded(ids: list) -> tuple[np.ndarray, np.ndarray]:
+        enc = np.empty(len(ids), dtype=object)
+        enc[:] = [orjson.dumps(i) for i in ids]
+        return enc, np.fromiter(map(len, enc), dtype=np.int64, count=len(enc))
+
+    enc_nodes, len_nodes = encoded(node_ids)
+    enc_edges, len_edges = encoded(edge_ids)
+
+    # The template's literal pieces, around k node IDs then m edge IDs; a
+    # NUL never appears in orjson output, so it marks the gaps.  Each result
+    # ends with a comma, dropped from the last one of each entry.
+    def binding(key: str) -> bytes:
+        encoded: bytes = orjson.dumps(key)
+        return encoded + b':{"ids":[\x00]}'
+
+    template = (
+        b'{"node_bindings":{' + b",".join(binding(q) for _c, q in node_cols) + b"}"
+    )
+    if m:
+        template += (
+            b',"analyses":[{"resource_id":'
+            + orjson.dumps(settings.infores)
+            + b',"edge_bindings":{'
+            + b",".join(binding(q) for _c, q, _s, _o in plain_edge_cols)
+            + b"}}]"
+        )
+    literals = (template + b"},").split(b"\x00")
+
+    lengths = np.full(n, sum(map(len, literals)), dtype=np.int64)
+    if k:
+        lengths += len_nodes[n_inv].reshape(n, k).sum(axis=1)
+    if m:
+        lengths += len_edges[e_inv].reshape(n, m).sum(axis=1)
+    offsets = np.zeros(n + 1, dtype=np.int64)
+    np.cumsum(lengths, out=offsets[1:])
+
+    dict_groups = np.setdiff1d(np.arange(len(sizes)), fast_groups, assume_unique=True)
+    cuts = np.searchsorted(fast_groups, dict_groups)
+    bounds = np.union1d(
+        np.union1d(cuts, np.arange(0, n, max(block, 1))), [0, n]
+    ).tolist()
+    chunk = max(_JSON_CHUNK // max(block, 1), 1) * max(block, 1)
+    for extra in range(0, n, chunk):
+        bounds.append(extra)
+    bounds = sorted(set(bounds))
+
+    entries: list[tuple[int, bytes]] = []
+    pieces = np.empty((0, 2 * (k + m) + 1), dtype=object)
+    bi = 0
+    for c0 in range(0, n, chunk):
+        c1 = min(c0 + chunk, n)
+        pieces = np.empty((c1 - c0, 2 * (k + m) + 1), dtype=object)
+        for j, literal in enumerate(literals):
+            pieces[:, 2 * j] = literal
+        for j in range(k):
+            pieces[:, 2 * j + 1] = enc_nodes[n_inv[c0 * k + j : c1 * k : k]]
+        for j in range(m):
+            pieces[:, 2 * (k + j) + 1] = enc_edges[e_inv[c0 * m + j : c1 * m : m]]
+        joined = b"".join(pieces.reshape(-1).tolist())
+        base = offsets[c0]
+        while bi + 1 < len(bounds) and bounds[bi + 1] <= c1:
+            a, b = bounds[bi], bounds[bi + 1]
+            if a >= c0 and b > a:
+                entries.append((b, joined[offsets[a] - base : offsets[b] - base - 1]))
+            bi += 1
+        del joined
+        deadline.check("response building")
+    del pieces
+
+    return {
+        "dict_groups": dict_groups,
+        "cuts": cuts,
+        "entries": entries,
+        "num_fast": n,
+        "nodes": (
+            node_ids,
+            [node_cache[i] for i in u_nodes.tolist()],
+            fast_groups[n_first // k] if k else np.zeros(0, dtype=np.int64),
+            n_first % k if k else np.zeros(0, dtype=np.int64),
+        ),
+        "edges": (
+            edge_ids,
+            edge_values,
+            fast_groups[e_first // m] if m else np.zeros(0, dtype=np.int64),
+            e_first % m if m else np.zeros(0, dtype=np.int64),
+        ),
+    }
+
+
+def _file_in_first_seen_order(
+    target: dict,
+    fast: tuple,
+    loop: dict,
+    loop_groups: np.ndarray,
+) -> None:
+    """File KG entries in the order the result loop alone would have.
+
+    *fast* holds the entries of the results written as JSON (keys, values,
+    group, position within the result), *loop* the entries the loop filed in
+    its own order, *loop_groups* the group each of those was first filed in.
+    Each key goes in once, at its first appearance across both.
+    """
+    keys, values, groups, positions = fast
+    loop_keys = list(loop)
+    all_keys = list(keys) + loop_keys
+    all_values = list(values) + list(loop.values())
+    order = np.lexsort(
+        (
+            np.concatenate([positions, np.arange(len(loop_keys))]),
+            np.concatenate([groups, loop_groups]),
+        )
+    )
+    for i in order.tolist():
+        key = all_keys[i]
+        if key not in target:
+            target[key] = all_values[i]
+
+
 #: Rows converted to Python lists per block in ``_build_response``.
 _ROWS_BLOCK = 65_536
 
@@ -830,7 +1107,21 @@ def _build_response(
             continue
         sc_qnode = qnode_to_superclass.get(qnode_id)
         key_cols.append(qnode_to_col[sc_qnode] if sc_qnode in qnode_to_col else col)
-    path_groups = _group_rows(pa_nodes[:, key_cols])
+    # results_as_json: single-path results are written as JSON by
+    # _single_path_json, all at once; only the rest go through the loop.
+    # ALL/COLLATE bindings vary in shape, so those queries stay on dicts.
+    vector_json = (
+        results_as_json
+        and _SINGLE_PATH_FAST
+        and not all_mode_nodes
+        and not collate_mode_nodes
+    )
+    layout = None
+    if vector_json:
+        layout = _group_layout(pa_nodes[:, key_cols])
+        path_groups: list = []
+    else:
+        path_groups = _group_rows(pa_nodes[:, key_cols])
 
     # For ALL-mode nodes, filter groups to only those where all required
     # IDs appear across the group's paths.
@@ -856,7 +1147,7 @@ def _build_response(
     t_grouped = time.perf_counter()
     logger.debug(
         "  Grouped into %s unique node paths (%.2fs)",
-        f"{len(path_groups):,}",
+        f"{len(layout[2]) if layout is not None else len(path_groups):,}",
         t_grouped - t_post_start,
     )
 
@@ -943,51 +1234,55 @@ def _build_response(
     # internal markers stripped once all results are built.
     marked_edges: list[InFlightEdge] = []
 
-    # results_as_json: single-path results written straight to JSON from a
-    # template fixed by the query graph -- node bindings in column order
-    # (superclass qnodes left out), then the analysis's edge bindings in
-    # plain_edge_cols order, exactly as the dict path orders them -- with
-    # each bound ID encoded once.  Consecutive ones are joined into one
-    # ``bytes`` entry of the results list (up to _RESULTS_BLOCK), which the
-    # server hands to orjson as a Fragment.  ALL/COLLATE bindings vary in
-    # shape, so those queries stay on dicts.
-    json_template: Optional[bytes] = None
-    json_node_cols: list[int] = []
-    encoded_ids: dict[str, bytes] = {}
-    pending_json: list[bytes] = []
-    results = response["message"]["results"]
+    results_out = response["message"]["results"]
     num_results = 0
-    if (
-        results_as_json
-        and single_path_fast
-        and not all_mode_nodes
-        and not collate_mode_nodes
-    ):
-        json_node_cols = [
-            col
-            for col in range(pa_num_node_cols)
-            if col_to_qnode[col] not in superclass_qnodes
-        ]
-
-        def _key(key: str) -> bytes:
-            # A literal part of a %-template: any "%" in it must be doubled.
-            encoded: bytes = orjson.dumps(key)
-            return encoded.replace(b"%", b"%%") + b':{"ids":[%s]}'
-
-        json_template = (
-            b'{"node_bindings":{'
-            + b",".join(_key(col_to_qnode[col]) for col in json_node_cols)
-            + b"}"
+    fast_json = None
+    marks: Optional[list] = None
+    if layout is not None:
+        fast_json = _single_path_json(
+            graph,
+            layout,
+            pa_nodes=pa_nodes,
+            pa_preds=pa_preds,
+            pa_via_inv=pa_via_inv,
+            pa_fwd_eidx=pa_fwd_eidx,
+            node_cols=[
+                (col, col_to_qnode[col])
+                for col in range(pa_num_node_cols)
+                if col_to_qnode[col] not in superclass_qnodes
+            ],
+            plain_edge_cols=plain_edge_cols,
+            subclass_col_ends=subclass_col_ends,
+            node_id_cache=node_id_cache,
+            node_cache=node_cache,
+            idx_to_predicate=idx_to_predicate,
+            edge_id_map=edge_id_map,
+            edge_detail_map=edge_detail_map,
+            edge_templates=edge_templates,
+            minimal_edges=minimal_edges,
+            lightweight=lightweight,
+            block=_RESULTS_BLOCK,
+            deadline=deadline,
         )
-        if plain_edge_cols:
-            json_template += (
-                b',"analyses":[{"resource_id":'
-                + orjson.dumps(settings.infores).replace(b"%", b"%%")
-                + b',"edge_bindings":{'
-                + b",".join(_key(qedge_id) for _c, qedge_id, _s, _o in plain_edge_cols)
-                + b"}}]"
+        g_rows, g_starts, g_sizes = layout
+        dict_groups = (
+            fast_json["dict_groups"]
+            if fast_json is not None
+            else np.arange(len(g_sizes))
+        )
+        path_groups = [
+            g_rows[start : start + size]
+            for start, size in zip(
+                g_starts[dict_groups].tolist(), g_sizes[dict_groups].tolist()
             )
-        json_template += b"}"
+        ]
+        # The loop files into dicts of its own, merged with the JSON
+        # results' entries afterwards in first-appearance order; marks
+        # records how many each held before each group.
+        final_nodes, final_edges = kg_nodes, kg_edges
+        kg_nodes, kg_edges = {}, {}
+        results_out = []
+        marks = []
 
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.
@@ -1009,76 +1304,8 @@ def _build_response(
             deadline.check("response building")
 
         first_nodes = rows_nodes[0]
-
-        if (
-            json_template is not None
-            and len(rows_nodes) == 1
-            and all(first_nodes[s] == first_nodes[o] for s, o in subclass_col_ends)
-        ):
-            # The single-path fast path below, written as JSON.  KG nodes and
-            # edges are filed exactly as there, so their order is unchanged.
-            ids: list[bytes] = []
-            for col in json_node_cols:
-                node_idx = first_nodes[col]
-                node_id = node_id_cache[node_idx]
-                kg_nodes[node_id] = node_cache[node_idx]
-                encoded = encoded_ids.get(node_id)
-                if encoded is None:
-                    encoded = encoded_ids[node_id] = orjson.dumps(node_id)
-                ids.append(encoded)
-            fwd_eidx_row = rows_fwd_eidx[0]
-            for col, _qedge_id, subj_col_e, obj_col_e in plain_edge_cols:
-                fwd_eidx = fwd_eidx_row[col]
-                if lightweight:
-                    edge = minimal_edges.get(fwd_eidx)
-                else:
-                    edge = edge_templates.get(fwd_eidx)
-                if edge is None:
-                    if rows_via_inv[0][col]:
-                        actual_subj_idx = first_nodes[obj_col_e]
-                        actual_obj_idx = first_nodes[subj_col_e]
-                    else:
-                        actual_subj_idx = first_nodes[subj_col_e]
-                        actual_obj_idx = first_nodes[obj_col_e]
-                    predicate = idx_to_predicate[rows_preds[0][col]]
-                    subj_id = node_id_cache[actual_subj_idx]
-                    obj_id = node_id_cache[actual_obj_idx]
-                    if lightweight:
-                        edge = _minimal_edge(
-                            graph, fwd_eidx, predicate, subj_id, obj_id
-                        )
-                        minimal_edges[fwd_eidx] = edge
-                    else:
-                        edge = _full_edge(
-                            graph,
-                            fwd_eidx,
-                            predicate,
-                            subj_id,
-                            obj_id,
-                            edge_detail_map.get(fwd_eidx, {}),
-                        )
-                        edge_templates[fwd_eidx] = edge
-                edge_kg_id = edge_id_map.get(fwd_eidx)
-                if not edge_kg_id:
-                    edge_kg_id = str(uuid.uuid4())[:8]
-                    kg_edges[edge_kg_id] = edge.copy()
-                    ids.append(orjson.dumps(edge_kg_id))
-                    continue
-                kg_edges[edge_kg_id] = edge
-                encoded = encoded_ids.get(edge_kg_id)
-                if encoded is None:
-                    encoded = encoded_ids[edge_kg_id] = orjson.dumps(edge_kg_id)
-                ids.append(encoded)
-            pending_json.append(json_template % tuple(ids))
-            num_results += 1
-            if len(pending_json) >= _RESULTS_BLOCK:
-                results.append(b",".join(pending_json))
-                pending_json.clear()
-            continue
-        if pending_json:
-            # A dict result comes next: keep the order.
-            results.append(b",".join(pending_json))
-            pending_json.clear()
+        if marks is not None:
+            marks.append((len(kg_nodes), len(kg_edges)))
 
         result: dict[str, Any] = {
             "node_bindings": {},
@@ -1206,7 +1433,7 @@ def _build_response(
             # As below: a result binding no edge carries no analysis.
             if not edge_bindings:
                 del result["analyses"]
-            response["message"]["results"].append(result)
+            results_out.append(result)
             num_results += 1
             continue
 
@@ -1435,12 +1662,45 @@ def _build_response(
         if not result["analyses"][0]["edge_bindings"]:
             del result["analyses"]
 
-        response["message"]["results"].append(result)
+        results_out.append(result)
         num_results += 1
 
-    if pending_json:
-        results.append(b",".join(pending_json))
-        pending_json.clear()
+    if marks is not None:
+        # Put the JSON results and the loop's results together in group
+        # order, and file the KG entries in first-appearance order.
+        marks.append((len(kg_nodes), len(kg_edges)))
+        results = response["message"]["results"]
+        loop_groups = dict_groups
+        if fast_json is None:
+            results.extend(results_out)
+            loop_nodes_g = np.repeat(loop_groups, np.diff([n for n, _e in marks]))
+            loop_edges_g = np.repeat(loop_groups, np.diff([e for _n, e in marks]))
+            empty: tuple = (
+                [],
+                [],
+                np.zeros(0, dtype=np.int64),
+                np.zeros(0, dtype=np.int64),
+            )
+            _file_in_first_seen_order(final_nodes, empty, kg_nodes, loop_nodes_g)
+            _file_in_first_seen_order(final_edges, empty, kg_edges, loop_edges_g)
+        else:
+            entries = fast_json["entries"]
+            ei = 0
+            for cut, result in zip(fast_json["cuts"].tolist(), results_out):
+                while ei < len(entries) and entries[ei][0] <= cut:
+                    results.append(entries[ei][1])
+                    ei += 1
+                results.append(result)
+            results.extend(entry for _end, entry in entries[ei:])
+            num_results += fast_json["num_fast"]
+            loop_nodes_g = np.repeat(loop_groups, np.diff([n for n, _e in marks]))
+            loop_edges_g = np.repeat(loop_groups, np.diff([e for _n, e in marks]))
+            _file_in_first_seen_order(
+                final_nodes, fast_json["nodes"], kg_nodes, loop_nodes_g
+            )
+            _file_in_first_seen_order(
+                final_edges, fast_json["edges"], kg_edges, loop_edges_g
+            )
 
     # Free path arrays now that results are built
     del path_data
