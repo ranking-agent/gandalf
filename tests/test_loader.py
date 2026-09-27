@@ -731,6 +731,46 @@ class TestQualifierExtraction:
         assert "biolink:publications" in attr_names
 
 
+#: Extracts the qualifiers of TestQualifierExtraction.EDGE, with the
+#: Biolink-independent fallback field set, and prints them as JSON.
+_QUALIFIERS_SCRIPT = """
+import sys, orjson
+from gandalf import normalize
+normalize._qualifier_fields = set(normalize._FALLBACK_QUALIFIER_FIELDS)
+sys.stdout.write(orjson.dumps(normalize._extract_qualifiers(orjson.loads(sys.argv[1]))).decode())
+"""
+
+
+def test_qualifier_order_is_independent_of_the_hash_seed():
+    """Builds with different PYTHONHASHSEEDs serve qualifiers in one order."""
+    import subprocess
+    import sys
+
+    import orjson
+
+    edge = orjson.dumps(TestQualifierExtraction.EDGE).decode()
+    outputs = {
+        subprocess.run(
+            [sys.executable, "-c", _QUALIFIERS_SCRIPT, edge],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        for seed in ("0", "1", "2", "3")
+    }
+    assert len(outputs) == 1
+    types = [q["qualifier_type_id"] for q in orjson.loads(outputs.pop())]
+    assert len(types) == 5
+    assert types == sorted(types)
+
+
+def test_qualifier_order_is_independent_of_the_field_order():
+    edge = TestQualifierExtraction.EDGE
+    backwards = dict(reversed(list(edge.items())))
+    assert _extract_qualifiers(backwards) == _extract_qualifiers(edge)
+
+
 class TestMetaKgListValuedQualifier:
     """Regression test: a list-valued qualifier must not crash meta-KG build.
 

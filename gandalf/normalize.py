@@ -238,19 +238,20 @@ def _extract_qualifiers(data):
     """
     qualifier_fields = _get_qualifier_fields()
     qualifiers = []
-    for field in qualifier_fields:
-        if field in data:
-            value = data[field]
-            if not isinstance(value, str):
-                value = orjson.dumps(value).decode()
-            if field == "qualified_predicate":
-                value = _ensure_biolink_prefix(value)
-            qualifiers.append(
-                {
-                    "qualifier_type_id": f"biolink:{field}",
-                    "qualifier_value": value,
-                }
-            )
+    # Sorted, so the order depends neither on the input's field order nor on
+    # the set's iteration order (which follows the process's hash seed).
+    for field in sorted(f for f in data if f in qualifier_fields):
+        value = data[field]
+        if not isinstance(value, str):
+            value = orjson.dumps(value).decode()
+        if field == "qualified_predicate":
+            value = _ensure_biolink_prefix(value)
+        qualifiers.append(
+            {
+                "qualifier_type_id": f"biolink:{field}",
+                "qualifier_value": value,
+            }
+        )
 
     return qualifiers
 
