@@ -108,7 +108,8 @@ NAMES = (
     ("top", "_group_rows(", "group paths into results"),
     ("top", "_single_path_json(", "write single-path results as JSON"),
     ("top", "_file_in_first_seen_order(", "merge JSON and loop results; file KG"),
-    ("top", "get_edge_ids_batch(", "prefetch edge data and IDs"),
+    ("top", "lmdb_store.get_json_batch(", "prefetch edge attributes"),
+    ("top", "get_edge_ids_batch(", "edge IDs of the loop's results"),
     ("top", "node_idx_by_id = ", "index nodes by ID"),
     ("top", "pop('_edge_id'", "strip internal markers from KG edges"),
     ("loop", "deadline.check(", "deadline check"),
@@ -708,10 +709,11 @@ def _instrumented_run(graph, bmt, body, kwargs, build: InstrumentedBuild):
         if hasattr(L, name):
             fn = group_layout if name == "_group_layout" else getattr(L, name)
             patches.append((L, name, tracker.wrap(name, fn)))
-    # The edge IDs batch, and the costly part of building an Edge dict
-    # (credited to _full_edge).
+    # The edge IDs (as str, and as the JSON _single_path_json writes), and
+    # the costly part of building an Edge dict (credited to _full_edge).
     parts = (
         (graph, "get_edge_ids_batch", "edge IDs"),
+        (getattr(graph, "edge_id_store", None), "get_json_batch", "edge IDs as JSON"),
         (graph, "get_edge_properties_by_index", "edge properties and attributes"),
     )
     for obj, attr, name in parts:

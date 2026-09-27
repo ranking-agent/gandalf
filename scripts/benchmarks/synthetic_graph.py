@@ -226,8 +226,9 @@ def build_graph_dir(out_dir: Path, scale: str, seed: int = 42) -> Path:
 
 
 def _stale(graph_dir: Path) -> bool:
-    """Whether a cached graph predates the current edge-attribute format
-    (``load_mmap`` would refuse it)."""
+    """Whether a cached graph predates the current edge-attribute or edge-ID
+    format (``load_mmap`` would refuse it)."""
+    from gandalf.edge_id_store import EDGE_IDS_FORMAT
     from gandalf.lmdb_store import EDGE_ATTRIBUTES_FORMAT
 
     metadata_path = graph_dir / "metadata.pkl"
@@ -235,7 +236,10 @@ def _stale(graph_dir: Path) -> bool:
         return False
     with open(metadata_path, "rb") as f:
         metadata = pickle.load(f)
-    return metadata.get("edge_attributes_format") != EDGE_ATTRIBUTES_FORMAT
+    return (
+        metadata.get("edge_attributes_format") != EDGE_ATTRIBUTES_FORMAT
+        or metadata.get("edge_ids_format") != EDGE_IDS_FORMAT
+    )
 
 
 def cached_graph_dir(

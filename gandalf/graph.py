@@ -4,7 +4,6 @@ import json
 import logging
 import pickle
 import shutil
-import struct
 import time
 from pathlib import Path
 from typing import Literal, Optional, Union
@@ -13,6 +12,7 @@ import orjson
 import numpy as np
 
 from gandalf.config import settings
+from gandalf.edge_id_store import EDGE_IDS_FORMAT, OFFSETS_FILE, EdgeIdStore
 from gandalf.lmdb_store import EDGE_ATTRIBUTES_FORMAT, LMDBPropertyStore
 from gandalf.node_store import NodeStore
 
@@ -479,8 +479,7 @@ class CSRGraph:
         self.lmdb_store = None
 
         # Edge IDs from the original data — set later by loader or load_mmap
-        self.edge_ids = None
-        self._edge_ids_env = None
+        self.edge_id_store: Optional[EdgeIdStore] = None
 
         # Graph Metadata - set later by loader or load_mmap
         self.meta_kg = None
@@ -995,29 +994,18 @@ class CSRGraph:
     def get_edge_ids_batch(self, fwd_edge_indices):
         """Batch-fetch original edge IDs for many forward-CSR positions.
 
-        Returns dict mapping fwd_edge_idx -> edge ID string.  Reads from
-        the edge-ID LMDB in sorted index order for B-tree locality, or
-        from the in-memory list when the graph was loaded without LMDB.
+        Returns dict mapping fwd_edge_idx -> edge ID string, for the edges
+        that have one.
         """
-        if getattr(self, "_edge_ids_env", None) is not None:
-            results = {}
-            with self._edge_ids_env.begin(buffers=True) as txn:
-                for idx in sorted({int(i) for i in fwd_edge_indices}):
-                    val = txn.get(struct.pack(">I", idx))
-                    if val is not None:
-                        results[idx] = bytes(val).decode("utf-8")
-            return results
-        if self.edge_ids is not None:
-            return {int(i): self.edge_ids[int(i)] for i in fwd_edge_indices}
-        return {}
+        if self.edge_id_store is None:
+            return {}
+        return self.edge_id_store.get_batch(fwd_edge_indices)
 
     def get_edge_id(self, fwd_edge_idx):
         """Return the original edge ID for a forward-CSR position, or None."""
-        if getattr(self, "_edge_ids_env", None) is not None:
-            return self._load_edge_id_from_lmdb(self._edge_ids_env, int(fwd_edge_idx))
-        if self.edge_ids is not None:
-            return self.edge_ids[int(fwd_edge_idx)]
-        return None
+        if self.edge_id_store is None:
+            return None
+        return self.edge_id_store.get(int(fwd_edge_idx))
 
     def get_all_edges_between(
         self, src_idx, dst_idx, predicate_filter: Optional[list] = None
@@ -1354,75 +1342,6 @@ class CSRGraph:
     # Serialization
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _save_edge_ids_lmdb(db_path, edge_ids, commit_every=50_000):
-        """Save edge IDs list to an LMDB file."""
-        import lmdb as _lmdb
-
-        db_path = Path(db_path)
-        if db_path.exists():
-            shutil.rmtree(db_path)
-        db_path.mkdir(parents=True, exist_ok=True)
-
-        _INITIAL = 4 * 1024 * 1024 * 1024  # 4 GB
-        env = _lmdb.open(
-            str(db_path),
-            map_size=_INITIAL,
-            readonly=False,
-            max_dbs=0,
-            readahead=False,
-        )
-        pending = []
-        txn = env.begin(write=True)
-        try:
-            for idx, eid in enumerate(edge_ids):
-                if eid is not None:
-                    key = struct.pack(">I", idx)
-                    val = (
-                        eid.encode("utf-8")
-                        if isinstance(eid, str)
-                        else str(eid).encode("utf-8")
-                    )
-                    try:
-                        txn.put(key, val)
-                        pending.append((key, val))
-                    except _lmdb.MapFullError:
-                        txn.abort()
-                        new_size = env.info()["map_size"] * 2
-                        env.set_mapsize(new_size)
-                        logger.warning(
-                            "    Edge IDs LMDB: map full, resized to %.0f GB",
-                            new_size / (1024**3),
-                        )
-                        txn = env.begin(write=True)
-                        for pk, pv in pending:
-                            txn.put(pk, pv)
-                        txn.put(key, val)
-                        pending.append((key, val))
-                if (idx + 1) % commit_every == 0:
-                    txn.commit()
-                    pending.clear()
-                    txn = env.begin(write=True)
-            txn.commit()
-        except BaseException:
-            txn.abort()
-            raise
-        finally:
-            env.close()
-        logger.debug(
-            "  Edge IDs LMDB: wrote %s entries to %s", f"{len(edge_ids):,}", db_path
-        )
-
-    @staticmethod
-    def _load_edge_id_from_lmdb(env, edge_idx):
-        """Look up a single edge ID from an LMDB environment."""
-        key = struct.pack(">I", edge_idx)
-        with env.begin(buffers=True) as txn:
-            val = txn.get(key)
-            if val is None:
-                return None
-            return bytes(val).decode("utf-8")
-
     def save_mmap(self, directory: Union[str, Path]):
         """Save graph in memory-mappable format for fast loading.
 
@@ -1452,7 +1371,10 @@ class CSRGraph:
             "num_nodes": self.num_nodes,
             "predicate_to_idx": self.predicate_to_idx,
             "edge_attributes_format": EDGE_ATTRIBUTES_FORMAT,
+            "edge_ids_format": EDGE_IDS_FORMAT,
         }
+        if self.edge_id_store is not None:
+            metadata.update(self.edge_id_store.metadata())
         with open(directory / "metadata.pkl", "wb") as f:
             pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -1481,9 +1403,9 @@ class CSRGraph:
             with open(directory / "edge_properties.pkl", "wb") as f:
                 pickle.dump(self.edge_properties, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        # Save edge IDs as LMDB if present
-        if self.edge_ids is not None:
-            self._save_edge_ids_lmdb(directory / "edge_ids.lmdb", self.edge_ids)
+        # Save edge IDs as a JSON blob + offsets (see gandalf.edge_id_store)
+        if self.edge_id_store is not None:
+            self.edge_id_store.save(directory)
 
         # Save meta_kg as JSON for fast loading at query time
         if hasattr(self, "meta_kg") and self.meta_kg is not None:
@@ -1654,28 +1576,20 @@ class CSRGraph:
         else:
             graph.lmdb_store = None
 
-        # Load edge IDs — prefer LMDB, fall back to pickle
-        edge_ids_lmdb_path = directory / "edge_ids.lmdb"
-        edge_ids_pkl_path = directory / "edge_ids.pkl"
-        if edge_ids_lmdb_path.exists():
-            import lmdb as _lmdb
-
-            graph._edge_ids_env = _lmdb.open(
-                str(edge_ids_lmdb_path),
-                readonly=True,
-                max_dbs=0,
-                map_size=256 * 1024 * 1024 * 1024,
-                readahead=False,
-                lock=False,
+        # Load edge IDs (a memory-mapped JSON blob; see gandalf.edge_id_store)
+        if metadata.get("edge_ids_format") != EDGE_IDS_FORMAT:
+            raise GraphFormatError(
+                f"{directory} was built before gandalf stored edge IDs as a "
+                f"memory-mapped {EDGE_IDS_FORMAT} (it keeps them in "
+                f"edge_ids.lmdb). Rebuild the graph with gandalf-build to "
+                f"serve it."
             )
-            graph.edge_ids = None  # signal: use LMDB
-        elif edge_ids_pkl_path.exists():
-            with open(edge_ids_pkl_path, "rb") as f:
-                graph.edge_ids = pickle.load(f)
-            graph._edge_ids_env = None
+        if (directory / OFFSETS_FILE).exists():
+            graph.edge_id_store = EdgeIdStore.load(
+                directory, metadata, in_memory=settings.load_mmaps_into_memory
+            )
         else:
-            graph.edge_ids = None
-            graph._edge_ids_env = None
+            graph.edge_id_store = None
 
         t_props_end = time.perf_counter()
 

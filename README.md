@@ -90,6 +90,12 @@ graph.save_mmap("data/processed/gandalf_mmap")
 > carries, so the server can copy them into a response without decoding them;
 > `load_mmap` refuses a graph that still stores them as msgpack.
 >
+> **So do graphs that store their edge IDs in LMDB.** Edge IDs are now a
+> memory-mapped blob of their JSON (`edge_ids.bin` + `edge_id_offsets.npy`),
+> shared by every worker, and `load_mmap` refuses a graph with
+> `edge_ids.lmdb` instead. The same rebuild also sorts each edge's
+> qualifiers by type, so their order no longer varies from build to build.
+>
 > Everything else 2.0 changed is computed per query and takes effect on
 > deploy: binding shapes, `QEdge.constraints`, the `parameters` object and its
 > timeout, the response envelope, and the remaining null / empty-container

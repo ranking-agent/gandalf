@@ -27,6 +27,7 @@ from tests.test_single_path_fast_path import (  # noqa: F401
     multi_child_graph,
 )
 
+from gandalf.edge_id_store import EdgeIdStore
 from gandalf.search import lookup
 from gandalf.trapi import response_results, to_fragments
 
@@ -189,16 +190,23 @@ def counting_uuids(monkeypatch):
     return reset
 
 
+def _with_ids(monkeypatch, graph, change) -> None:  # noqa: F811
+    """Give *graph* an edge-ID store holding ``change(edge_index, id)`` for
+    every edge."""
+    store = graph.edge_id_store
+    ids = [change(i, store.get(i)) for i in range(len(store))]
+    monkeypatch.setattr(graph, "edge_id_store", EdgeIdStore.from_ids(ids))
+
+
+def _query_edge_ids(response: dict) -> set:
+    """The original IDs of the edges a response's knowledge graph holds."""
+    return set(response["message"]["knowledge_graph"]["edges"])
+
+
 def test_edges_without_ids(monkeypatch, graph, bmt, counting_uuids):  # noqa: F811
     """An edge without an ID gets a fresh one per result, so its results go
     to the loop; the others are still written as JSON."""
-    get_ids = graph.get_edge_ids_batch
-
-    def some_missing(indices):
-        ids = get_ids(indices)
-        return {idx: eid for idx, eid in ids.items() if idx % 2}
-
-    monkeypatch.setattr(graph, "get_edge_ids_batch", some_missing)
+    _with_ids(monkeypatch, graph, lambda i, eid: eid if i % 2 else None)
     query = QUERIES["batch"]
     counting_uuids()
     reference = lookup(graph, query, bmt=bmt, attributes_as_json=True)
@@ -215,16 +223,10 @@ def test_shared_edge_ids_fall_back_to_dicts(monkeypatch, graph, bmt):  # noqa: F
     """Two edges under one ID would share a KG entry: every result is then
     built by the loop, as without results_as_json.  The two need not both be
     in results that could be written as JSON."""
-    get_ids = graph.get_edge_ids_batch
-
-    def shared(indices):
-        return {
-            idx: "shared" if i < 2 else eid
-            for i, (idx, eid) in enumerate(get_ids(indices).items())
-        }
-
-    monkeypatch.setattr(graph, "get_edge_ids_batch", shared)
     query = QUERIES["batch"]
+    used = sorted(_query_edge_ids(lookup(graph, query, bmt=bmt)))
+    _with_ids(monkeypatch, graph, lambda i, eid: used[0] if eid == used[1] else eid)
+    assert not graph.edge_id_store.unique
     reference = lookup(graph, query, bmt=bmt, attributes_as_json=True)
     response = lookup(
         graph, query, bmt=bmt, attributes_as_json=True, results_as_json=True
@@ -233,9 +235,30 @@ def test_shared_edge_ids_fall_back_to_dicts(monkeypatch, graph, bmt):  # noqa: F
     assert _served(response) == _served(reference)
 
 
-# ---------------------------------------------------------------------------
-# Reading results: response_results, and the server
-# ---------------------------------------------------------------------------
+def test_ids_shared_outside_the_query_keep_json(monkeypatch, graph, bmt):  # noqa: F811
+    """A graph whose IDs are not all unique still writes JSON for a query
+    whose own edges' IDs are."""
+    query = QUERIES["batch"]
+
+    def kinds() -> list:
+        response = lookup(
+            graph, query, bmt=bmt, attributes_as_json=True, results_as_json=True
+        )
+        return [type(r) for r in response["message"]["results"]]
+
+    unique_kinds = kinds()
+    assert bytes in unique_kinds
+    used = _query_edge_ids(lookup(graph, query, bmt=bmt))
+    every_id = {graph.get_edge_id(i) for i in range(len(graph.fwd_targets))}
+    others = sorted(every_id - used)
+    _with_ids(monkeypatch, graph, lambda i, eid: others[0] if eid == others[1] else eid)
+    assert not graph.edge_id_store.unique
+    assert kinds() == unique_kinds
+    reference = lookup(graph, query, bmt=bmt, attributes_as_json=True)
+    response = lookup(
+        graph, query, bmt=bmt, attributes_as_json=True, results_as_json=True
+    )
+    assert _served(response) == _served(reference)
 
 
 def test_response_results_decodes_in_place(graph, bmt):  # noqa: F811
