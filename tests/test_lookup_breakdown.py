@@ -119,7 +119,10 @@ def test_breakdown_of_one_query(breakdown, graph, bmt):
     results = len(lookup(graph, query["body"], bmt=bmt)["message"]["results"])
     assert rec["results"] == results
     t = rec["time"]
-    assert t["row_fetch_groups"] == results
+    # Like the server, the breakdown writes single-path results as JSON: the
+    # loop fetches rows only for the rest (this query has both kinds).
+    assert 0 < t["row_fetch_groups"] < results
+    assert t["helpers"]["_single_path_json"]["calls"] == 1
     assert next(s for s in t["statements"] if s["main_loop"])["count"] == 1
     assert all(s["seconds"] >= 0 for s in t["statements"])
     assert t["helpers"]["_full_edge"]["calls"] > 0

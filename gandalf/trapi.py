@@ -52,7 +52,7 @@ one either: each value is kept valid where it is produced.
 
 import logging
 import time
-from typing import Any, Optional, cast
+from typing import Any, Optional, Union, cast
 
 import orjson
 from translator_tom import CURIE
@@ -259,6 +259,94 @@ def query_parameters(query: QueryDict) -> GandalfParametersDict:
     return cast("GandalfParametersDict", query.get("parameters") or {})
 
 
+def edge_attributes(edge: Any) -> list:
+    """An edge's attributes as a list, decoding them in place if they are
+    still the JSON stored in the graph, so the caller may change the list.
+
+    A full response built for the server (``lookup(attributes_as_json=True)``)
+    carries each real edge's attributes as the ``bytes`` of the JSON array
+    stored in the graph rather than as a list: the server hands them to orjson
+    as :class:`orjson.Fragment` just before serializing (:func:`to_fragments`),
+    so they go from the graph into the response without ever being decoded.
+    ``bytes`` is never a valid TRAPI attribute list, so it cannot be mistaken
+    for one.  Code that reads or changes an edge's attributes before that -- a
+    response annotator plugin -- calls this, which decodes them in place.
+
+    >>> edge = {"attributes": b'[{"attribute_type_id": "biolink:x"}]'}
+    >>> edge_attributes(edge)
+    [{'attribute_type_id': 'biolink:x'}]
+    >>> edge["attributes"]
+    [{'attribute_type_id': 'biolink:x'}]
+    >>> edge_attributes({})  # no attributes: an empty list, not attached
+    []
+    """
+    attributes = edge.get("attributes")
+    if type(attributes) is bytes:
+        attributes = edge["attributes"] = orjson.loads(attributes)
+    return attributes if attributes is not None else []
+
+
+def response_results(response: Any) -> list:
+    """A response's results as a list of Result dicts, decoding in place any
+    still written as JSON, so the caller may read and change them.
+
+    A response built for the server (``lookup(results_as_json=True)``) writes
+    most results straight to JSON: runs of consecutive results are each one
+    ``bytes`` entry of the results list (their JSON objects joined with
+    commas), among the results still built as dicts.  The server hands those
+    entries to orjson as :class:`orjson.Fragment` just before serializing
+    (:func:`to_fragments`).  Code that reads or changes results before that
+    -- a response annotator plugin -- calls this.
+
+    >>> response = {"message": {"results": [
+    ...     b'{"node_bindings":{"n0":{"ids":["A"]}}},{"node_bindings":{"n0":{"ids":["B"]}}}',
+    ...     {"node_bindings": {"n0": {"ids": ["C"]}}},
+    ... ]}}
+    >>> [r["node_bindings"]["n0"]["ids"] for r in response_results(response)]
+    [['A'], ['B'], ['C']]
+    >>> response["message"]["results"] is response_results(response)
+    True
+    """
+    message = response.get("message") or {}
+    results = message.get("results")
+    if results is None:
+        return []
+    if any(type(entry) is bytes for entry in results):
+        decoded: list = []
+        for entry in results:
+            if type(entry) is bytes:
+                decoded.extend(orjson.loads(b"[" + entry + b"]"))
+            else:
+                decoded.append(entry)
+        results[:] = decoded
+    return cast(list, results)
+
+
+def to_fragments(response: Any) -> None:
+    """Hand everything still stored as JSON in a response to orjson as
+    :class:`orjson.Fragment`, in place: results written as JSON (see
+    :func:`response_results`) and edge attributes (see
+    :func:`edge_attributes`).
+
+    The last step before serializing: orjson copies a Fragment's bytes into
+    its output as they are, where going through a ``default`` hook per entry
+    would cost about as much as encoding the decoded objects.  A Fragment
+    cannot be read back, so nothing may need those results or attributes
+    afterwards.
+    """
+    message = response.get("message") or {}
+    fragment = orjson.Fragment
+    results = message.get("results") or []
+    for i, entry in enumerate(results):
+        if type(entry) is bytes:
+            results[i] = fragment(entry)
+    edges = (message.get("knowledge_graph") or {}).get("edges") or {}
+    for edge in edges.values():
+        attributes = edge.get("attributes")
+        if type(attributes) is bytes:
+            edge["attributes"] = fragment(attributes)
+
+
 class InFlightEdge(TypedDict):
     """An Edge as gandalf assembles it, which is not always a full TRAPI Edge.
 
@@ -274,6 +362,9 @@ class InFlightEdge(TypedDict):
       :func:`gandalf.search.lookup.lookup`, and the note in
       ``tests/test_trapi_conformance.py`` on why those responses are excluded
       from conformance checks.
+    * ``attributes`` may be ``bytes`` -- the stored JSON, not yet decoded --
+      in a response built for the server; read it through
+      :func:`edge_attributes`.
     * Three bookkeeping properties hang off an edge while a response is built
       -- the knowledge-graph id it should be filed under, and the
       subject/object in *query* direction rather than the stored direction --
@@ -292,7 +383,7 @@ class InFlightEdge(TypedDict):
     knowledge_level: str
     agent_type: str
     sources: NotRequired[list[RetrievalSourceDict]]
-    attributes: NotRequired[list[AttributeDict]]
+    attributes: NotRequired[Union[list[AttributeDict], bytes]]
     qualifiers: NotRequired[list[QualifierDict]]
     _edge_id: NotRequired[str]
     _query_subject: NotRequired[str]

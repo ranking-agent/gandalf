@@ -175,6 +175,10 @@ class ZstdCompressionMiddleware:
         )
 
         if eligible:
+            # Deliberately on the event loop, one thread, blocking this worker
+            # (seconds, on a multi-gigabyte response); see "Response
+            # compression stays on the event loop" in CLAUDE.MD before
+            # changing that.
             body = zstandard.ZstdCompressor(level=self.level).compress(body)
             headers = [
                 (key, value)

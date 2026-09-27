@@ -182,6 +182,47 @@ it is in a result; build a new one instead.
 `tests/test_single_path_fast_path.py::test_single_id_bindings_are_shared`
 pins the sharing.
 
+**Edge attributes reach the server's responses undecoded.**  Each edge's
+attributes are stored as the JSON array a response carries.  The server calls
+`lookup(..., attributes_as_json=True)`, so a real edge's `attributes` is
+`bytes` (the stored JSON) rather than a list.  Just before serializing,
+`to_fragments` turns those into `orjson.Fragment`, which orjson copies into
+its output as they are.  Decoding
+them and encoding them again was the costliest step of a large full response.
+Two rules follow:
+- **Read or change an edge's attributes through
+  `gandalf.trapi.edge_attributes(edge)`** (response annotator plugins
+  included), which decodes them in place.  A Fragment cannot be read back, so
+  nothing may need them after `to_fragments`.
+- **Output stays byte-identical to decoding them:** the stored bytes are
+  exactly what orjson makes of the decoded list, and the attributes key keeps
+  its place in the edge.  `tests/test_edge_attributes_json.py` checks both
+  modes serialize to the same bytes.
+
+**Single-path results are written straight to JSON.**  The server also calls
+`lookup(..., results_as_json=True)`.  Nearly every result on a large query
+comes from one path whose subclass matches are identities (the single-path
+fast path above); `_single_path_json` writes all of those at once rather
+than building them one by one: it picks them out with NumPy masks, builds
+each unique edge's KG entry once, and fills a JSON template fixed by the
+query graph with each result's IDs, encoded once each.  Runs of consecutive
+results become single `bytes` entries of `message["results"]`, among the
+results the per-group loop still builds as dicts (multi-path, inferred edges,
+edges without IDs, ALL/COLLATE queries); `to_fragments` hands them to orjson
+as Fragments.  The rules:
+- **Read or change results through `gandalf.trapi.response_results(response)`**
+  (response annotator plugins included), which decodes them in place.
+- **Output stays byte-identical to the dict path**, results and
+  knowledge-graph key order included: the loop files its KG entries into
+  dicts of its own, merged with the JSON results' entries in the order the
+  loop alone would have filed them (`_file_in_first_seen_order`).  A change to
+  the Result shape the loop builds must change the template in
+  `_single_path_json` too; `tests/test_results_as_json.py` compares the two
+  byte for byte across the query shapes.
+
+Library callers get plain lists by default, and so does the server when
+`validate_responses` is on, since FastAPI's validation needs them.
+
 **GC stays paused until the response is freed.**  `lookup()` pauses the
 cyclic GC while it runs (`gandalf.search.gc_utils.pause_gc`), and the server's
 query handlers hold the same pause until the response has been serialized
@@ -254,8 +295,11 @@ a client asked for is worse than an error.  So is a query graph with no
 Some 2.0 requirements are satisfied in the serialized graph and only change
 on a rebuild: `knowledge_level`/`agent_type` interning, `Node.name` /
 `Node.categories` normalization, `RetrievalSource.upstream_resource_ids`
-pruning (done in the loader so it covers both graph sources), and the
-persisted `meta_kg.json` / `sri_testing_data.json`.  Everything else is
+pruning (done in the loader so it covers both graph sources), the persisted
+`meta_kg.json` / `sri_testing_data.json`, and the storage format of edge
+attributes (JSON arrays in `edge_properties.lmdb`, recorded as
+`edge_attributes_format` in `metadata.pkl`; `load_mmap` refuses a graph
+without it).  Everything else is
 computed per query.  When changing a serialization rule, check which side it
 lands on -- a fix applied only in the loader will not reach an already-built
 graph.
@@ -300,6 +344,25 @@ Run them explicitly with `python -m pytest -m integration`.
 - CI/CD pipeline configured via `.github/workflows/ci.yml` (lint, test, typecheck)
 - Dockerfile available for containerized deployment
 - Server configurable via environment variables (see README.md)
+- **Response compression stays on the event loop, on one thread (decided).**
+  `ZstdCompressionMiddleware` compresses each response inline, so a worker
+  can't accept or serve anything else while it compresses (about 4s for a
+  2.3 GB response at ~600 MB/s, level 4).  Both alternatives were weighed and
+  turned down:
+  - *zstd's own threads* (`ZstdCompressor(threads=...)`): about 3x faster,
+    but production runs 7 gunicorn workers on 8 CPUs, so extra compression
+    threads would take cores from queries running in other workers.
+  - *Compressing on a worker thread* (`anyio.to_thread.run_sync`; zstd
+    releases the GIL): no extra CPU, and the worker stays responsive, but it
+    could then start a new query while the old response is still in memory
+    (the serialized body plus its compressed copy, several GB on the largest
+    queries).  Those queries peak around 11 GB each, so overlapping two in
+    one worker makes an OOM kill more likely.  Today's blocking loop means
+    a worker never accepts a new query until the previous body is compressed
+    and freed.
+  Revisit only if workers stall in practice (e.g. health checks failing
+  during large queries).  In that case take the worker-thread version with
+  `threads=0`.
 
 ## Best practice:
 

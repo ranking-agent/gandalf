@@ -234,10 +234,11 @@ def set_profiler(
 
 
 def install_lmdb_hook(store: Any) -> Optional[tuple]:
-    """Wrap ``store.get`` and ``store.get_batch`` to record into the active
-    profiler's ``lmdb_call``.
+    """Wrap ``store.get``, ``store.get_batch`` and ``store.get_json_batch``
+    to record into the active profiler's ``lmdb_call``.
 
-    Returns ``(orig_get, orig_get_batch)`` so the caller can restore the
+    Returns ``(orig_get, orig_get_batch, orig_get_json_batch)`` so the caller
+    can restore the
     original methods in a ``finally`` block. Returns ``None`` if the hook
     could not be installed (no store, or already wrapped by another profile
     in flight).
@@ -255,6 +256,7 @@ def install_lmdb_hook(store: Any) -> Optional[tuple]:
 
     orig_get = store.get
     orig_get_batch = store.get_batch
+    orig_get_json_batch = store.get_json_batch
     prof = current_profiler()
 
     def get(edge_idx):
@@ -266,19 +268,26 @@ def install_lmdb_hook(store: Any) -> Optional[tuple]:
         with prof.lmdb_call("get_batch", len(idxs)):
             return orig_get_batch(idxs)
 
+    def get_json_batch(edge_indices):
+        idxs = list(edge_indices)
+        with prof.lmdb_call("get_json_batch", len(idxs)):
+            return orig_get_json_batch(idxs)
+
     store.get = get
     store.get_batch = get_batch
+    store.get_json_batch = get_json_batch
     store._gandalf_profiled = True
-    return (orig_get, orig_get_batch)
+    return (orig_get, orig_get_batch, orig_get_json_batch)
 
 
 def restore_lmdb_hook(store: Any, originals: Optional[tuple]) -> None:
     """Restore methods saved by :func:`install_lmdb_hook`."""
     if store is None or originals is None:
         return
-    orig_get, orig_get_batch = originals
+    orig_get, orig_get_batch, orig_get_json_batch = originals
     store.get = orig_get
     store.get_batch = orig_get_batch
+    store.get_json_batch = orig_get_json_batch
     if hasattr(store, "_gandalf_profiled"):
         try:
             delattr(store, "_gandalf_profiled")

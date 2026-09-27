@@ -34,7 +34,6 @@ import tempfile
 from pathlib import Path
 from typing import List, Tuple
 
-import msgpack
 import numpy as np
 
 from gandalf.biolink import NAMED_THING
@@ -42,6 +41,7 @@ from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
 from gandalf.lmdb_store import (
     LMDBPropertyStore,
     _INITIAL_WRITE_MAP_SIZE,
+    encode_attributes,
     _encode_key,
     _put_with_resize,
 )
@@ -192,13 +192,10 @@ def _build_graph_from_source(
                 },
             )
 
-            # Cold path: write attributes to temp LMDB
-            # (publications are included in the attributes list)
-            detail = {
-                "attributes": edge["attributes"],
-            }
+            # Cold path: write attributes to temp LMDB, as the JSON a response
+            # carries (publications are included in the attributes list)
             key = _encode_key(i)
-            val = msgpack.packb(detail, use_bin_type=True)
+            val = encode_attributes(edge["attributes"])
             txn = _put_with_resize(temp_env, txn, key, val, pending)
 
             if (i + 1) % 50_000 == 0:

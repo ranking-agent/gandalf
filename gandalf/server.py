@@ -66,6 +66,7 @@ from gandalf.search.gc_utils import gc_disabled
 from gandalf.trapi import (
     Deadline,
     TimeoutNotSatisfiable,
+    to_fragments,
     finalize_response,
     query_parameters,
     resolve_timeout,
@@ -84,6 +85,11 @@ logger = logging.getLogger(__name__)
 def _orjson_default(obj):
     if isinstance(obj, set):
         return list(obj)
+    if isinstance(obj, bytes):
+        # Edge attributes' stored JSON, or results written as JSON.  Correct,
+        # but slow per entry: responses convert these up front with
+        # to_fragments; this only catches one that was missed.
+        return orjson.Fragment(obj)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
@@ -655,9 +661,15 @@ def sync_lookup(
             dehydrated=dehydrated_param,
             profile=profile_param,
             deadline=deadline,
+            # Edge attributes served straight from the graph's JSON, and
+            # results written straight to JSON, unless FastAPI is to validate
+            # the response, which needs them as Python objects.
+            attributes_as_json=not _validate,
+            results_as_json=not _validate,
         )
         if annotator_config:
             annotate_response(response, GRAPH, annotator_config)
+        to_fragments(response)
         rendered = _trapi_response(response)
         del response
     return rendered
@@ -714,9 +726,12 @@ def _async_lookup(
                 dehydrated=dehydrated,
                 profile=profile,
                 deadline=deadline,
+                attributes_as_json=True,
+                results_as_json=True,
             )
             if annotator_config:
                 annotate_response(response, GRAPH, annotator_config)
+            to_fragments(response)
         try:
             # Serialize with orjson rather than httpx's stdlib-json ``json=``
             # path, which is markedly slower for large result sets.

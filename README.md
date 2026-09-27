@@ -85,6 +85,11 @@ graph.save_mmap("data/processed/gandalf_mmap")
 > `RetrievalSource.upstream_resource_ids` omitted when empty, and the
 > persisted `meta_kg.json` / `sri_testing_data.json`.
 >
+> **Graphs built before edge attributes were stored as JSON also need a
+> rebuild.** Each edge's attributes are now stored as the JSON array a response
+> carries, so the server can copy them into a response without decoding them;
+> `load_mmap` refuses a graph that still stores them as msgpack.
+>
 > Everything else 2.0 changed is computed per query and takes effect on
 > deploy: binding shapes, `QEdge.constraints`, the `parameters` object and its
 > timeout, the response envelope, and the remaining null / empty-container
