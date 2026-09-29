@@ -584,3 +584,79 @@ class TestSubclassMultipleChildrenDistinctDerivations:
             dehydrated=dehydrated,
         )
         self._assert_two_distinct_derivations(response, "eB")
+
+
+@pytest.mark.parametrize("dehydrated", [False, True])
+@pytest.mark.parametrize(
+    "subject, obj, predicate",
+    [
+        ("CHEBI:6801", "MONDO:0005015", "biolink:treats"),
+        ("MONDO:0005015", "CHEBI:6801", "biolink:treated_by"),
+        ("MONDO:0005015", "CHEBI:6801", "biolink:related_to"),
+        ("CHEBI:6801", "MONDO:0005015", "biolink:related_to"),
+    ],
+)
+def test_inferred_edge_runs_the_way_its_base_edge_is_stored(
+    graph, bmt, subject: str, obj: str, predicate: str, dehydrated: bool
+) -> None:
+    """An inferred edge restates its base edge with the child replaced by the
+    queried superclass, so it runs the way the base edge is stored.
+
+    The fixture stores ``CHEBI:6801 --treats--> MONDO:0005148`` and
+    ``MONDO:0005148 --subclass_of--> MONDO:0005015``.  A lookup pinned to
+    Diabetes Mellitus on the subject side matches that edge through its
+    inverse (``treated_by``) or a symmetric predicate (``related_to``); the
+    inferred edge must still read Metformin treats Diabetes Mellitus, not
+    Diabetes Mellitus treats Metformin.
+    """
+    query = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": [subject]},
+                    "n1": {"ids": [obj]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": [predicate],
+                    },
+                },
+            },
+        },
+    }
+
+    response = lookup(
+        graph,
+        query,
+        bmt=bmt,
+        subclass=True,
+        subclass_depth=1,
+        dehydrated=dehydrated,
+    )
+    kg_edges = response["message"]["knowledge_graph"]["edges"]
+    aux_graphs = response["message"]["auxiliary_graphs"]
+    inferred = _inferred_edges(response)
+    treats = [e for e in inferred.values() if e["predicate"] == "biolink:treats"]
+    assert treats, "expected Metformin treats Diabetes Mellitus via Type 2 Diabetes"
+
+    for edge in inferred.values():
+        sg = next(
+            a["value"]
+            for a in edge["attributes"]
+            if a["attribute_type_id"] == "biolink:support_graphs"
+        )
+        members = [kg_edges[mid] for mid in aux_graphs[sg[0]]["edges"]]
+        [base] = [m for m in members if m["predicate"] == edge["predicate"]]
+        parent_of = {
+            m["subject"]: m["object"]
+            for m in members
+            if m["predicate"] == "biolink:subclass_of"
+        }
+        assert (edge["subject"], edge["object"]) == (
+            parent_of.get(base["subject"], base["subject"]),
+            parent_of.get(base["object"], base["object"]),
+        )
+    for edge in treats:
+        assert (edge["subject"], edge["object"]) == ("CHEBI:6801", "MONDO:0005015")

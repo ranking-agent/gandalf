@@ -1611,14 +1611,25 @@ def _build_response(
                             }
 
                         if composite_edge_id not in kg_edges:
-                            # Use query-aligned IDs so the override maps to the
-                            # correct endpoint regardless of stored edge direction.
-                            qs = edge.get("_query_subject", edge["subject"])
-                            qo = edge.get("_query_object", edge["object"])
+                            # The inferred edge restates the base edge with the
+                            # expanded child swapped for its superclass, so it
+                            # runs the way the base edge is stored.  The
+                            # overrides are keyed by query end, and an edge
+                            # matched through its inverse is stored the other
+                            # way round.
+                            subject_end, object_end = "subject", "object"
+                            if edge["subject"] != edge.get(
+                                "_query_subject", edge["subject"]
+                            ):
+                                subject_end, object_end = "object", "subject"
                             inferred_edge = {
-                                "subject": superclass_node_overrides.get("subject", qs),
+                                "subject": superclass_node_overrides.get(
+                                    subject_end, edge["subject"]
+                                ),
                                 "predicate": edge["predicate"],
-                                "object": superclass_node_overrides.get("object", qo),
+                                "object": superclass_node_overrides.get(
+                                    object_end, edge["object"]
+                                ),
                                 # TRAPI 2.0 Edge properties, not attributes
                                 "knowledge_level": "logical_entailment",
                                 "agent_type": "automated_agent",
