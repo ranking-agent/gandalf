@@ -1515,8 +1515,12 @@ def _build_response(
                     # inferred composite edges.  edge["subject"]/["object"]
                     # follow stored direction (swapped for inverse edges),
                     # but superclass_node_overrides uses query direction.
+                    # Whether the edge was matched through its inverse says
+                    # which stored end each query end is; comparing IDs can't
+                    # tell for a self-loop.
                     edge_props["_query_subject"] = node_id_cache[query_subj_idx]
                     edge_props["_query_object"] = node_id_cache[query_obj_idx]
+                    edge_props["_matched_inverse"] = bool(is_inverse)
 
                     edge_bindings_by_qedge[qedge_id].append(edge_props)
                     marked_edges.append(edge_props)
@@ -1611,14 +1615,23 @@ def _build_response(
                             }
 
                         if composite_edge_id not in kg_edges:
-                            # Use query-aligned IDs so the override maps to the
-                            # correct endpoint regardless of stored edge direction.
-                            qs = edge.get("_query_subject", edge["subject"])
-                            qo = edge.get("_query_object", edge["object"])
+                            # The inferred edge restates the base edge with the
+                            # expanded child swapped for its superclass, so it
+                            # runs the way the base edge is stored.  The
+                            # overrides are keyed by query end, and an edge
+                            # matched through its inverse is stored the other
+                            # way round.
+                            subject_end, object_end = "subject", "object"
+                            if edge.get("_matched_inverse"):
+                                subject_end, object_end = "object", "subject"
                             inferred_edge = {
-                                "subject": superclass_node_overrides.get("subject", qs),
+                                "subject": superclass_node_overrides.get(
+                                    subject_end, edge["subject"]
+                                ),
                                 "predicate": edge["predicate"],
-                                "object": superclass_node_overrides.get("object", qo),
+                                "object": superclass_node_overrides.get(
+                                    object_end, edge["object"]
+                                ),
                                 # TRAPI 2.0 Edge properties, not attributes
                                 "knowledge_level": "logical_entailment",
                                 "agent_type": "automated_agent",
@@ -1698,6 +1711,7 @@ def _build_response(
         edge.pop("_edge_id", None)
         edge.pop("_query_subject", None)
         edge.pop("_query_object", None)
+        edge.pop("_matched_inverse", None)
 
     t_built = time.perf_counter()
     logger.debug(

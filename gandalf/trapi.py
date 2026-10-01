@@ -365,10 +365,11 @@ class InFlightEdge(TypedDict):
     * ``attributes`` may be ``bytes`` -- the stored JSON, not yet decoded --
       in a response built for the server; read it through
       :func:`edge_attributes`.
-    * Three bookkeeping properties hang off an edge while a response is built
-      -- the knowledge-graph id it should be filed under, and the
-      subject/object in *query* direction rather than the stored direction --
-      and are popped again before serialization.
+    * Four bookkeeping properties hang off an edge while a response is built
+      -- the knowledge-graph id it should be filed under, the subject/object
+      in *query* direction rather than the stored direction, and whether it
+      was matched through its inverse -- and are popped again before
+      serialization.
 
     Keeping the difference in a named type means the dehydrated contract is
     written down in one place, and a typo in either branch that builds an edge
@@ -388,6 +389,7 @@ class InFlightEdge(TypedDict):
     _edge_id: NotRequired[str]
     _query_subject: NotRequired[str]
     _query_object: NotRequired[str]
+    _matched_inverse: NotRequired[bool]
 
 
 #: Served-``Edge`` properties that TRAPI 2.0 gives a ``minItems`` of 1 while
