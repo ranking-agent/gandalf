@@ -1,4 +1,4 @@
-"""Redis Streams job queue and result store for queue-mode Gandalf.
+"""Jobs: the Redis Streams queue, result store, worker registry and job history.
 
 With ``GANDALF_QUEUE_URL`` set, the API process turns each ``/query`` and
 ``/asyncquery`` into a :class:`Job` on a Redis Stream and worker processes
@@ -25,6 +25,11 @@ the stream: zstd-compressed, split into chunks below Redis's 512 MB value
 cap, with a TTL, and a per-job list the waiting API process blocks on.
 ``/asyncquery`` results never touch Redis: the worker POSTs them to the
 client's callback itself.
+
+Two more pieces of shared state feed the status page (``/status``): each
+worker reports what it is doing to the :class:`WorkerRegistry`, and every
+finished job is recorded in the :class:`JobHistory`.  Both live in Redis so
+any API pod can show the whole deployment.
 """
 
 from __future__ import annotations
@@ -177,6 +182,45 @@ class QueueStats:
 def default_consumer_name() -> str:
     """``<hostname>-<pid>``: the pod name under Kubernetes, plus the process."""
     return f"{socket.gethostname()}-{os.getpid()}"
+
+
+def summarize_query(query: QueryDict) -> dict:
+    """A few words about a query, for the status page and the job history.
+
+    Node and edge counts, the first pinned CURIEs and predicates, and the
+    requested timeout: enough to recognise a query in a list, small enough to
+    store with every job.
+
+    Examples:
+        >>> summarize_query({"message": {"query_graph": {
+        ...     "nodes": {"n0": {"ids": ["CHEBI:6801"]}, "n1": {"categories": ["biolink:Gene"]}},
+        ...     "edges": {"e0": {"subject": "n0", "object": "n1", "predicates": ["biolink:affects"]}}}},
+        ...     "parameters": {"timeout": 30}})
+        {'nodes': 2, 'edges': 1, 'ids': ['CHEBI:6801'], 'predicates': ['biolink:affects'], 'timeout': 30}
+        >>> summarize_query({"message": {}})
+        {'nodes': 0, 'edges': 0, 'ids': [], 'predicates': []}
+    """
+    message = query.get("message") or {}
+    query_graph = message.get("query_graph") or {}
+    nodes = query_graph.get("nodes") or {}
+    edges = query_graph.get("edges") or {}
+    ids = [i for node in nodes.values() for i in (node.get("ids") or [])]
+    predicates = [p for edge in edges.values() for p in (edge.get("predicates") or [])]
+    summary: dict = {
+        "nodes": len(nodes),
+        "edges": len(edges),
+        "ids": ids[:3],
+        "predicates": predicates[:3],
+    }
+    parameters = query.get("parameters") or {}
+    if "timeout" in parameters:
+        summary["timeout"] = parameters["timeout"]
+    return summary
+
+
+def _decode(fields: dict) -> dict:
+    """A Redis hash or stream entry as ``str`` keys and values."""
+    return {k.decode(): v.decode() for k, v in fields.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +395,51 @@ class JobQueue:
         """Mark a job done: its result has been delivered."""
         self._r.xack(self.stream, self.group, entry_id)
 
+    def length(self) -> int:
+        """Entries on the stream, delivered or not (acknowledged ones are kept)."""
+        return int(self._r.xlen(self.stream))
+
+    def pending_entries(self, count: int = 100) -> list[dict]:
+        """The jobs delivered and not yet acknowledged, oldest first.
+
+        Each is ``{"entry_id", "consumer", "idle_s", "deliveries"}``.
+        """
+        return [
+            {
+                "entry_id": entry["message_id"].decode(),
+                "consumer": entry["consumer"].decode(),
+                "idle_s": entry["time_since_delivered"] / 1000.0,
+                "deliveries": int(entry["times_delivered"]),
+            }
+            for entry in self._r.xpending_range(
+                self.stream, self.group, min="-", max="+", count=count
+            )
+        ]
+
+    def dead_letters(self, count: int = 20) -> list[dict]:
+        """The most recent dead-lettered jobs, newest first.
+
+        Each is ``{"entry_id", "job_id", "query", "deliveries", "dead_at"}``.
+        """
+        letters = []
+        for entry_id, fields in self._r.xrevrange(self.dead_stream, count=count):
+            job = Job.from_bytes(fields[b"job"])
+            letters.append(
+                {
+                    "entry_id": entry_id.decode(),
+                    "job_id": job.job_id,
+                    "mode": job.mode,
+                    "query": summarize_query(job.query),
+                    "deliveries": int(fields[b"deliveries"]),
+                    "dead_at": float(fields[b"dead_at"]),
+                }
+            )
+        return letters
+
+    def dead_letter_count(self) -> int:
+        """How many jobs have been dead-lettered (the dead stream's length)."""
+        return int(self._r.xlen(self.dead_stream))
+
     def stats(self) -> QueueStats:
         """Lag and pending counts of the consumer group (zero before it exists)."""
         for group in self._r.xinfo_groups(self.stream):
@@ -503,6 +592,183 @@ class ResultStore:
             self._key(job_id, "done"),
             *[self._key(job_id, f"chunk:{n}") for n in range(n_chunks)],
         )
+
+
+# ---------------------------------------------------------------------------
+# Status: worker registry and job history
+# ---------------------------------------------------------------------------
+
+
+class WorkerRegistry:
+    """What each worker last reported about itself.
+
+    A worker writes a hash under ``<prefix>:<name>`` with a TTL and its name
+    into a sorted set scored by the report time; a worker that stops
+    reporting (it died, or was scaled away without a clean exit) drops out
+    when its hash expires.
+
+    Args:
+        client: A ``redis.Redis`` returning bytes.
+        prefix: Key prefix.
+        ttl_seconds: How long a report stays valid without a refresh.
+    """
+
+    def __init__(
+        self, client: redis.Redis, *, prefix: str = "gandalf:worker", ttl_seconds: float
+    ):
+        self._r = client
+        self.prefix = prefix
+        self.ttl = ttl_seconds
+        self._index = f"{prefix}:index"
+
+    @classmethod
+    def from_settings(cls, client: Optional[redis.Redis] = None) -> "WorkerRegistry":
+        """A registry whose reports outlive a few missed keepalives."""
+        return cls(
+            client if client is not None else redis.Redis.from_url(settings.queue_url),
+            ttl_seconds=settings.queue_claim_idle_seconds,
+        )
+
+    def report(self, name: str, **fields: object) -> None:
+        """Record *fields* as *name*'s current state (replacing the last report)."""
+        now = time.time()
+        mapping = {k: _field(v) for k, v in fields.items()}
+        mapping["name"] = name
+        mapping["last_seen"] = repr(now)
+        key = f"{self.prefix}:{name}"
+        pipe = self._r.pipeline(transaction=True)
+        pipe.delete(key)
+        pipe.hset(key, mapping=mapping)
+        pipe.pexpire(key, int(self.ttl * 1000))
+        pipe.zadd(self._index, {name: now})
+        pipe.execute()
+
+    def forget(self, name: str) -> None:
+        """Drop *name*'s report (a clean exit)."""
+        pipe = self._r.pipeline(transaction=True)
+        pipe.delete(f"{self.prefix}:{name}")
+        pipe.zrem(self._index, name)
+        pipe.execute()
+
+    def workers(self) -> list[dict]:
+        """Every worker with a live report, most recently seen first."""
+        names = self._r.zrevrange(self._index, 0, -1)
+        reports = []
+        for raw_name in names:
+            name = raw_name.decode()
+            fields = self._r.hgetall(f"{self.prefix}:{name}")
+            if not fields:
+                self._r.zrem(self._index, name)  # expired: gone for good
+                continue
+            reports.append(_typed_report(_decode(fields)))
+        return reports
+
+
+def _field(value: object) -> str:
+    """A report value as the string Redis stores."""
+    if isinstance(value, (dict, list)):
+        data: bytes = orjson.dumps(value)
+        return data.decode()
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    return str(value)
+
+
+_NUMERIC_REPORT_FIELDS = frozenset(
+    {
+        "pid",
+        "jobs_done",
+        "started_at",
+        "last_seen",
+        "job_started_at",
+        "rss_anon_kb",
+        "max_jobs",
+    }
+)
+
+
+def _typed_report(report: dict) -> dict:
+    """Numbers back to numbers and the query summary back to a dict."""
+    typed: dict = {}
+    for key, value in report.items():
+        if key in _NUMERIC_REPORT_FIELDS and value != "":
+            typed[key] = float(value) if "." in value else int(value)
+        elif key == "job_query" and value:
+            typed[key] = orjson.loads(value)
+        else:
+            typed[key] = value
+    return typed
+
+
+class JobHistory:
+    """The last few thousand finished jobs, as a capped Redis Stream.
+
+    Args:
+        client: A ``redis.Redis`` returning bytes.
+        stream: Stream key.
+        maxlen: Roughly how many records to keep.
+    """
+
+    def __init__(
+        self, client: redis.Redis, *, stream: str = "gandalf:jobs:history", maxlen: int
+    ):
+        self._r = client
+        self.stream = stream
+        self.maxlen = maxlen
+
+    @classmethod
+    def from_settings(cls, client: Optional[redis.Redis] = None) -> "JobHistory":
+        """A history of the configured length."""
+        return cls(
+            client if client is not None else redis.Redis.from_url(settings.queue_url),
+            maxlen=settings.history_maxlen,
+        )
+
+    def record(self, **fields: object) -> None:
+        """Append one finished job."""
+        self._r.xadd(
+            self.stream,
+            {k: _field(v) for k, v in fields.items()},
+            maxlen=self.maxlen,
+            approximate=True,
+        )
+
+    def recent(self, count: int) -> list[dict]:
+        """The newest *count* records, newest first."""
+        records = []
+        for entry_id, fields in self._r.xrevrange(self.stream, count=count):
+            record = _typed_history(_decode(fields))
+            record["entry_id"] = entry_id.decode()
+            records.append(record)
+        return records
+
+
+_NUMERIC_HISTORY_FIELDS = frozenset(
+    {
+        "http_status",
+        "deliveries",
+        "accepted_at",
+        "started_at",
+        "finished_at",
+        "wait_s",
+        "duration_s",
+        "bytes",
+    }
+)
+
+
+def _typed_history(record: dict) -> dict:
+    typed: dict = {}
+    for key, value in record.items():
+        if key in _NUMERIC_HISTORY_FIELDS and value != "":
+            typed[key] = float(value) if "." in value else int(value)
+        elif key == "query" and value:
+            typed[key] = orjson.loads(value)
+        else:
+            typed[key] = value
+    return typed
 
 
 # ---------------------------------------------------------------------------

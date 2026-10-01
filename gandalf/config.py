@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     # Empty disables the plugin unless a request supplies its own service_url.
     cooccurrence_service_url: str = ""
 
-    # Queue mode (gandalf/queue.py, gandalf/worker.py).  With queue_url set,
+    # Queue mode (gandalf/jobs.py, gandalf/worker.py).  With queue_url set,
     # the API enqueues each /query and /asyncquery as a job on a Redis Stream
     # and separate worker processes execute them; empty runs queries in the
     # API process as before.
@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     # (Redis caps a value at 512 MB), until the API collects them.
     result_ttl_seconds: int = 900
     result_chunk_bytes: int = 64 * 1024 * 1024
+
+    # How many finished jobs the status page's history keeps (a capped
+    # Redis Stream, gandalf:jobs:history).
+    history_maxlen: int = 2000
 
     # Worker process (python -m gandalf.worker)
     worker_name: str = ""  # consumer name; default "<hostname>-<pid>"

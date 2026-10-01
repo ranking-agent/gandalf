@@ -28,7 +28,14 @@ from fastapi.testclient import TestClient
 
 import gandalf.server as gandalf_server
 from gandalf.config import settings
-from gandalf.queue import Delivery, Job, JobQueue, ResultStore
+from gandalf.jobs import (
+    Delivery,
+    Job,
+    JobHistory,
+    JobQueue,
+    ResultStore,
+    WorkerRegistry,
+)
 from gandalf.worker import Worker
 
 from tests.search_fixtures import graph  # noqa: F401
@@ -478,3 +485,171 @@ def test_stop_finishes_the_current_job_first(
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert (tmp_path / "hb").exists()
+
+
+# ---------------------------------------------------------------------------
+# Status: worker registry, job history, /status.json
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def registry(client):
+    return WorkerRegistry(client, prefix="t:worker", ttl_seconds=0.3)
+
+
+@pytest.fixture
+def history(client):
+    return JobHistory(client, stream="t:history", maxlen=100)
+
+
+def test_registry_reports_expire_and_are_typed(registry):
+    registry.report(
+        "w1",
+        pid=12,
+        state="running",
+        jobs_done=3,
+        job_query={"nodes": 2},
+        rss_anon_kb=512,
+        stopping=False,
+    )
+    registry.report(
+        "w2", pid=13, state="idle", jobs_done=0, rss_anon_kb=256, stopping=False
+    )
+    reports = {r["name"]: r for r in registry.workers()}
+    assert set(reports) == {"w1", "w2"}
+    assert reports["w1"]["pid"] == 12 and reports["w1"]["jobs_done"] == 3
+    assert reports["w1"]["job_query"] == {"nodes": 2}
+    assert reports["w1"]["stopping"] == "false"
+    assert isinstance(reports["w1"]["last_seen"], float)
+
+    registry.forget("w2")
+    assert [r["name"] for r in registry.workers()] == ["w1"]
+    time.sleep(0.4)  # past the TTL with no refresh: a dead worker
+    assert registry.workers() == []
+
+
+def test_history_keeps_newest_first_and_types_numbers(history):
+    for i in range(3):
+        history.record(
+            job_id=f"j{i}",
+            outcome="ok",
+            duration_s=0.5 * i,
+            bytes=100 * i,
+            query={"nodes": 1},
+        )
+    records = history.recent(10)
+    assert [r["job_id"] for r in records] == ["j2", "j1", "j0"]
+    assert records[0]["duration_s"] == 1.0 and records[0]["bytes"] == 200
+    assert records[0]["query"] == {"nodes": 1}
+    assert history.recent(1)[0]["job_id"] == "j2"
+
+
+@pytest.fixture
+def reporting_worker(
+    graph, bmt, queue, store, registry, history, tmp_path
+):  # noqa: F811
+    w = Worker(
+        graph,
+        bmt,
+        queue,
+        store,
+        consumer="w1",
+        block_seconds=0.05,
+        keepalive_seconds=0.05,
+        heartbeat_file=str(tmp_path / "hb"),
+        registry=registry,
+        history=history,
+    )
+    thread = threading.Thread(target=w.run, daemon=True)
+    thread.start()
+    assert _wait_for(lambda: bool(registry.workers()))
+    try:
+        yield w
+    finally:
+        w.stop()
+        thread.join(timeout=10)
+
+
+def test_status_json_in_queue_mode(
+    api, reporting_worker, registry, history, monkeypatch, callback_server
+):
+    monkeypatch.setattr(gandalf_server, "WORKERS", registry)
+    monkeypatch.setattr(gandalf_server, "HISTORY", history)
+
+    before = api.get("/status.json").json()
+    assert before["mode"] == "queue"
+    assert before["workers"]["alive"] == 1 and before["workers"]["busy"] == 0
+    assert before["workers"]["reports"][0]["name"] == "w1"
+    assert before["jobs"]["recent"] == []
+
+    assert api.post("/query", json=ONE_HOP).status_code == 200
+    url, received = callback_server
+    body = dict(ONE_HOP)
+    body["callback"] = url
+    api.post("/asyncquery", json=body)
+    assert _wait_for(lambda: len(received) == 1)
+    assert _wait_for(lambda: len(history.recent(10)) == 2)
+
+    data = api.get("/status.json").json()
+    assert data["queue"]["lag"] == 0 and data["queue"]["pending"] == 0
+    assert data["queue"]["dead_letters"] == 0
+    recent = data["jobs"]["recent"]
+    assert [j["mode"] for j in recent] == ["callback", "sync"]
+    assert all(j["outcome"] == "ok" and j["worker"] == "w1" for j in recent)
+    assert recent[0]["query"]["ids"] == ["CHEBI:6801"]
+    assert recent[0]["bytes"] > 1000 and recent[0]["duration_s"] >= 0
+    hour = data["jobs"]["windows"]["1h"]
+    assert hour["jobs"] == 2 and hour["outcomes"]["ok"] == 2 and hour["failed"] == 0
+    assert sum(b["ok"] for b in data["jobs"]["per_minute"]) == 2
+    assert len(data["jobs"]["per_minute"]) == 60
+    worker = data["workers"]["reports"][0]
+    assert (
+        worker["jobs_done"] == 2
+        and worker["last_outcome"] == "ok"
+        and worker["state"] == "idle"
+    )
+
+
+def test_status_shows_a_running_job_and_a_dead_letter(
+    api, queue, registry, history, graph, bmt, client, monkeypatch
+):  # noqa: F811
+    monkeypatch.setattr(gandalf_server, "WORKERS", registry)
+    monkeypatch.setattr(gandalf_server, "HISTORY", history)
+    # A job delivered to a worker that never finishes: in flight on the page.
+    stuck = Job.new(dict(ONE_HOP))
+    queue.enqueue(stuck)
+    delivery = queue.receive("ghost", block_seconds=0.1)
+    registry.report(
+        "ghost",
+        state="running",
+        job_id=stuck.job_id,
+        job_started_at=time.time() - 5,
+        jobs_done=0,
+    )
+    # And one dead-lettered by a worker that found it poisoned.
+    w = Worker(
+        graph,
+        bmt,
+        queue,
+        store=ResultStore(client, ttl_seconds=60, chunk_bytes=1024, zstd_level=1),
+        consumer="judge",
+        registry=registry,
+        history=history,
+    )
+    poisoned = Job.new(dict(ONE_HOP))
+    queue.enqueue(poisoned)
+    pdelivery = queue.receive("judge", block_seconds=0.1)
+    queue._dead_letter(pdelivery.entry_id, {b"job": poisoned.to_bytes()}, 3)
+    w.handle(Delivery(pdelivery.entry_id, poisoned, deliveries=3, poisoned=True))
+
+    data = api.get("/status.json").json()
+    assert data["queue"]["pending"] == 1
+    assert data["queue"]["pending_entries"][0]["consumer"] == "ghost"
+    assert data["queue"]["oldest_pending_s"] >= 0
+    ghost = next(r for r in data["workers"]["reports"] if r["name"] == "ghost")
+    assert ghost["state"] == "running" and ghost["job_elapsed_s"] >= 5
+    assert data["queue"]["dead_letters"] == 1
+    assert data["queue"]["recent_dead_letters"][0]["job_id"] == poisoned.job_id
+    assert data["jobs"]["recent"][0]["outcome"] == "poisoned"
+    assert data["jobs"]["windows"]["5m"]["failed"] == 1
+    queue.ack(delivery.entry_id)

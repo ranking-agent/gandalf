@@ -74,9 +74,11 @@ gandalf/
 ├── query_planner.py  # Query optimization
 ├── diagnostics.py    # Path explosion analysis
 ├── execute.py        # Query execution shared by the server and the worker
-├── queue.py          # Redis Streams job queue + result store (queue mode)
+├── jobs.py           # Jobs: Redis Streams queue, result store, worker registry, history
 ├── worker.py         # Queue worker entry point (python -m gandalf.worker)
 ├── metrics.py        # Prometheus metrics for both processes
+├── status.py         # /status.json snapshot: queue, workers, job history, this pod
+├── static/status.html  # The /status page (self-contained; polls status.json)
 ├── server.py         # FastAPI application
 └── main.py           # Dev server entry point
 scripts/              # CLI entry points (gandalf-build, gandalf-query, gandalf-diagnose)
@@ -312,7 +314,7 @@ graph.
 
 With `GANDALF_QUEUE_URL` set, `server.py` does not run queries: it
 validates them (`_prepare_query`, unchanged) and enqueues a
-`gandalf.queue.Job` on a Redis Stream; `gandalf.worker` processes consume
+`gandalf.jobs.Job` on a Redis Stream; `gandalf.worker` processes consume
 through a consumer group and run them.  Rules that follow:
 
 - **One execution path.**  `gandalf.execute.run_query` /
@@ -335,6 +337,12 @@ through a consumer group and run them.  Rules that follow:
 - **Results do not go through the stream.**  `/query` results go to the
   `ResultStore` (zstd, chunked under Redis's 512 MB value cap, with a TTL);
   async results go straight to the callback.
+- **Workers report, jobs are recorded.**  `Worker.report` writes the
+  worker's state to the `WorkerRegistry` (a hash with a TTL, refreshed on
+  every poll and keepalive tick, so a dead worker drops off the page), and
+  `Worker.handle` appends each finished job to the `JobHistory` (a capped
+  stream).  `/status.json` is built from those plus `XINFO`/`XPENDING`;
+  the page never needs more than the API's own port.
 - **Tests against a real Redis** live in `tests/test_queue_redis.py`
   under the `integration` marker (they start a local `redis-server`, or
   use `GANDALF_TEST_REDIS_URL`); CI runs them with a Redis service.  The
@@ -347,6 +355,7 @@ through a consumer group and run them.  Rules that follow:
 - `POST /asyncquery` - Async query with callback
 - `GET /health`, `GET /ready` - liveness / readiness (503 until the graph is open and, in queue mode, Redis answers)
 - `GET /metrics` - Prometheus metrics (`gandalf/metrics.py`)
+- `GET /status`, `GET /status.json` - application-level status page and its data (`gandalf/status.py`)
 - `GET /docs` - Swagger UI
 
 ## Data Formats

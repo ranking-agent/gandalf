@@ -45,6 +45,15 @@ Both tiers run the same image; the worker overrides the command with
   read-only volume the loader writes, so a new worker is ready in seconds
   and pods on one node share the page cache for the mapped files.
 
+## Watching it
+
+`GET /status` on the `gandalf` Service is the live view: waiting and running
+jobs, every worker and what it is doing, recent jobs with latencies, dead
+letters, and this pod's request counts.  It is built from Redis and the API
+itself, so it needs no access to the cluster, Prometheus or Jaeger.  Port-
+forward or expose the Service and open it in a browser; `/status.json` is
+the same data for scripts.
+
 ## Scaling signal
 
 KEDA's `redis-streams` scaler reads the consumer group's lag

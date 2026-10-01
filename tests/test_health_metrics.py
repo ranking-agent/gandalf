@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 import gandalf.server as gandalf_server
 from gandalf.config import settings
 from gandalf.execute import execute_to_bytes, run_query, serialize_response
-from gandalf.queue import Job
+from gandalf.jobs import Job
 from gandalf.search.gc_utils import gc_disabled
 from gandalf.trapi import Deadline
 
@@ -179,7 +179,7 @@ def test_job_wait_seconds(budget, expected):
 
 def test_metrics_survive_a_queue_outage(client, monkeypatch):
     """A scrape still answers when Redis is down; only the queue gauges are stale."""
-    from gandalf.queue import JobQueue
+    from gandalf.jobs import JobQueue
     import redis
 
     dead = JobQueue(

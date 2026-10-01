@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gandalf status</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --accent: #2a78d6; --good-text: #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --accent: #3987e5; --good-text: #0ca30c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h2 { font-size: 15px; margin: 24px 0 8px; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px;
+           border: 1px solid var(--ring); font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .badge.ok .dot, .badge.idle .dot, .badge.good .dot { background: var(--good); }
+  .badge.running .dot { background: var(--accent); }
+  .badge.timeout .dot, .badge.expired .dot, .badge.stopping .dot { background: var(--warning); }
+  .badge.error .dot { background: var(--serious); }
+  .badge.poisoned .dot, .badge.bad .dot { background: var(--critical); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 8px; padding: 10px 12px; }
+  .tile .label { color: var(--ink-2); font-size: 12px; }
+  .tile .value { font-size: 26px; font-weight: 600; line-height: 1.2; margin-top: 2px; }
+  .tile .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .tile.warn .value { color: var(--serious); }
+  .tile.bad .value { color: var(--critical); }
+  .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 8px; padding: 12px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: nowrap; }
+  td.query { color: var(--ink-2); max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty { color: var(--muted); padding: 8px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin-top: 6px; }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; background: var(--c); }
+  svg { display: block; width: 100%; height: 140px; }
+  .tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--ring);
+         border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); display: none; z-index: 2; }
+  .controls { margin-left: auto; display: flex; gap: 12px; align-items: center; font-size: 13px; color: var(--ink-2); }
+  .err { color: var(--critical); }
+  .cols { display: grid; grid-template-columns: 1fr; gap: 16px; }
+  @media (min-width: 900px) { .cols.two { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Gandalf status</h1>
+    <span id="mode" class="badge"><span class="dot"></span><span>…</span></span>
+    <span id="generated" class="meta"></span>
+    <span id="error" class="meta err"></span>
+    <div class="controls">
+      <label><input type="checkbox" id="auto" checked> auto-refresh (5s)</label>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <section id="tiles" class="tiles"></section>
+
+  <section id="queue-section">
+    <h2>Jobs per minute, last hour</h2>
+    <div class="card">
+      <svg id="chart" viewBox="0 0 1000 140" preserveAspectRatio="none" role="img" aria-label="Jobs finished per minute over the last hour, by outcome"></svg>
+      <div class="legend">
+        <span style="--c: var(--good)">✓ ok</span>
+        <span style="--c: var(--warning)">⏱ timed out</span>
+        <span style="--c: var(--critical)">✕ failed</span>
+      </div>
+    </div>
+
+    <h2>Workers</h2>
+    <div class="card"><table id="workers"></table></div>
+
+    <h2>Recent jobs</h2>
+    <div class="card"><table id="jobs"></table></div>
+
+    <div class="cols two">
+      <div>
+        <h2>In flight (delivered, not acknowledged)</h2>
+        <div class="card"><table id="pending"></table></div>
+      </div>
+      <div>
+        <h2>Dead letters</h2>
+        <div class="card"><table id="dead"></table></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="cols two">
+    <div>
+      <h2>Requests to this pod</h2>
+      <div class="card"><table id="http"></table></div>
+    </div>
+    <div>
+      <h2>This process</h2>
+      <div class="card"><table id="server"></table></div>
+    </div>
+  </div>
+</main>
+<div id="tip" class="tip"></div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+  const fmtN = (n) => n == null ? "–" : Number(n).toLocaleString();
+  const fmtS = (s) => s == null ? "–" : s < 10 ? s.toFixed(2) + "s" : s < 120 ? s.toFixed(1) + "s" : s < 7200 ? (s / 60).toFixed(1) + "m" : (s / 3600).toFixed(1) + "h";
+  const fmtB = (b) => b == null ? "–" : b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : b < 1073741824 ? (b / 1048576).toFixed(1) + " MB" : (b / 1073741824).toFixed(2) + " GB";
+  const fmtT = (epoch) => epoch == null ? "–" : new Date(epoch * 1000).toLocaleTimeString();
+  const ago = (s) => s == null ? "–" : s < 60 ? Math.round(s) + "s ago" : fmtS(s) + " ago";
+  const badge = (kind, text) => `<span class="badge ${esc(kind)}"><span class="dot"></span>${esc(text || kind)}</span>`;
+  const outcomeIcon = {ok: "✓", timeout: "⏱", expired: "⏱", error: "✕", poisoned: "☠"};
+  const outcome = (o) => badge(o, (outcomeIcon[o] || "") + " " + o);
+  const querySummary = (q) => {
+    if (!q) return "";
+    const parts = [`${q.nodes}n/${q.edges}e`];
+    if (q.ids && q.ids.length) parts.push(q.ids.join(", "));
+    if (q.predicates && q.predicates.length) parts.push(q.predicates.map((p) => p.replace("biolink:", "")).join(", "));
+    if (q.timeout != null) parts.push("t=" + q.timeout + "s");
+    return parts.join(" · ");
+  };
+  const table = (el, headers, rows, empty) => {
+    if (!rows.length) { el.innerHTML = `<tr><td class="empty">${esc(empty)}</td></tr>`; return; }
+    el.innerHTML = "<thead><tr>" + headers.map((h) => `<th class="${h.num ? "num" : ""}">${esc(h.label)}</th>`).join("") + "</tr></thead>" +
+      "<tbody>" + rows.map((r) => "<tr>" + r.join("") + "</tr>").join("") + "</tbody>";
+  };
+  const td = (v, cls) => `<td class="${cls || ""}">${v}</td>`;
+
+  function tiles(d) {
+    const out = [];
+    const tile = (label, value, sub, cls) => out.push(`<div class="tile ${cls || ""}"><div class="label">${esc(label)}</div><div class="value">${value}</div><div class="sub">${sub || ""}</div></div>`);
+    if (d.queue) {
+      const q = d.queue, w = d.workers || {alive: 0, busy: 0}, h = d.jobs && d.jobs.windows["1h"];
+      tile("Waiting for a worker", fmtN(q.lag), "stream lag · the scaling signal", q.lag > w.alive ? "warn" : "");
+      tile("Running", fmtN(q.pending), q.oldest_pending_s > 0 ? "oldest " + fmtS(q.oldest_pending_s) : "delivered, not acknowledged");
+      tile("Workers", `${fmtN(w.busy)}<span class="meta"> / ${fmtN(w.alive)}</span>`, "busy / alive", w.alive === 0 ? "bad" : "");
+      if (h) {
+        tile("Jobs, last hour", fmtN(h.jobs), h.per_minute.toFixed(2) + " / min");
+        tile("Failed, last hour", fmtN(h.failed), `${fmtN(h.outcomes.timeout + h.outcomes.expired)} timed out`, h.failed ? "bad" : "");
+        tile("Duration p95, 1h", fmtS(h.duration_p95_s), "p50 " + fmtS(h.duration_p50_s) + " · max " + fmtS(h.duration_max_s));
+        tile("Queue wait p95, 1h", fmtS(h.wait_p95_s), "p50 " + fmtS(h.wait_p50_s), h.wait_p95_s > 30 ? "warn" : "");
+      }
+      tile("Dead letters", fmtN(q.dead_letters), "jobs that killed a worker", q.dead_letters ? "bad" : "");
+    } else {
+      tile("Mode", "in-process", "queries run inside this process");
+    }
+    const s = d.server;
+    tile("Anon RSS, this process", fmtB(s.rss_anon_kb * 1024), "RSS " + fmtB(s.rss_kb * 1024));
+    if (s.graph) tile("Graph", fmtN(s.graph.nodes) + "<span class=\"meta\"> nodes</span>", fmtN(s.graph.edges) + " edges");
+    $("tiles").innerHTML = out.join("");
+  }
+
+  function chart(buckets) {
+    const svg = $("chart");
+    const W = 1000, H = 140, top = 8, bottom = 18, left = 28;
+    const n = buckets.length, slot = (W - left) / n, bar = Math.max(2, slot - 2);
+    const max = Math.max(1, ...buckets.map((b) => b.ok + b.timed_out + b.failed));
+    const y = (v) => top + (H - top - bottom) * (1 - v / max);
+    let s = `<line x1="${left}" y1="${y(0)}" x2="${W}" y2="${y(0)}" stroke="var(--axis)" stroke-width="1"/>`;
+    s += `<text x="${left - 4}" y="${top + 10}" text-anchor="end" font-size="11" fill="var(--muted)">${max}</text>`;
+    s += `<text x="${left - 4}" y="${y(0)}" text-anchor="end" font-size="11" fill="var(--muted)">0</text>`;
+    buckets.forEach((b, i) => {
+      const x = left + i * slot + 1;
+      let base = 0;
+      [["ok", "var(--good)"], ["timed_out", "var(--warning)"], ["failed", "var(--critical)"]].forEach(([k, c]) => {
+        if (!b[k]) return;
+        const y1 = y(base + b[k]), y0 = y(base) - (base ? 2 : 0);
+        s += `<rect x="${x}" y="${y1}" width="${bar}" height="${Math.max(0, y0 - y1)}" fill="${c}" rx="2"/>`;
+        base += b[k];
+      });
+      s += `<rect class="hit" data-i="${i}" x="${x - 1}" y="${top}" width="${slot}" height="${H - top - bottom}" fill="transparent"/>`;
+      if (i % 10 === 0 || i === n - 1) {
+        const last = i === n - 1;  // the newest minute's label hugs the right edge, inside the plot
+        s += `<text x="${last ? W - 2 : x}" y="${H - 4}" font-size="11" text-anchor="${last ? "end" : "start"}" fill="var(--muted)">${fmtT(b.minute).replace(/:\d\d( |$)/, "$1")}</text>`;
+      }
+    });
+    svg.innerHTML = s;
+    const tip = $("tip");
+    svg.querySelectorAll(".hit").forEach((r) => {
+      r.addEventListener("mousemove", (e) => {
+        const b = buckets[+r.dataset.i];
+        tip.innerHTML = `<b>${fmtT(b.minute)}</b><br>✓ ok ${b.ok} · ⏱ timed out ${b.timed_out} · ✕ failed ${b.failed}`;
+        tip.style.display = "block"; tip.style.left = (e.clientX + 12) + "px"; tip.style.top = (e.clientY + 12) + "px";
+      });
+      r.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+    });
+  }
+
+  function render(d) {
+    $("mode").className = "badge " + (d.mode === "queue" ? "ok" : "idle");
+    $("mode").lastElementChild.textContent = d.mode + " mode";
+    $("generated").textContent = "as of " + new Date(d.generated_at).toLocaleTimeString();
+    tiles(d);
+    $("queue-section").style.display = d.queue ? "" : "none";
+    if (d.queue) {
+      chart(d.jobs ? d.jobs.per_minute : []);
+      const w = (d.workers && d.workers.reports) || [];
+      table($("workers"), [{label: "Worker"}, {label: "State"}, {label: "Current job"}, {label: "Query"}, {label: "Running for", num: true}, {label: "Done", num: true}, {label: "Last outcome"}, {label: "Anon RSS", num: true}, {label: "Seen", num: true}],
+        w.map((r) => [td(esc(r.name), "mono"), td(badge(r.stopping === "true" ? "stopping" : r.state, r.stopping === "true" ? "stopping" : r.state)),
+          td(r.job_id ? esc(r.job_id.slice(0, 8)) + (r.job_deliveries > 1 ? ` <span class="meta">(attempt ${esc(r.job_deliveries)})</span>` : "") : "", "mono"),
+          td(esc(querySummary(r.job_query)), "query"), td(r.job_elapsed_s != null ? fmtS(r.job_elapsed_s) : "", "num"),
+          td(fmtN(r.jobs_done) + (r.max_jobs ? `<span class="meta"> / ${fmtN(r.max_jobs)}</span>` : ""), "num"),
+          td(r.last_outcome ? outcome(r.last_outcome) : ""), td(fmtB(r.rss_anon_kb * 1024), "num"), td(ago(r.age_s), "num")]),
+        "No worker has reported. Start one with: python -m gandalf.worker");
+      const jobs = (d.jobs && d.jobs.recent) || [];
+      table($("jobs"), [{label: "Finished"}, {label: "Job"}, {label: "Mode"}, {label: "Outcome"}, {label: "Waited", num: true}, {label: "Ran", num: true}, {label: "Size", num: true}, {label: "Worker"}, {label: "Query"}],
+        jobs.map((j) => [td(fmtT(j.finished_at)), td(esc(j.job_id.slice(0, 8)), "mono"), td(esc(j.mode)), td(outcome(j.outcome) + (j.deliveries > 1 ? ` <span class="meta">attempt ${esc(j.deliveries)}</span>` : "")),
+          td(fmtS(j.wait_s), "num"), td(fmtS(j.duration_s), "num"), td(fmtB(j.bytes), "num"), td(esc(j.worker || ""), "mono"), td(esc(querySummary(j.query)), "query")]),
+        "No jobs finished yet.");
+      table($("pending"), [{label: "Entry"}, {label: "Worker"}, {label: "Idle", num: true}, {label: "Deliveries", num: true}],
+        d.queue.pending_entries.map((p) => [td(esc(p.entry_id), "mono"), td(esc(p.consumer), "mono"), td(fmtS(p.idle_s), "num"), td(fmtN(p.deliveries), "num")]),
+        "Nothing in flight.");
+      table($("dead"), [{label: "When"}, {label: "Job"}, {label: "Mode"}, {label: "Deliveries", num: true}, {label: "Query"}],
+        d.queue.recent_dead_letters.map((x) => [td(fmtT(x.dead_at)), td(esc(x.job_id.slice(0, 8)), "mono"), td(esc(x.mode)), td(fmtN(x.deliveries), "num"), td(esc(querySummary(x.query)), "query")]),
+        "None. A dead letter is a job that killed the worker running it, twice.");
+    }
+    table($("http"), [{label: "Route"}, {label: "Status"}, {label: "Count", num: true}],
+      d.http.map((r) => [td(esc(r.method + " " + r.route), "mono"), td(badge(r.status.startsWith("2") ? "ok" : r.status.startsWith("5") ? "error" : "timeout", r.status)), td(fmtN(r.count), "num")]),
+      "No requests counted yet.");
+    const s = d.server, rows = [["Version", esc(s.version)], ["infores", esc(s.infores)], ["Biolink", esc(s.biolink_version)], ["PID", esc(s.pid)],
+      ["Graph", s.graph ? `${esc(s.graph.path)} · ${fmtN(s.graph.nodes)} nodes · ${fmtN(s.graph.edges)} edges` : badge("bad", "not loaded")]];
+    if (d.queue) rows.push(["Stream", `${esc(d.queue.stream)} · group ${esc(d.queue.group)} · ${fmtN(d.queue.length)} entries`]);
+    table($("server"), [{label: ""}, {label: ""}], rows.map(([k, v]) => [td(k, "meta"), td(v)]), "");
+  }
+
+  let timer = null;
+  async function load() {
+    try {
+      const resp = await fetch("status.json", {cache: "no-store"});
+      if (!resp.ok) throw new Error(resp.status + " " + resp.statusText);
+      render(await resp.json());
+      $("error").textContent = "";
+    } catch (e) {
+      $("error").textContent = "could not load status.json: " + e.message;
+    }
+  }
+  function schedule() {
+    clearInterval(timer);
+    if ($("auto").checked) timer = setInterval(() => { if (!document.hidden) load(); }, 5000);
+  }
+  $("auto").addEventListener("change", schedule);
+  $("refresh").addEventListener("click", load);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+  load(); schedule();
+})();
+</script>
+</body>
+</html>

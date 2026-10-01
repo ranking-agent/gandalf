@@ -290,6 +290,7 @@ gunicorn gandalf.server:APP -c gunicorn.conf.py
 | `GET` | `/health` | Liveness: the process answers |
 | `GET` | `/ready` | Readiness: the graph is open and, in queue mode, Redis answers (503 otherwise) |
 | `GET` | `/metrics` | Prometheus metrics |
+| `GET` | `/status` | Live status page: queue, workers, recent jobs, this pod (`/status.json` has the data) |
 
 Both `/query` and `/asyncquery` accept a single optional query parameter:
 - `?profile=true` — Emit per-stage timing diagnostics into `message.logs`
@@ -395,6 +396,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_QUEUE_SYNC_GRACE_SECONDS` | `30` | Added to the query's timeout for the worker's own Timeout response to arrive |
 | `GANDALF_RESULT_TTL_SECONDS` | `900` | How long an uncollected `/query` result lives in Redis |
 | `GANDALF_RESULT_CHUNK_BYTES` | `67108864` | Largest value written to one Redis key |
+| `GANDALF_HISTORY_MAXLEN` | `2000` | Finished jobs the status page's history keeps |
 | `GANDALF_WORKER_NAME` | `<hostname>-<pid>` | The worker's consumer name |
 | `GANDALF_WORKER_MAX_JOBS` | `500` | A worker exits after this many jobs (0 = never) |
 | `GANDALF_WORKER_METRICS_PORT` | `9100` | Worker Prometheus port (0 = off) |
@@ -519,6 +521,26 @@ Metrics are on `/metrics` of the API (aggregated across gunicorn workers via
 each worker: request counts and latencies by route, jobs by outcome, job
 duration, queue wait, result size, the worker's anonymous RSS, and the
 stream's lag and pending counts.
+
+### The status page
+
+`GET /status` on any API pod is a live view of the whole deployment, built
+from what the processes report into Redis rather than from Kubernetes,
+Prometheus or Jaeger -- so it works for anyone who can reach the API:
+
+- how many jobs are waiting for a worker (the scaling signal), running, and
+  dead-lettered;
+- every worker: idle or running what, for how long, jobs done, last
+  outcome, memory, last seen;
+- the recent jobs with outcome, queue wait, run time and size, and a
+  jobs-per-minute chart with p50/p95 latencies over the last 5 minutes,
+  hour and day;
+- this pod's request counts by route and its memory.
+
+`GET /status.json` is the data behind it.  The page is one self-contained
+HTML file (`gandalf/static/status.html`) that polls `status.json` every
+five seconds; nothing is fetched from outside the server.  Without a queue
+it shows the in-process sections only.
 
 `docker compose --profile queue up --build` runs the API, a Redis and one
 worker locally with `GANDALF_QUEUE_URL=redis://redis:6379/0`.

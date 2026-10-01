@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -49,13 +50,16 @@ from gandalf.metrics import (
     metrics_registry,
     rss_anon_kb,
 )
-from gandalf.queue import (
+from gandalf.jobs import (
     Delivery,
     Job,
+    JobHistory,
     JobQueue,
     ResultStore,
+    WorkerRegistry,
     default_consumer_name,
     keepalive,
+    summarize_query,
 )
 from gandalf.trapi import error_response, timeout_response
 
@@ -76,6 +80,8 @@ class Worker:
             checks for shutdown and refreshes the heartbeat.
         keepalive_seconds: How often a running job's idle time is refreshed.
         heartbeat_file: Touched to show the process is alive, or ``""``.
+        registry: Where this worker reports its state for the status page.
+        history: Where finished jobs are recorded for the status page.
     """
 
     def __init__(
@@ -90,6 +96,8 @@ class Worker:
         block_seconds: float = 5.0,
         keepalive_seconds: float = 30.0,
         heartbeat_file: str = "",
+        registry: Optional[WorkerRegistry] = None,
+        history: Optional[JobHistory] = None,
     ):
         self.graph = graph
         self.bmt = bmt
@@ -100,7 +108,12 @@ class Worker:
         self.block_seconds = block_seconds
         self.keepalive_seconds = keepalive_seconds
         self.heartbeat_file = Path(heartbeat_file) if heartbeat_file else None
+        self.registry = registry
+        self.history = history
         self.jobs_done = 0
+        self.started_at = time.time()
+        self.last_outcome = ""
+        self._current: dict = {}  # the running job's report fields
         self._stop = threading.Event()
 
     def stop(self) -> None:
@@ -113,9 +126,28 @@ class Worker:
         return self._stop.is_set()
 
     def heartbeat(self) -> None:
-        """Record that the process is alive."""
+        """Record that the process is alive: the file, and the registry."""
         if self.heartbeat_file is not None:
             self.heartbeat_file.touch()
+        self.report()
+
+    def report(self) -> None:
+        """Tell the registry what this worker is doing right now."""
+        if self.registry is None:
+            return
+        self.registry.report(
+            self.consumer,
+            host=socket.gethostname(),
+            pid=os.getpid(),
+            started_at=self.started_at,
+            state="running" if self._current else "idle",
+            jobs_done=self.jobs_done,
+            max_jobs=self.max_jobs,
+            last_outcome=self.last_outcome,
+            rss_anon_kb=rss_anon_kb(),
+            stopping=self.stopping,
+            **self._current,
+        )
 
     def run(self) -> int:
         """Consume jobs until stopped or ``max_jobs`` is reached.
@@ -141,6 +173,8 @@ class Worker:
             delivery = self.queue.receive(self.consumer, self.block_seconds)
             if delivery is not None:
                 self.handle(delivery)
+        if self.registry is not None:
+            self.registry.forget(self.consumer)
         return self.jobs_done
 
     def handle(self, delivery: Delivery) -> str:
@@ -151,7 +185,17 @@ class Worker:
         """
         job = delivery.job
         request_id_var.set(job.request_id or job.job_id[:8])
-        JOB_QUEUE_WAIT.observe(job.elapsed())
+        started_at = time.time()
+        wait_s = job.elapsed()
+        JOB_QUEUE_WAIT.observe(wait_s)
+        self._current = {
+            "job_id": job.job_id,
+            "job_mode": job.mode,
+            "job_started_at": started_at,
+            "job_query": summarize_query(job.query),
+            "job_deliveries": delivery.deliveries,
+        }
+        self.report()
         logger.info(
             "job %s start mode=%s waited=%.1fs deliveries=%d",
             job.job_id,
@@ -184,8 +228,29 @@ class Worker:
         self.deliver(job, body, http_status)
         self.queue.ack(delivery.entry_id)
         self.jobs_done += 1
+        self.last_outcome = outcome
+        self._current = {}
         JOBS.labels(outcome).inc()
         PROCESS_RSS_ANON_BYTES.set(rss_anon_kb() * 1024)
+        finished_at = time.time()
+        if self.history is not None:
+            self.history.record(
+                job_id=job.job_id,
+                request_id=job.request_id,
+                mode=job.mode,
+                outcome=outcome,
+                http_status=http_status,
+                worker=self.consumer,
+                deliveries=delivery.deliveries,
+                accepted_at=job.accepted_at,
+                started_at=started_at,
+                finished_at=finished_at,
+                wait_s=wait_s,
+                duration_s=finished_at - started_at,
+                bytes=len(body),
+                query=summarize_query(job.query),
+            )
+        self.report()
         logger.info(
             "job %s end outcome=%s status=%d bytes=%d",
             job.job_id,
@@ -258,6 +323,8 @@ def main() -> int:
         block_seconds=settings.queue_block_seconds,
         keepalive_seconds=settings.queue_keepalive_seconds,
         heartbeat_file=settings.worker_heartbeat_file,
+        registry=WorkerRegistry.from_settings(client),
+        history=JobHistory.from_settings(client),
     )
     if settings.worker_metrics_port:
         # The image sets PROMETHEUS_MULTIPROC_DIR for the API's gunicorn

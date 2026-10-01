@@ -52,7 +52,15 @@ from gandalf.metrics import (
     rss_anon_kb,
     rss_kb,
 )
-from gandalf.queue import Job, JobQueue, ResultStore, StoredResult
+from gandalf.jobs import (
+    Job,
+    JobHistory,
+    JobQueue,
+    ResultStore,
+    StoredResult,
+    WorkerRegistry,
+)
+from gandalf.status import snapshot
 from translator_tom import TOMBase
 from translator_tom.model_dicts import QueryDict
 
@@ -248,6 +256,8 @@ if not _SKIP_PRELOAD:
 # fork.  Both stay None in in-process mode.
 QUEUE: Optional[JobQueue] = None
 RESULTS: Optional[ResultStore] = None
+WORKERS: Optional[WorkerRegistry] = None
+HISTORY: Optional[JobHistory] = None
 
 
 # ---------------------------------------------------------------------------
@@ -257,12 +267,14 @@ RESULTS: Optional[ResultStore] = None
 
 def open_queue() -> None:
     """Connect this process to the configured job queue (no-op without one)."""
-    global QUEUE, RESULTS
+    global QUEUE, RESULTS, WORKERS, HISTORY
     if not settings.queue_url or QUEUE is not None:
         return
     client = redis.Redis.from_url(settings.queue_url)
     QUEUE = JobQueue.from_settings(client)
     RESULTS = ResultStore.from_settings(client)
+    WORKERS = WorkerRegistry.from_settings(client)
+    HISTORY = JobHistory.from_settings(client)
     QUEUE.ensure_group()
     logger.info(
         "Queue mode: jobs go to %s on %s", settings.queue_stream, settings.queue_url
@@ -530,6 +542,29 @@ def metrics() -> Response:
             QUEUE_PENDING.set(stats.pending)
     body, content_type = metrics_payload()
     return Response(content=body, media_type=content_type)
+
+
+# ---------------------------------------------------------------------------
+# Status page
+# ---------------------------------------------------------------------------
+
+_STATUS_PAGE = (STATIC_DIR / "status.html").read_text(encoding="utf-8")
+
+
+@APP.get("/status", include_in_schema=False)
+async def status_page() -> HTMLResponse:
+    """The live status page: queue, workers, recent jobs, this pod.
+
+    Self-contained HTML that polls ``status.json`` (relative, so it works
+    behind any path prefix) and needs nothing outside this server.
+    """
+    return HTMLResponse(_STATUS_PAGE)
+
+
+@APP.get("/status.json", include_in_schema=False)
+def status_json(recent: int = Query(50, ge=1, le=500)) -> dict:
+    """The data behind ``/status``; see :mod:`gandalf.status`."""
+    return snapshot(GRAPH, QUEUE, WORKERS, HISTORY, recent=recent)
 
 
 # ---------------------------------------------------------------------------
