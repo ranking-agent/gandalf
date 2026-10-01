@@ -1,5 +1,6 @@
 """Tests for subclass reasoning feature."""
 
+import json
 import os
 
 import pytest
@@ -660,3 +661,77 @@ def test_inferred_edge_runs_the_way_its_base_edge_is_stored(
         )
     for edge in treats:
         assert (edge["subject"], edge["object"]) == ("CHEBI:6801", "MONDO:0005015")
+
+
+@pytest.fixture
+def self_loop_graph(tmp_path):
+    """A gene under two families that affects itself: its only edge is a
+    self-loop, so the stored direction cannot be told from the IDs."""
+    nodes = [
+        {"id": node_id, "name": node_id, "category": ["biolink:Gene"]}
+        for node_id in ("TEST:family_p", "TEST:family_q", "TEST:gene")
+    ]
+    edges = [
+        ("sc_p", "TEST:gene", "biolink:subclass_of", "TEST:family_p"),
+        ("sc_q", "TEST:gene", "biolink:subclass_of", "TEST:family_q"),
+        ("loop", "TEST:gene", "biolink:affects", "TEST:gene"),
+    ]
+    edges_file = tmp_path / "edges.jsonl"
+    nodes_file = tmp_path / "nodes.jsonl"
+    nodes_file.write_text("".join(json.dumps(n) + "\n" for n in nodes))
+    edges_file.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "id": edge_id,
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": obj,
+                    "primary_knowledge_source": "infores:test",
+                }
+            )
+            + "\n"
+            for edge_id, subject, predicate, obj in edges
+        )
+    )
+    return build_graph_from_jsonl(str(edges_file), str(nodes_file))
+
+
+@pytest.mark.parametrize(
+    "predicate, expected",
+    [
+        ("biolink:affects", ("TEST:family_p", "TEST:family_q")),
+        ("biolink:affected_by", ("TEST:family_q", "TEST:family_p")),
+    ],
+)
+def test_inferred_edge_from_a_self_loop_follows_the_match(
+    self_loop_graph, bmt, predicate: str, expected: tuple[str, str]
+) -> None:
+    """``family_p --affected_by--> family_q`` asks whether family_q affects
+    family_p.  The gene's self-loop answers it through its inverse, so the
+    inferred edge must read family_q affects family_p, even though the loop's
+    stored subject and object are the same node."""
+    query = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["TEST:family_p"]},
+                    "n1": {"ids": ["TEST:family_q"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": [predicate],
+                    },
+                },
+            },
+        },
+    }
+
+    response = lookup(self_loop_graph, query, bmt=bmt, subclass=True)
+    inferred = _inferred_edges(response)
+    assert inferred, "expected an inferred edge through the gene's self-loop"
+    for edge in inferred.values():
+        assert edge["predicate"] == "biolink:affects"
+        assert (edge["subject"], edge["object"]) == expected

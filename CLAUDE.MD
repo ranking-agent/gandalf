@@ -126,8 +126,9 @@ ways, and the split between them is deliberate:
    assignment types a value without one.)  mypy (which CI runs) catches
    binding-shape mistakes, nulls where 2.0 admits none, and misspelled
    properties.  Two gandalf-specific subclasses live in `gandalf/trapi.py`:
-   `InFlightEdge` (an Edge plus the `_edge_id` / `_query_*` markers stripped
-   before serialization) and `GandalfParametersDict`.
+   `InFlightEdge` (an Edge plus the `_edge_id` / `_query_*` /
+   `_matched_inverse` markers stripped before serialization) and
+   `GandalfParametersDict`.
 3. **Conformance tests** (`tests/test_trapi_conformance.py`): every response
    shape except dehydrated (see below) is validated against TOM *and* checked
    to round-trip byte-identically through `to_json()`.  The round-trip is the

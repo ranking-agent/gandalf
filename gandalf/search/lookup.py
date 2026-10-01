@@ -1515,8 +1515,12 @@ def _build_response(
                     # inferred composite edges.  edge["subject"]/["object"]
                     # follow stored direction (swapped for inverse edges),
                     # but superclass_node_overrides uses query direction.
+                    # Whether the edge was matched through its inverse says
+                    # which stored end each query end is; comparing IDs can't
+                    # tell for a self-loop.
                     edge_props["_query_subject"] = node_id_cache[query_subj_idx]
                     edge_props["_query_object"] = node_id_cache[query_obj_idx]
+                    edge_props["_matched_inverse"] = bool(is_inverse)
 
                     edge_bindings_by_qedge[qedge_id].append(edge_props)
                     marked_edges.append(edge_props)
@@ -1618,9 +1622,7 @@ def _build_response(
                             # matched through its inverse is stored the other
                             # way round.
                             subject_end, object_end = "subject", "object"
-                            if edge["subject"] != edge.get(
-                                "_query_subject", edge["subject"]
-                            ):
+                            if edge.get("_matched_inverse"):
                                 subject_end, object_end = "object", "subject"
                             inferred_edge = {
                                 "subject": superclass_node_overrides.get(
@@ -1709,6 +1711,7 @@ def _build_response(
         edge.pop("_edge_id", None)
         edge.pop("_query_subject", None)
         edge.pop("_query_object", None)
+        edge.pop("_matched_inverse", None)
 
     t_built = time.perf_counter()
     logger.debug(
