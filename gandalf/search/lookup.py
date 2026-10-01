@@ -248,6 +248,13 @@ def _lookup_inner(
     query_graph = copy.deepcopy(original_query_graph)
     subqgraph = copy.deepcopy(query_graph)
 
+    # Node filters are for the nodes a query leaves open, so the qnodes it
+    # pins are never filtered.  The subclass rewrite below unpins each of
+    # them, keeping its ID, until its subclass edge binds it.
+    pinned_qnodes = {
+        qnode_id for qnode_id, qnode in subqgraph["nodes"].items() if qnode.get("ids")
+    }
+
     # Rewrite query graph for subclass expansion if requested
     if subclass and subqgraph["edges"]:
         with prof.stage("subclass_rewrite", depth=subclass_depth):
@@ -369,6 +376,15 @@ def _lookup_inner(
             start_node_constraints = start_node.get("constraints", [])
             end_node_constraints = end_node.get("constraints", [])
 
+            # query_edge filters only the unpinned end, which may still be a
+            # qnode the query pinned (see pinned_qnodes).
+            unpinned_end = (
+                next_edge["subject"]
+                if start_node_idxes is None
+                else next_edge["object"]
+            )
+            edge_node_filters = [] if unpinned_end in pinned_qnodes else node_filters
+
             # Query for matching edges
             edge_matches = query_edge(
                 graph,
@@ -379,7 +395,7 @@ def _lookup_inner(
                 allowed_predicates,
                 edge_constraints,
                 inverse_predicates=inverse_predicates,
-                node_filters=node_filters,
+                node_filters=edge_node_filters,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
                 logger=logger,

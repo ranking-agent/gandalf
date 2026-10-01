@@ -125,7 +125,8 @@ def query_edge(
             matching. None means don't check inverse direction. Empty list means
             match all predicates in inverse direction (wildcard).
         node_filters: Pre-built list of NodeFilter closures (from
-            ``build_node_filters``). Empty list / None means no filtering.
+            ``build_node_filters``), applied to an unpinned end only. Empty
+            list / None means no filtering.
         start_node_constraints: List of TRAPI AttributeConstraint dicts for
             filtering the start (subject) node by its attributes.
         end_node_constraints: List of TRAPI AttributeConstraint dicts for
@@ -251,7 +252,6 @@ def query_edge(
                 check_inverse,
                 inverse_mask,
                 add_match,
-                node_filters=node_filters,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
                 logger=logger,
@@ -537,7 +537,6 @@ def _query_both_pinned(
     check_inverse,
     inverse_mask,
     add_match,
-    node_filters=None,
     start_node_constraints=None,
     end_node_constraints=None,
     logger: Optional[logging.Logger] = None,
@@ -559,10 +558,12 @@ def _query_both_pinned(
     # in end_set (the vast majority in typical queries).
     end_set = set(end_idxes)
 
-    # Both ends are pinned, so categories are not rechecked: only the node
-    # filters and each end's attribute constraints apply.
-    start_ok = _node_checker(graph, None, node_filters, start_node_constraints)
-    end_ok = _node_checker(graph, None, node_filters, end_node_constraints)
+    # Both ends are pinned, so categories and node filters are not rechecked:
+    # only each end's attribute constraints apply.  An end is pinned either by
+    # the query, whose pinned nodes are never filtered, or by an earlier edge
+    # that discovered it as an unpinned end, where the node filters ran.
+    start_ok = _node_checker(graph, None, None, start_node_constraints)
+    end_ok = _node_checker(graph, None, None, end_node_constraints)
 
     t_neighbors_start = time.perf_counter()
     total_neighbors = 0
