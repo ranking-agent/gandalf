@@ -87,6 +87,47 @@ class Settings(BaseSettings):
     # Empty disables the plugin unless a request supplies its own service_url.
     cooccurrence_service_url: str = ""
 
+    # Queue mode (gandalf/queue.py, gandalf/worker.py).  With queue_url set,
+    # the API enqueues each /query and /asyncquery as a job on a Redis Stream
+    # and separate worker processes execute them; empty runs queries in the
+    # API process as before.
+    queue_url: str = ""  # e.g. "redis://redis:6379/0"
+    queue_stream: str = "gandalf:jobs"
+    queue_group: str = "gandalf-workers"
+    queue_dead_stream: str = "gandalf:jobs:dead"
+    # A job delivered more than this many times (a worker died running it)
+    # is dead-lettered instead of run again.
+    queue_max_deliveries: int = 2
+    # A running job idle in the consumer group for longer than this is taken
+    # over by another worker; workers refresh their job every
+    # queue_keepalive_seconds while it runs, so only a dead worker's job
+    # goes idle.
+    queue_claim_idle_seconds: float = 120.0
+    queue_keepalive_seconds: float = 30.0
+    # How long a worker blocks waiting for a job before checking for
+    # shutdown and refreshing its liveness heartbeat.
+    queue_block_seconds: float = 5.0
+    # How long /query waits for a worker's answer: the client's
+    # parameters.timeout plus queue_sync_grace_seconds (for the worker's
+    # own Timeout response to arrive), or queue_sync_max_wait_seconds when
+    # the query has no timeout.
+    queue_sync_max_wait_seconds: float = 1800.0
+    queue_sync_grace_seconds: float = 30.0
+    # Results of /query jobs are stored zstd-compressed in Redis, in chunks
+    # (Redis caps a value at 512 MB), until the API collects them.
+    result_ttl_seconds: int = 900
+    result_chunk_bytes: int = 64 * 1024 * 1024
+
+    # Worker process (python -m gandalf.worker)
+    worker_name: str = ""  # consumer name; default "<hostname>-<pid>"
+    # Exit after this many jobs so Kubernetes restarts the process and
+    # returns the memory glibc holds after large queries (0 = never).
+    worker_max_jobs: int = 500
+    # Prometheus /metrics port for the worker (0 = disabled).
+    worker_metrics_port: int = 9100
+    # Touched on every loop iteration; a liveness probe checks its age.
+    worker_heartbeat_file: str = "/tmp/gandalf-worker-heartbeat"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="gandalf_",

@@ -13,8 +13,37 @@ services:
       GANDALF_OTEL_ENABLED: ${GANDALF_OTEL_ENABLED:-true}
       GANDALF_JAEGER_HOST: ${GANDALF_JAEGER_HOST:-http://jaeger}
       GANDALF_JAEGER_PORT: ${GANDALF_JAEGER_PORT:-4317}
+      # Queue mode (`docker compose --profile queue up`): queries run in the
+      # worker service below instead of in this process.  Leave empty to
+      # run them in-process.
+      GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-}
     volumes:
       # Host directory holding the built graph; override with GANDALF_GRAPH_DIR.
+      - ${GANDALF_GRAPH_DIR:-./graph}:/data/graph:ro
+    networks:
+      - shepherd
+
+  # --- Queue mode -----------------------------------------------------------
+  # docker compose --profile queue up --build
+  # with GANDALF_QUEUE_URL=redis://redis:6379/0 in the environment or .env.
+  redis:
+    image: redis:7-alpine
+    profiles: [queue]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - shepherd
+
+  worker:
+    image: gandalf
+    profiles: [queue]
+    command: ["python", "-m", "gandalf.worker"]
+    restart: unless-stopped
+    depends_on: [redis]
+    environment:
+      GANDALF_GRAPH_PATH: /data/graph
+      GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://redis:6379/0}
+      GANDALF_OTEL_ENABLED: "false"
+    volumes:
       - ${GANDALF_GRAPH_DIR:-./graph}:/data/graph:ro
     networks:
       - shepherd

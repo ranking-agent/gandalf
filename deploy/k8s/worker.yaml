@@ -1,0 +1,73 @@
+# The query executors.  One job at a time per pod; KEDA (keda.yaml) sets
+# the replica count from the stream's lag, so `replicas` here is only the
+# starting point.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gandalf-worker
+  labels: {app: gandalf, tier: worker}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: gandalf, tier: worker}
+  template:
+    metadata:
+      labels: {app: gandalf, tier: worker}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
+    spec:
+      # SIGTERM makes the worker finish its current job first; this must
+      # cover one query.  Match it to GANDALF_QUERY_TIMEOUT if you set one.
+      terminationGracePeriodSeconds: 1800
+      containers:
+        - name: worker
+          image: ghcr.io/ranking-agent/gandalf:2.0.0
+          command: ["python", "-m", "gandalf.worker"]
+          ports:
+            - {name: metrics, containerPort: 9100}
+          env:
+            - {name: GANDALF_GRAPH_PATH, value: /data/graph}
+            - {name: GANDALF_LOG_FORMAT, value: json}
+            - {name: GANDALF_QUEUE_URL, value: redis://redis:6379/0}
+            # The pod name makes the consumer name unique and traceable.
+            - name: GANDALF_WORKER_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            # Recycle after this many jobs to return memory glibc holds on
+            # to after large queries (the gunicorn max_requests trick).
+            - {name: GANDALF_WORKER_MAX_JOBS, value: "500"}
+            - {name: GANDALF_WORKER_METRICS_PORT, value: "9100"}
+            - {name: GANDALF_WORKER_HEARTBEAT_FILE, value: /tmp/heartbeat}
+          volumeMounts:
+            - {name: graph, mountPath: /data/graph, readOnly: true}
+          resources:
+            requests: {cpu: "1", memory: 12Gi}
+            # One query's peak anonymous RSS plus page-cache headroom for
+            # the mapped graph.  A query is single-threaded Python, so one
+            # CPU is what it can use.
+            limits: {cpu: "2", memory: 16Gi}
+          readinessProbe:
+            # A worker takes no traffic, but "ready" keeps rollouts honest:
+            # the heartbeat file appears once the graph is open and the
+            # loop has started.
+            exec:
+              command: ["test", "-f", "/tmp/heartbeat"]
+            periodSeconds: 10
+          livenessProbe:
+            # The loop touches the heartbeat every poll and every keepalive
+            # tick while a job runs (GANDALF_QUEUE_KEEPALIVE_SECONDS, 30s),
+            # so a stale heartbeat means the process is wedged.
+            exec:
+              command:
+                - sh
+                - -c
+                - test $(( $(date +%s) - $(stat -c %Y /tmp/heartbeat) )) -lt 120
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: graph
+          persistentVolumeClaim:
+            claimName: gandalf-graph
+            readOnly: true

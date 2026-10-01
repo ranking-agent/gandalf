@@ -1,0 +1,38 @@
+# Scale the worker Deployment on the job stream's lag: entries no worker
+# has taken yet.  Needs the KEDA operator and Redis 7.0+ (XINFO GROUPS lag).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: gandalf-worker
+spec:
+  scaleTargetRef:
+    name: gandalf-worker
+  # Never zero: the first query after an idle spell would otherwise wait for
+  # a pod to schedule and open the graph, and Translator callers time out.
+  minReplicaCount: 1
+  # Bounded by cluster memory: each worker needs its full limit.
+  maxReplicaCount: 8
+  pollingInterval: 15
+  # How long a worker stays after the lag drops.  A new worker is cheap
+  # (the graph is on the shared volume), so this can be short.
+  cooldownPeriod: 300
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - {type: Pods, value: 2, periodSeconds: 30}
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - {type: Pods, value: 1, periodSeconds: 120}
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis:6379
+        stream: gandalf:jobs
+        consumerGroup: gandalf-workers
+        # One job per worker: a lag of 1 is a query with nobody to run it.
+        lagCount: "1"
+        activationLagCount: "0"

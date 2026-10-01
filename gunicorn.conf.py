@@ -1,6 +1,10 @@
 """Gunicorn configuration for GANDALF."""
 
+import os
+import shutil
+
 from gandalf.config import settings
+from gandalf.metrics import multiprocess_dir
 from gandalf.otel import init_otel
 from gandalf.server import APP
 
@@ -37,6 +41,16 @@ errorlog = "-"
 loglevel = settings.log_level.lower()
 
 
+# Prometheus metrics are aggregated across the workers through files in
+# PROMETHEUS_MULTIPROC_DIR (gandalf.metrics).  Start from an empty directory
+# so a previous run's counters do not survive a restart.
+def on_starting(server):
+    directory = multiprocess_dir()
+    if directory:
+        shutil.rmtree(directory, ignore_errors=True)
+        os.makedirs(directory, exist_ok=True)
+
+
 # The OpenTelemetry SDK (OTLP/gRPC exporter channel + batch export thread)
 # must be (re)built post-fork per worker because gRPC channels are not fork-safe
 # so an exporter inherited from one master process won't work with multiple workers.
@@ -49,6 +63,12 @@ def post_fork(server, worker):
 # itself and is skipped when SIGKILL bypasses the worker's finally block.
 def child_exit(server, worker):
     server.log.warning("child_exit pid=%s age=%s", worker.pid, worker.age)
+    if multiprocess_dir():
+        # Retire the dead worker's gauge files so its last values stop
+        # being reported; counters and histograms are kept and summed.
+        from prometheus_client import multiprocess
+
+        multiprocess.mark_process_dead(worker.pid)
 
 
 def worker_abort(worker):

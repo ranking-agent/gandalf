@@ -73,6 +73,10 @@ gandalf/
 │   └── gc_utils.py       # GC monitoring & control
 ├── query_planner.py  # Query optimization
 ├── diagnostics.py    # Path explosion analysis
+├── execute.py        # Query execution shared by the server and the worker
+├── queue.py          # Redis Streams job queue + result store (queue mode)
+├── worker.py         # Queue worker entry point (python -m gandalf.worker)
+├── metrics.py        # Prometheus metrics for both processes
 ├── server.py         # FastAPI application
 └── main.py           # Dev server entry point
 scripts/              # CLI entry points (gandalf-build, gandalf-query, gandalf-diagnose)
@@ -304,10 +308,45 @@ computed per query.  When changing a serialization rule, check which side it
 lands on -- a fix applied only in the loader will not reach an already-built
 graph.
 
+## Queue mode
+
+With `GANDALF_QUEUE_URL` set, `server.py` does not run queries: it
+validates them (`_prepare_query`, unchanged) and enqueues a
+`gandalf.queue.Job` on a Redis Stream; `gandalf.worker` processes consume
+through a consumer group and run them.  Rules that follow:
+
+- **One execution path.**  `gandalf.execute.run_query` /
+  `execute_to_bytes` is what the in-process `/query`, the in-process
+  `/asyncquery` background task and the worker all call.  A change to how
+  a query runs goes there, never into one of the callers, so the bytes a
+  client gets do not depend on which process produced them.
+- **The job carries an absolute deadline.**  `Job.accepted_at` plus
+  `budget` -- the worker rebuilds the `Deadline` with
+  `Deadline.started_ago`, so queue wait counts against
+  `parameters.timeout`, and a job that expires in the queue is answered
+  with `timeout_response` without being run.
+- **Ack after delivery, never before.**  `Worker.handle` acknowledges the
+  stream entry only once the result is stored or the callback POSTed.  A
+  dead worker's job is re-delivered (`XAUTOCLAIM` after
+  `queue_claim_idle_seconds`; a running worker `touch`es its job every
+  `queue_keepalive_seconds`), and one over `queue_max_deliveries` is
+  dead-lettered and answered with `error_response` -- the poison case, a
+  query that OOM-kills whatever runs it.
+- **Results do not go through the stream.**  `/query` results go to the
+  `ResultStore` (zstd, chunked under Redis's 512 MB value cap, with a TTL);
+  async results go straight to the callback.
+- **Tests against a real Redis** live in `tests/test_queue_redis.py`
+  under the `integration` marker (they start a local `redis-server`, or
+  use `GANDALF_TEST_REDIS_URL`); CI runs them with a Redis service.  The
+  hermetic suite covers everything that does not need Redis
+  (`tests/test_health_metrics.py`).
+
 ## API Endpoints
 
 - `POST /query` - Synchronous path finding (TRAPI format)
 - `POST /asyncquery` - Async query with callback
+- `GET /health`, `GET /ready` - liveness / readiness (503 until the graph is open and, in queue mode, Redis answers)
+- `GET /metrics` - Prometheus metrics (`gandalf/metrics.py`)
 - `GET /docs` - Swagger UI
 
 ## Data Formats

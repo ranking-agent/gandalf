@@ -1,6 +1,5 @@
 """GANDALF — Plater-compatible TRAPI server."""
 
-import gc
 import logging
 import os
 import time
@@ -10,9 +9,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional, cast
 
-import httpx
 import orjson
-import psutil
+import redis
 from bmt.toolkit import Toolkit
 from fastapi import (
     BackgroundTasks,
@@ -29,12 +27,32 @@ from fastapi.openapi.docs import (
 )
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.routing import Match
 
-from gandalf import CSRGraph, annotate_response, enrich_knowledge_graph, lookup
+from gandalf import CSRGraph
 from gandalf import otel
-from gandalf.biolink import make_toolkit
 from gandalf.compression import ZstdCompressionMiddleware
+from gandalf.execute import (
+    execute_to_bytes,
+    load_runtime,
+    orjson_default,
+    post_callback,
+    run_query,
+)
 from gandalf.logging_config import configure_logging, request_id_var
+from gandalf.metrics import (
+    HTTP_DURATION,
+    HTTP_REQUESTS,
+    JOBS_ENQUEUED,
+    QUEUE_LAG,
+    QUEUE_PENDING,
+    SYNC_WAIT,
+    SYNC_WAIT_TIMEOUTS,
+    metrics_payload,
+    rss_anon_kb,
+    rss_kb,
+)
+from gandalf.queue import Job, JobQueue, ResultStore, StoredResult
 from translator_tom import TOMBase
 from translator_tom.model_dicts import QueryDict
 
@@ -66,7 +84,6 @@ from gandalf.search.gc_utils import gc_disabled
 from gandalf.trapi import (
     Deadline,
     TimeoutNotSatisfiable,
-    to_fragments,
     finalize_response,
     query_parameters,
     resolve_timeout,
@@ -82,24 +99,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _orjson_default(obj):
-    if isinstance(obj, set):
-        return list(obj)
-    if isinstance(obj, bytes):
-        # Edge attributes' stored JSON, or results written as JSON.  Correct,
-        # but slow per entry: responses convert these up front with
-        # to_fragments; this only catches one that was missed.
-        return orjson.Fragment(obj)
-    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
-
 class CustomORJSONResponse(JSONResponse):
     media_type = "application/json"
 
     def render(self, content: Any) -> bytes:
         t0 = time.perf_counter()
         data: bytes = orjson.dumps(
-            content, default=_orjson_default, option=orjson.OPT_SERIALIZE_NUMPY
+            content, default=orjson_default, option=orjson.OPT_SERIALIZE_NUMPY
         )
         dt_ms = (time.perf_counter() - t0) * 1000
         size_kb = len(data) / 1024
@@ -223,38 +229,6 @@ _rate_limiter = _TokenBucket(settings.rate_limit) if settings.rate_limit > 0 els
 
 
 # ---------------------------------------------------------------------------
-# Graph loading
-# ---------------------------------------------------------------------------
-
-
-def load_graph(path: str, format: str = "auto") -> CSRGraph:
-    """Load graph from disk.
-
-    Args:
-        path: Path to graph directory (mmap format)
-        format: "auto" (detect from path) or "mmap"
-
-    Returns:
-        Loaded CSRGraph
-    """
-    resolved_path = Path(path)
-
-    if format == "auto":
-        if resolved_path.is_dir():
-            format = "mmap"
-        else:
-            raise ValueError(
-                f"Cannot auto-detect format for: {resolved_path}. Expected a directory."
-            )
-
-    if format == "mmap":
-        graph: CSRGraph = CSRGraph.load_mmap(resolved_path)
-        return graph
-    else:
-        raise ValueError(f"Unknown format: {format}")
-
-
-# ---------------------------------------------------------------------------
 # Module-level graph loading (runs once in master with gunicorn --preload,
 # so every forked worker shares graph RAM via Copy-on-Write).
 # ---------------------------------------------------------------------------
@@ -265,29 +239,34 @@ GRAPH: Optional[CSRGraph] = None
 BMT: Optional[Toolkit] = None
 
 if not _SKIP_PRELOAD:
-    logger.info(
-        "Loading graph from %s (format=%s)...",
-        settings.graph_path,
-        settings.graph_format,
-    )
-    GRAPH = load_graph(settings.graph_path, settings.graph_format)
-    logger.info("Initializing Biolink Model Toolkit...")
-    BMT = make_toolkit()
-
-    # Freeze all objects allocated so far (graph + BMT) into a permanent
-    # generation that the cyclic GC will never scan.  This makes Gen 2
-    # collections cheap because they skip the large CSR arrays.
-    gc.collect()
-    gc.freeze()
-    # Raise thresholds so Gen 2 collections are less frequent even for
-    # the (now-small) unfrozen query-time object set.
-    gc.set_threshold(50_000, 50, 50)
+    GRAPH, BMT = load_runtime()
     logger.info("Graph and BMT loaded at module level (PID=%d).", os.getpid())
+
+# Queue mode (GANDALF_QUEUE_URL): the job stream and result store this
+# process enqueues on and waits on.  Opened per worker process in the
+# lifespan rather than at import, so no Redis connection crosses gunicorn's
+# fork.  Both stay None in in-process mode.
+QUEUE: Optional[JobQueue] = None
+RESULTS: Optional[ResultStore] = None
 
 
 # ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
+
+
+def open_queue() -> None:
+    """Connect this process to the configured job queue (no-op without one)."""
+    global QUEUE, RESULTS
+    if not settings.queue_url or QUEUE is not None:
+        return
+    client = redis.Redis.from_url(settings.queue_url)
+    QUEUE = JobQueue.from_settings(client)
+    RESULTS = ResultStore.from_settings(client)
+    QUEUE.ensure_group()
+    logger.info(
+        "Queue mode: jobs go to %s on %s", settings.queue_stream, settings.queue_url
+    )
 
 
 @asynccontextmanager
@@ -297,6 +276,7 @@ async def lifespan(app: FastAPI):
     # Initialize OTel here (per-worker, post-fork) rather than at import; see
     # gandalf.otel.init_otel for why this must not run in a preloaded master.
     otel.init_otel(app)
+    open_queue()
     heartbeat_stop = None
     if settings.automat_host:
         heartbeat_stop = start_heartbeat(settings)
@@ -304,6 +284,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down — releasing resources...")
     if heartbeat_stop is not None:
         heartbeat_stop.set()
+    if QUEUE is not None:
+        QUEUE.client.close()
     if (
         GRAPH is not None
         and hasattr(GRAPH, "lmdb_store")
@@ -340,36 +322,17 @@ if STATIC_DIR.exists():
 # ---------------------------------------------------------------------------
 
 
-def _current_rss_kb() -> int:
-    """Current resident set size in KB. Cross-platform via psutil.
+def _route_template(request: Request) -> str:
+    """The matched route's path template (``/node/{curie}``), for metric labels.
 
-    Constructs psutil.Process() per call rather than caching, so that with
-    gunicorn preload_app=True each worker reads its own RSS instead of the
-    master's PID it inherited at fork time.
+    A per-CURIE path would be one label value per node; the template keeps
+    the cardinality to the number of routes.
     """
-    return int(psutil.Process().memory_info().rss) // 1024
-
-
-def _current_rss_anon_kb() -> int:
-    """Anonymous (private, non-file-backed) RSS in KB.
-
-    Reads RssAnon from /proc/self/status on Linux — this is the precise
-    metric for OOM risk, since file-backed pages (LMDB, .so files) are
-    reclaimable but anon pages are not. Falls back to psutil's USS on
-    non-Linux; USS additionally includes private file mappings, but it's
-    the closest cross-platform approximation.
-    """
-    try:
-        with open("/proc/self/status", "rb") as f:
-            for line in f:
-                if line.startswith(b"RssAnon:"):
-                    return int(line.split()[1])
-    except OSError:
-        pass
-    try:
-        return int(psutil.Process().memory_full_info().uss) // 1024
-    except Exception:
-        return -1
+    for route in APP.router.routes:
+        match, _ = route.matches(request.scope)
+        if match == Match.FULL:
+            return str(getattr(route, "path", request.url.path))
+    return "unmatched"
 
 
 @APP.middleware("http")
@@ -404,8 +367,8 @@ async def request_middleware(request: Request, call_next):
             )
 
     pid = os.getpid()
-    rss_start_kb = _current_rss_kb()
-    anon_start_kb = _current_rss_anon_kb()
+    rss_start_kb = rss_kb()
+    anon_start_kb = rss_anon_kb()
     logger.info(
         "request start pid=%s rss_kb=%s anon_kb=%s %s %s",
         pid,
@@ -417,9 +380,13 @@ async def request_middleware(request: Request, call_next):
 
     t_start = time.monotonic()
     response: Response = await call_next(request)
-    duration_ms = (time.monotonic() - t_start) * 1000
-    rss_end_kb = _current_rss_kb()
-    anon_end_kb = _current_rss_anon_kb()
+    duration_s = time.monotonic() - t_start
+    duration_ms = duration_s * 1000
+    route = _route_template(request)
+    HTTP_REQUESTS.labels(request.method, route, str(response.status_code)).inc()
+    HTTP_DURATION.labels(request.method, route).observe(duration_s)
+    rss_end_kb = rss_kb()
+    anon_end_kb = rss_anon_kb()
 
     def _delta(start: int, end: int) -> int:
         return end - start if start >= 0 and end >= 0 else -1
@@ -506,6 +473,63 @@ async def custom_swagger_ui_html(req: Request) -> HTMLResponse:
         title=APP.title + " - Swagger UI",
         swagger_favicon_url=swagger_favicon_url,
     )
+
+
+# ---------------------------------------------------------------------------
+# Health, readiness, metrics
+# ---------------------------------------------------------------------------
+
+
+@APP.get("/health", include_in_schema=False)
+async def health() -> dict:
+    """Liveness: the process answers HTTP.
+
+    Deliberately checks nothing else.  A worker busy compressing a
+    multi-gigabyte response answers this late, not wrong, so the probe that
+    calls it needs a generous timeout rather than a stricter check here.
+    """
+    return {"status": "ok"}
+
+
+@APP.get("/ready", include_in_schema=False)
+def ready() -> JSONResponse:
+    """Readiness: this process can take a query right now.
+
+    The graph is loaded and, in queue mode, Redis answers.  503 takes the
+    pod out of the Service until it does.
+    """
+    if GRAPH is None:
+        return JSONResponse(status_code=503, content={"status": "graph not loaded"})
+    if settings.queue_url:
+        # Readiness is the one place a Redis failure must become a status
+        # code rather than an exception: the probe reads the code.
+        try:
+            reachable = QUEUE is not None and QUEUE.ping()
+        except redis.RedisError as exc:
+            logger.warning("Readiness: queue unreachable: %s", exc)
+            reachable = False
+        if not reachable:
+            return JSONResponse(
+                status_code=503, content={"status": "queue unreachable"}
+            )
+    return JSONResponse(content={"status": "ready"})
+
+
+@APP.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    """Prometheus metrics for this process (all gunicorn workers, aggregated)."""
+    if QUEUE is not None:
+        # A Redis outage must not fail the scrape: the other metrics are
+        # most wanted exactly then, and /ready already reports the outage.
+        try:
+            stats = QUEUE.stats()
+        except redis.RedisError as exc:
+            logger.warning("Metrics: queue stats unavailable: %s", exc)
+        else:
+            QUEUE_LAG.set(stats.lag)
+            QUEUE_PENDING.set(stats.pending)
+    body, content_type = metrics_payload()
+    return Response(content=body, media_type=content_type)
 
 
 # ---------------------------------------------------------------------------
@@ -606,7 +630,8 @@ _CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
     responses={200: {"model": TRAPIResponse}, **_CONFLICT_RESPONSE},
 )
 def sync_lookup(
-    request: dict = Body(...),
+    request: Request,
+    body: dict = Body(...),
     profile: Optional[bool] = Query(
         None,
         description="Emit per-stage timings into message.logs as ProfileStage / ProfileSummary entries",
@@ -620,27 +645,24 @@ def sync_lookup(
 
     The body is taken as a raw dict and not run through Pydantic validation
     unless ``validate_responses`` is enabled -- see ``_request_dict``.
+
+    In queue mode the query becomes a job for a worker process and this
+    handler waits for its result; otherwise it runs here, on the thread pool.
     """
     otel.record_baggage()
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
 
-    raw = _request_dict(request, TRAPIQuery)
-    params = query_parameters(raw)
+    raw = _request_dict(body, TRAPIQuery)
 
-    # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
-    if params.get("rehydrate") is not None:
-        enrich_knowledge_graph(raw, GRAPH)
-        return _trapi_response(finalize_response({"message": raw["message"]}, raw))
+    # Rehydration enriches the supplied knowledge graph and runs no lookup,
+    # so it has no query graph to validate and no time budget.
+    rehydrate = query_parameters(raw).get("rehydrate") is not None
+    deadline = None if rehydrate else _prepare_query(raw)
 
-    deadline = _prepare_query(raw)
-
-    sc = params.get("subclass", True)
-    subclass_depth = params.get("subclass_depth", 1)
-    dehydrated_param = params.get("dehydrated")
-    filter_config = params.get("filter_config")
-    annotator_config = params.get("annotator_config") or {}
-    profile_param = bool(profile)
+    if QUEUE is not None:
+        accept_encoding = request.headers.get("accept-encoding", "")
+        return _queued_lookup(raw, bool(profile), deadline, accept_encoding)
 
     # Keep GC paused until the response has been serialized and freed.
     # lookup() pauses it too, but lets it resume as it returns; the next
@@ -650,29 +672,80 @@ def sync_lookup(
     # never gets scanned: it holds no reference cycles, so dropping it frees
     # it, and the collection that runs on resuming finds little left.
     with gc_disabled():
-        response = lookup(
+        # Edge attributes served straight from the graph's JSON, and results
+        # written straight to JSON, unless FastAPI is to validate the
+        # response, which needs them as Python objects.
+        response = run_query(
             GRAPH,
+            BMT,
             raw,
-            bmt=BMT,
-            subclass=sc,
-            subclass_depth=subclass_depth,
-            filter_config=filter_config,
-            log_level=params.get("log_level"),
-            dehydrated=dehydrated_param,
-            profile=profile_param,
+            profile=bool(profile),
             deadline=deadline,
-            # Edge attributes served straight from the graph's JSON, and
-            # results written straight to JSON, unless FastAPI is to validate
-            # the response, which needs them as Python objects.
-            attributes_as_json=not _validate,
-            results_as_json=not _validate,
+            as_json=not _validate,
         )
-        if annotator_config:
-            annotate_response(response, GRAPH, annotator_config)
-        to_fragments(response)
         rendered = _trapi_response(response)
         del response
     return rendered
+
+
+def _queued_lookup(
+    raw: QueryDict,
+    profile: bool,
+    deadline: Optional[Deadline],
+    accept_encoding: str,
+) -> Response:
+    """Enqueue a ``/query`` and wait for a worker's answer.
+
+    The wait is the client's time budget plus a grace period for the
+    worker's own Timeout response to arrive, or the configured maximum for a
+    query with no budget.  A result that never comes is a 504: the queue is
+    deeper than the budget allows, which is what the queue lag metric and
+    the autoscaler are there to prevent.
+
+    The result is stored zstd-compressed; a client that accepts zstd gets
+    those bytes as they are, anyone else gets them decompressed here.
+    """
+    assert QUEUE is not None and RESULTS is not None
+    job = Job.new(
+        raw,
+        profile=profile,
+        budget=deadline.budget if deadline is not None else None,
+        request_id=request_id_var.get(""),
+    )
+    QUEUE.enqueue(job)
+    JOBS_ENQUEUED.labels("sync").inc()
+    wait = job.wait_seconds()
+    logger.info("job %s enqueued; waiting up to %.0fs", job.job_id, wait)
+
+    t0 = time.monotonic()
+    result = RESULTS.wait(job.job_id, timeout=wait)
+    SYNC_WAIT.observe(time.monotonic() - t0)
+    if result is None:
+        SYNC_WAIT_TIMEOUTS.inc()
+        raise HTTPException(
+            504,
+            f"Query {job.job_id} did not complete within {wait:.0f}s; "
+            "the queue may be deeper than the requested timeout allows.",
+        )
+    RESULTS.delete(job.job_id)
+    return _stored_response(result, accept_encoding)
+
+
+def _stored_response(result: StoredResult, accept_encoding: str) -> Response:
+    """Answer with a stored result, compressed when the client takes zstd."""
+    if settings.compress_response_enabled and "zstd" in accept_encoding.lower():
+        # The compression middleware leaves an already-encoded body alone.
+        return Response(
+            content=result.compressed,
+            status_code=result.http_status,
+            media_type="application/json",
+            headers={"Content-Encoding": "zstd"},
+        )
+    return Response(
+        content=result.decompress(),
+        status_code=result.http_status,
+        media_type="application/json",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -687,88 +760,72 @@ def _async_lookup(
     profile: bool = False,
     deadline: Optional[Deadline] = None,
 ):
-    """Execute lookup and POST results to callback URL.
+    """Execute lookup in this process and POST results to callback URL.
 
-    ``trace_headers`` carries the W3C trace context (``traceparent`` /
-    ``tracestate``) captured from the original ``/asyncquery`` request so the
-    callback POST stays linked to the originating trace.  The background task
-    runs in a worker thread that does not inherit the request's contextvars,
-    so the headers must be passed explicitly.  ``profile`` arrives from the
-    request's URL query parameter (it is no longer a body field).  ``deadline``
-    likewise carries the client's ``parameters.timeout`` budget, measured from
-    when the request was accepted.
+    The in-process ``/asyncquery`` path (no queue configured): a FastAPI
+    background task on the thread pool.  ``trace_headers`` carries the W3C
+    trace context captured from the original request, since the thread does
+    not inherit the request's contextvars; ``deadline`` carries the client's
+    ``parameters.timeout`` budget, measured from when the request was
+    accepted.
     """
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
-    params = query_parameters(query)
-
     # GC stays paused until the response is serialized and freed, as in
-    # sync_lookup.
-    with gc_disabled():
-        # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
-        if params.get("rehydrate") is not None:
-            enrich_knowledge_graph(query, GRAPH)
-            response = finalize_response({"message": query["message"]}, query)
-        else:
-            subclass = params.get("subclass", True)
-            subclass_depth = params.get("subclass_depth", 1)
-            dehydrated = params.get("dehydrated")
-            filter_config = params.get("filter_config")
-            annotator_config = params.get("annotator_config") or {}
-            response = lookup(
-                GRAPH,
-                query,
-                bmt=BMT,
-                subclass=subclass,
-                subclass_depth=subclass_depth,
-                filter_config=filter_config,
-                log_level=params.get("log_level"),
-                dehydrated=dehydrated,
-                profile=profile,
-                deadline=deadline,
-                attributes_as_json=True,
-                results_as_json=True,
-            )
-            if annotator_config:
-                annotate_response(response, GRAPH, annotator_config)
-            to_fragments(response)
-        try:
-            # Serialize with orjson rather than httpx's stdlib-json ``json=``
-            # path, which is markedly slower for large result sets.
-            body = orjson.dumps(
-                response, default=_orjson_default, option=orjson.OPT_SERIALIZE_NUMPY
-            )
-        except Exception:
-            logger.exception("Callback to %s failed", callback_url)
-            return
-        finally:
-            del response
-
-    try:
-        headers = dict(trace_headers or {})
-        headers["Content-Type"] = "application/json"
-        with httpx.Client(timeout=httpx.Timeout(timeout=600.0)) as client:
-            res = client.post(callback_url, content=body, headers=headers)
-            res.raise_for_status()
-            logger.info("Posted to %s with code %s", callback_url, res.status_code)
-    except Exception:
-        logger.exception("Callback to %s failed", callback_url)
+    # sync_lookup; the serialized bytes are posted with GC back on.
+    body = execute_to_bytes(GRAPH, BMT, query, profile=profile, deadline=deadline)
+    post_callback(callback_url, body, trace_headers)
 
 
-def _async_accepted(callback: str) -> dict:
+def _async_accepted(callback: str, job_id: Optional[str] = None) -> dict:
     """Build the TRAPI AsyncQueryResponse for an accepted job.
 
-    TRAPI 2.0 requires ``job_id``; gandalf runs the query in this process and
-    POSTs the result to the callback rather than exposing an
-    ``/asyncquery_status`` endpoint, so the id identifies the job in this
-    server's logs.
+    TRAPI 2.0 requires ``job_id``; gandalf POSTs the result to the callback
+    rather than exposing an ``/asyncquery_status`` endpoint, so the id
+    identifies the job in this server's (and, in queue mode, the worker's)
+    logs.
     """
     return {
         "status": "Accepted",
         "description": "Query has been queued.",
-        "job_id": request_id_var.get("") or str(uuid.uuid4())[:8],
+        "job_id": job_id or request_id_var.get("") or str(uuid.uuid4())[:8],
         "callback": callback,
     }
+
+
+def _dispatch_async(
+    background_tasks: BackgroundTasks,
+    callback: str,
+    raw: QueryDict,
+    profile: bool,
+    deadline: Optional[Deadline],
+) -> dict:
+    """Hand an accepted ``/asyncquery`` to a worker or a background task.
+
+    The OTel trace context is captured now, while still inside the request
+    span, so whoever runs the query can propagate it to the callback.  When
+    OTel is disabled the carrier stays empty.
+    """
+    trace_headers: dict[str, str] = {}
+    otel.inject_headers(trace_headers)
+    if QUEUE is not None:
+        job = Job.new(
+            raw,
+            profile=profile,
+            budget=deadline.budget if deadline is not None else None,
+            callback=callback,
+            trace_headers=trace_headers,
+            request_id=request_id_var.get(""),
+        )
+        QUEUE.enqueue(job)
+        JOBS_ENQUEUED.labels("callback").inc()
+        logger.info("job %s enqueued for callback %s", job.job_id, callback)
+        return _async_accepted(callback, job.job_id)
+    logger.info("Doing async lookup for %s", callback)
+    background_tasks.add_task(
+        _async_lookup, callback, raw, trace_headers, profile, deadline
+    )
+    return _async_accepted(callback)
 
 
 @APP.post("/asyncquery", responses=_CONFLICT_RESPONSE)
@@ -797,16 +854,10 @@ def async_query(
     ):
         raise HTTPException(400, "callback must be an http:// or https:// URL")
 
-    trace_headers: dict[str, str] = {}
     # Rehydration: skip lookup/workflow validation, only enrich the supplied
     # knowledge graph in the background and POST it to the callback.
     if query_parameters(raw).get("rehydrate") is not None:
-        otel.inject_headers(trace_headers)
-        logger.info("Doing async rehydration for %s", callback)
-        background_tasks.add_task(
-            _async_lookup, callback, raw, trace_headers, bool(profile), None
-        )
-        return _async_accepted(callback)
+        return _dispatch_async(background_tasks, callback, raw, bool(profile), None)
 
     # Parse the requested workflow.  TRAPI models Operation as a union of ~30
     # per-operation types; this server implements two op ids, so the branch
@@ -835,19 +886,7 @@ def async_query(
         raise HTTPException(422, "set_interpretation MANY not supported.")
 
     deadline = _prepare_query(raw)
-
-    # Capture the active OTel trace context now (while still inside the
-    # request span) so the background callback can propagate it to the
-    # downstream service.  When OTel is disabled this is a no-op and the
-    # carrier stays empty.
-    otel.inject_headers(trace_headers)
-
-    logger.info("Doing async lookup for %s", callback)
-    background_tasks.add_task(
-        _async_lookup, callback, raw, trace_headers, bool(profile), deadline
-    )
-
-    return _async_accepted(callback)
+    return _dispatch_async(background_tasks, callback, raw, bool(profile), deadline)
 
 
 def _custom_openapi() -> dict:

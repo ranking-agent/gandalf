@@ -28,6 +28,10 @@ EXPOSE 6429
 # e.g. docker run -v /path/to/graph:/data/graph -e GANDALF_GRAPH_PATH=/data/graph
 ENV GANDALF_GRAPH_PATH=/data/graph
 ENV GANDALF_LOG_FORMAT=json
+# Aggregate Prometheus metrics across gunicorn's workers (gandalf.metrics).
+ENV PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
 
-# CMD ls /data/graph
+# The API.  For a queue worker, run the same image with
+#   python -m gandalf.worker
+# and GANDALF_QUEUE_URL set (see deploy/k8s/).
 CMD ["gunicorn", "gandalf.server:APP", "-c", "gunicorn.conf.py"]

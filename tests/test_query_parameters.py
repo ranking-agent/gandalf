@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import orjson
 import pytest
+
+import gandalf.execute as gandalf_execute
 from fastapi.testclient import TestClient
 
 from gandalf.models import AsyncTRAPIQuery, QueryParameters, TRAPIQuery
@@ -113,7 +115,7 @@ class TestParametersWiring:
             captured.update(kwargs)
             return {"message": query["message"]}
 
-        monkeypatch.setattr(gandalf_server, "lookup", fake_lookup)
+        monkeypatch.setattr(gandalf_execute, "lookup", fake_lookup)
 
         body = dict(_ONE_HOP)
         body["parameters"] = {"filter_config": {"max_node_degree": 5}}
@@ -129,7 +131,7 @@ class TestParametersWiring:
             captured.update(kwargs)
             return {"message": query["message"]}
 
-        monkeypatch.setattr(gandalf_server, "lookup", fake_lookup)
+        monkeypatch.setattr(gandalf_execute, "lookup", fake_lookup)
 
         body = dict(_ONE_HOP)
         body["parameters"] = {"subclass": False, "subclass_depth": 4}
@@ -147,7 +149,7 @@ class TestParametersWiring:
             captured.update(kwargs)
             return {"message": query["message"]}
 
-        monkeypatch.setattr(gandalf_server, "lookup", fake_lookup)
+        monkeypatch.setattr(gandalf_execute, "lookup", fake_lookup)
 
         body = dict(_ONE_HOP)
         body["subclass"] = False  # top-level field is no longer read
@@ -161,7 +163,7 @@ class TestParametersWiring:
         captured = {}
 
         monkeypatch.setattr(
-            gandalf_server,
+            gandalf_execute,
             "lookup",
             lambda graph, query, **kwargs: {"message": query["message"]},
         )
@@ -169,7 +171,7 @@ class TestParametersWiring:
         def fake_annotate(response, graph, annotator_config):
             captured["annotator_config"] = annotator_config
 
-        monkeypatch.setattr(gandalf_server, "annotate_response", fake_annotate)
+        monkeypatch.setattr(gandalf_execute, "annotate_response", fake_annotate)
 
         body = dict(_ONE_HOP)
         body["parameters"] = {"annotator_config": {"my_plugin": {"opt": 1}}}
@@ -199,7 +201,7 @@ class TestRehydration:
         def boom(*args, **kwargs):
             raise AssertionError("lookup must not be called during rehydration")
 
-        monkeypatch.setattr(gandalf_server, "lookup", boom)
+        monkeypatch.setattr(gandalf_execute, "lookup", boom)
 
         resp = client.post("/query", json=self._dehydrated_body())
         assert resp.status_code == 200, resp.text
@@ -215,7 +217,7 @@ class TestRehydration:
         def boom(*args, **kwargs):
             raise AssertionError("lookup must not be called during rehydration")
 
-        monkeypatch.setattr(gandalf_server, "lookup", boom)
+        monkeypatch.setattr(gandalf_execute, "lookup", boom)
 
         callback_url, received = _start_callback_server()
         try:

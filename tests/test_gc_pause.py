@@ -8,7 +8,9 @@ queries share it, and GC comes back on only when the last one is done.
 
 import gc
 
+import httpx
 import pytest
+from starlette.requests import Request
 
 from tests.search_fixtures import graph  # noqa: F401
 
@@ -101,7 +103,10 @@ def test_query_handler_holds_the_pause_until_the_response_is_serialized(
         return trapi_response(content)
 
     monkeypatch.setattr(server, "_trapi_response", watched)
-    rendered = server.sync_lookup(request=QUERY, profile=None)
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/query", "headers": []}
+    )
+    rendered = server.sync_lookup(request, body=QUERY, profile=None)
     assert seen == [False]
     assert gc.isenabled()
     assert b'"results"' in rendered.body
@@ -131,7 +136,7 @@ def test_async_handler_serializes_under_the_pause_and_posts_after(server, monkey
 
             return Response()
 
-    monkeypatch.setattr(server.httpx, "Client", Client)
+    monkeypatch.setattr(httpx, "Client", Client)
     server._async_lookup("http://callback.invalid", QUERY)
     assert len(posted) == 1
     body, gc_enabled_while_posting = posted[0]

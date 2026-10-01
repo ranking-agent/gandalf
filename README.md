@@ -20,6 +20,7 @@ A high-performance Python library and [Translator](https://ncats.nih.gov/transla
 - **Async query support** with callback URLs
 - **Dehydrated mode** for lightweight responses that skip edge and node attribute enrichment
 - **OpenTelemetry tracing** with Jaeger integration
+- **Queue mode** — queries run in a pool of worker processes fed by a Redis Stream, with Prometheus metrics and a KEDA-ready scaling signal
 
 ## Installation
 
@@ -286,6 +287,9 @@ gunicorn gandalf.server:APP -c gunicorn.conf.py
 | `GET` | `/sri_testing_data` | Representative edges for SRI Testing Harness |
 | `POST` | `/query` | Synchronous TRAPI query |
 | `POST` | `/asyncquery` | Async TRAPI query with callback URL |
+| `GET` | `/health` | Liveness: the process answers |
+| `GET` | `/ready` | Readiness: the graph is open and, in queue mode, Redis answers (503 otherwise) |
+| `GET` | `/metrics` | Prometheus metrics |
 
 Both `/query` and `/asyncquery` accept a single optional query parameter:
 - `?profile=true` — Emit per-stage timing diagnostics into `message.logs`
@@ -380,6 +384,21 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_RATE_LIMIT` | `0` | Max requests per minute per client IP (0 = disabled) |
 | `GANDALF_SKIP_PRELOAD` | `false` | Skip module-level graph loading |
 | `GANDALF_WORKERS` | `2` | Gunicorn worker count |
+| `GANDALF_QUEUE_URL` | _(empty)_ | Redis URL; set it to run queries in worker processes (see [Queue mode](#queue-mode-workers-and-autoscaling)) |
+| `GANDALF_QUEUE_STREAM` | `gandalf:jobs` | Redis Stream the jobs go on |
+| `GANDALF_QUEUE_GROUP` | `gandalf-workers` | Consumer group the workers read through |
+| `GANDALF_QUEUE_DEAD_STREAM` | `gandalf:jobs:dead` | Where jobs over the delivery limit are moved |
+| `GANDALF_QUEUE_MAX_DELIVERIES` | `2` | Attempts a job gets before it is dead-lettered |
+| `GANDALF_QUEUE_CLAIM_IDLE_SECONDS` | `120` | A job idle this long is taken over as abandoned |
+| `GANDALF_QUEUE_KEEPALIVE_SECONDS` | `30` | How often a running worker refreshes its job |
+| `GANDALF_QUEUE_SYNC_MAX_WAIT_SECONDS` | `1800` | How long `/query` waits for a worker when the query has no timeout |
+| `GANDALF_QUEUE_SYNC_GRACE_SECONDS` | `30` | Added to the query's timeout for the worker's own Timeout response to arrive |
+| `GANDALF_RESULT_TTL_SECONDS` | `900` | How long an uncollected `/query` result lives in Redis |
+| `GANDALF_RESULT_CHUNK_BYTES` | `67108864` | Largest value written to one Redis key |
+| `GANDALF_WORKER_NAME` | `<hostname>-<pid>` | The worker's consumer name |
+| `GANDALF_WORKER_MAX_JOBS` | `500` | A worker exits after this many jobs (0 = never) |
+| `GANDALF_WORKER_METRICS_PORT` | `9100` | Worker Prometheus port (0 = off) |
+| `GANDALF_WORKER_HEARTBEAT_FILE` | `/tmp/gandalf-worker-heartbeat` | Touched while the worker is alive, for a liveness probe |
 
 ### Search Tuning
 
@@ -456,6 +475,60 @@ GANDALF_GRAPH_DIR=/path/to/graph docker compose up --build
 | `SHEPHERD_NETWORK` | `shepherd_default` | External Docker network to join |
 | `GANDALF_OTEL_ENABLED` | `true` | Set to `false` when no Jaeger is running |
 | `GANDALF_JAEGER_HOST` / `GANDALF_JAEGER_PORT` | `http://jaeger` / `4317` | OTLP gRPC collector |
+
+## Queue mode: workers and autoscaling
+
+By default a Gandalf process runs every query itself.  With
+`GANDALF_QUEUE_URL` set, the HTTP process instead validates each `/query`
+and `/asyncquery`, puts it on a Redis Stream as a job, and separate worker
+processes run it:
+
+```bash
+# the API (any number of replicas)
+GANDALF_QUEUE_URL=redis://redis:6379/0 gunicorn gandalf.server:APP -c gunicorn.conf.py
+
+# a worker (as many as the load needs; one job at a time each)
+GANDALF_QUEUE_URL=redis://redis:6379/0 python -m gandalf.worker
+```
+
+Both open the same graph.  A `/query` waits for its job's result, which the
+worker stores zstd-compressed in Redis and the API streams back (as is, to a
+client that accepts zstd).  An `/asyncquery` returns immediately and the
+worker POSTs the result to the callback itself.
+
+What the queue gives, beyond "more workers":
+
+- **Nothing runs unbounded.**  A worker runs one query at a time, so its
+  memory is one query's peak, and a burst waits in the stream instead of
+  running all at once and getting the process OOM-killed.
+- **A dead worker's job is not lost.**  Jobs are acknowledged only after
+  their result is delivered.  One whose worker died is taken over by another
+  worker (`GANDALF_QUEUE_CLAIM_IDLE_SECONDS`); one that has killed a worker
+  twice (`GANDALF_QUEUE_MAX_DELIVERIES`) is moved to the dead-letter stream
+  and answered with an `Error` response rather than run again.
+- **The query's timeout covers the wait.**  `parameters.timeout` runs from
+  when the API accepted the request; a job whose budget is spent in the
+  queue is answered with a `Timeout` response without being run.
+- **One scaling signal.**  The stream's lag (jobs no worker has taken) is
+  what [KEDA](https://keda.sh)'s `redis-streams` scaler reads.
+  `deploy/k8s/` has reference manifests for the API and worker Deployments
+  and the `ScaledObject`, with sizing notes.
+
+Metrics are on `/metrics` of the API (aggregated across gunicorn workers via
+`PROMETHEUS_MULTIPROC_DIR`, which the Docker image sets) and on port 9100 of
+each worker: request counts and latencies by route, jobs by outcome, job
+duration, queue wait, result size, the worker's anonymous RSS, and the
+stream's lag and pending counts.
+
+`docker compose --profile queue up --build` runs the API, a Redis and one
+worker locally with `GANDALF_QUEUE_URL=redis://redis:6379/0`.
+
+The Redis-backed tests need a server and are deselected by default:
+
+```bash
+python -m pytest -m integration tests/test_queue_redis.py   # starts a local redis-server
+GANDALF_TEST_REDIS_URL=redis://localhost:6379/0 python -m pytest -m integration tests/test_queue_redis.py
+```
 
 ## Verifying the Server
 

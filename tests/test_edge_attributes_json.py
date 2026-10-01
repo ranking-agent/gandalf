@@ -9,7 +9,11 @@ import pickle
 import orjson
 import pytest
 
-from tests.search_fixtures import graph  # noqa: F401
+import gandalf.execute as gandalf_execute
+
+from gandalf.execute import orjson_default
+
+from tests.search_fixtures import bare_request, graph  # noqa: F401
 
 from gandalf.graph import CSRGraph, GraphFormatError
 from gandalf.lmdb_store import EDGE_ATTRIBUTES_FORMAT, LMDBPropertyStore
@@ -188,7 +192,7 @@ def server(graph, bmt, monkeypatch):  # noqa: F811
 
 def test_server_serves_the_same_message(server, graph, bmt):  # noqa: F811
     query = QUERIES["two_hop"]
-    rendered = server.sync_lookup(request=dict(query), profile=None)
+    rendered = server.sync_lookup(bare_request(), body=dict(query), profile=None)
     served = orjson.loads(rendered.body)["message"]
     assert served == lookup(graph, query, bmt=bmt)["message"]
 
@@ -203,9 +207,9 @@ def test_server_annotators_read_edge_attributes(server, monkeypatch):
             seen.append(type(attributes))
             attributes.append(added)
 
-    monkeypatch.setattr(server, "annotate_response", annotate)
+    monkeypatch.setattr(gandalf_execute, "annotate_response", annotate)
     query = dict(QUERIES["two_hop"], parameters={"annotator_config": {"any": {}}})
-    rendered = server.sync_lookup(request=query, profile=None)
+    rendered = server.sync_lookup(bare_request(), body=query, profile=None)
     assert seen and set(seen) == {list}
     edges = orjson.loads(rendered.body)["message"]["knowledge_graph"]["edges"]
     assert all(edge["attributes"][-1] == added for edge in edges.values())
@@ -213,7 +217,9 @@ def test_server_annotators_read_edge_attributes(server, monkeypatch):
 
 def test_validating_server_gets_attributes_as_lists(server, monkeypatch):
     monkeypatch.setattr(server, "_validate", True)
-    response = server.sync_lookup(request=dict(QUERIES["two_hop"]), profile=None)
+    response = server.sync_lookup(
+        bare_request(), body=dict(QUERIES["two_hop"]), profile=None
+    )
     edges = response["message"]["knowledge_graph"]["edges"]
     assert all(isinstance(e.get("attributes", []), list) for e in edges.values())
 
@@ -221,6 +227,6 @@ def test_validating_server_gets_attributes_as_lists(server, monkeypatch):
 def test_server_default_serializes_a_stray_wrapper(server):
     data = orjson.dumps(
         {"attributes": b'[{"attribute_type_id":"biolink:x"}]'},
-        default=server._orjson_default,
+        default=orjson_default,
     )
     assert data == b'{"attributes":[{"attribute_type_id":"biolink:x"}]}'

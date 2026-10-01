@@ -1,0 +1,542 @@
+"""Redis Streams job queue and result store for queue-mode Gandalf.
+
+With ``GANDALF_QUEUE_URL`` set, the API process turns each ``/query`` and
+``/asyncquery`` into a :class:`Job` on a Redis Stream and worker processes
+(:mod:`gandalf.worker`) execute them.  The stream is read through a consumer
+group, which gives the properties the design needs:
+
+* **Ack on completion.**  A worker acknowledges a job only after its result
+  has been delivered, so a job whose worker died stays *pending* and is
+  taken over by another worker once it has been idle for
+  ``queue_claim_idle_seconds`` (``XAUTOCLAIM``).  A running worker refreshes
+  its job's idle time every ``queue_keepalive_seconds`` (:meth:`JobQueue.touch`),
+  so only a dead worker's job goes idle.
+* **Poison protection.**  Redis counts deliveries per pending entry.  A job
+  delivered more than ``queue_max_deliveries`` times has killed a worker
+  before (an OOM kill, typically), so it is moved to the dead-letter stream
+  and answered with an error instead of being run a third time and killing
+  every worker in turn.
+* **One scaling signal.**  The group's *lag* -- entries not yet delivered to
+  any consumer -- is exactly "jobs nobody has started", which is what KEDA's
+  ``redis-streams`` scaler reads (``lagCount``).
+
+Results of ``/query`` jobs go through the :class:`ResultStore` rather than
+the stream: zstd-compressed, split into chunks below Redis's 512 MB value
+cap, with a TTL, and a per-job list the waiting API process blocks on.
+``/asyncquery`` results never touch Redis: the worker POSTs them to the
+client's callback itself.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import socket
+import threading
+import time
+import uuid
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+from typing import Callable, Iterator, Optional
+
+import orjson
+import redis
+import zstandard
+from translator_tom.model_dicts import QueryDict
+
+from gandalf.config import settings
+from gandalf.trapi import Deadline
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Job envelope
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Job:
+    """One queued query, everything a worker needs to run and answer it.
+
+    Attributes:
+        job_id: Unique id, also the key the result is stored under.
+        query: The request body, already validated and normalized by the
+            API (``server._prepare_query``), so the worker runs it as is.
+        profile: Emit per-stage timings into ``message.logs``.
+        budget: The query's ``parameters.timeout`` in seconds, or None.
+        accepted_at: Wall-clock time (epoch seconds) the API accepted the
+            request; the budget runs from here, queue wait included.
+        callback: For ``/asyncquery``, where the worker POSTs the result.
+            None means a ``/query`` is waiting on the result store.
+        trace_headers: W3C trace context captured at the API, forwarded on
+            the callback so the trace stays linked.
+        request_id: The API's request id, for log correlation.
+
+    Examples:
+        >>> job = Job.new({"message": {}}, budget=30.0)
+        >>> Job.from_bytes(job.to_bytes()) == job
+        True
+        >>> job.mode, Job.new({"message": {}}, callback="http://x/cb").mode
+        ('sync', 'callback')
+    """
+
+    job_id: str
+    query: QueryDict
+    profile: bool = False
+    budget: Optional[float] = None
+    accepted_at: float = field(default_factory=time.time)
+    callback: Optional[str] = None
+    trace_headers: dict[str, str] = field(default_factory=dict)
+    request_id: str = ""
+
+    @classmethod
+    def new(
+        cls,
+        query: QueryDict,
+        *,
+        profile: bool = False,
+        budget: Optional[float] = None,
+        callback: Optional[str] = None,
+        trace_headers: Optional[dict[str, str]] = None,
+        request_id: str = "",
+    ) -> "Job":
+        """A job with a fresh id, accepted now."""
+        return cls(
+            job_id=uuid.uuid4().hex,
+            query=query,
+            profile=profile,
+            budget=budget,
+            callback=callback,
+            trace_headers=dict(trace_headers or {}),
+            request_id=request_id,
+        )
+
+    @property
+    def mode(self) -> str:
+        """``"callback"`` for an async job, ``"sync"`` for a waiting ``/query``."""
+        return "callback" if self.callback else "sync"
+
+    def to_bytes(self) -> bytes:
+        """Serialize for the stream entry."""
+        data: bytes = orjson.dumps(asdict(self))
+        return data
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "Job":
+        """The inverse of :meth:`to_bytes`."""
+        return cls(**orjson.loads(data))
+
+    def elapsed(self) -> float:
+        """Seconds since the API accepted the request."""
+        return time.time() - self.accepted_at
+
+    def deadline(self) -> Deadline:
+        """The query's deadline, with the time already spent in the queue."""
+        return Deadline.started_ago(self.budget, self.elapsed())
+
+    def wait_seconds(self) -> float:
+        """How long the API should wait for this job's result.
+
+        The budget plus a grace period for the worker's own Timeout response
+        to arrive, or the configured maximum for a query with no budget.
+        """
+        if self.budget is None:
+            return settings.queue_sync_max_wait_seconds
+        return self.budget + settings.queue_sync_grace_seconds
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """A job handed to a worker, with what the queue knows about it.
+
+    Attributes:
+        entry_id: The stream entry id to acknowledge when done.
+        job: The job.
+        deliveries: How many times the entry has been delivered, this one
+            included.  More than one means a previous worker never finished.
+        poisoned: The entry exceeded the delivery limit and has already been
+            dead-lettered and acknowledged; the worker must answer it with
+            an error, not run it.
+    """
+
+    entry_id: bytes
+    job: Job
+    deliveries: int
+    poisoned: bool = False
+
+
+@dataclass(frozen=True)
+class QueueStats:
+    """What the consumer group reports about the stream."""
+
+    lag: int  # entries not yet delivered to any consumer
+    pending: int  # delivered, not yet acknowledged
+
+
+def default_consumer_name() -> str:
+    """``<hostname>-<pid>``: the pod name under Kubernetes, plus the process."""
+    return f"{socket.gethostname()}-{os.getpid()}"
+
+
+# ---------------------------------------------------------------------------
+# Queue
+# ---------------------------------------------------------------------------
+
+
+class JobQueue:
+    """The Redis Stream of jobs and its consumer group.
+
+    Args:
+        client: A ``redis.Redis`` returning bytes (``decode_responses`` off).
+        stream: Stream key the jobs go on.
+        group: Consumer group the workers read through.
+        dead_stream: Where jobs over the delivery limit are moved.
+        max_deliveries: Deliveries a job may have before it is dead-lettered.
+        claim_idle_seconds: Idle time after which a pending job is taken over.
+    """
+
+    def __init__(
+        self,
+        client: redis.Redis,
+        *,
+        stream: str,
+        group: str,
+        dead_stream: str,
+        max_deliveries: int,
+        claim_idle_seconds: float,
+    ):
+        self._r = client
+        self.stream = stream
+        self.group = group
+        self.dead_stream = dead_stream
+        self.max_deliveries = max_deliveries
+        self.claim_idle_ms = int(claim_idle_seconds * 1000)
+
+    @classmethod
+    def from_settings(cls, client: Optional[redis.Redis] = None) -> "JobQueue":
+        """A queue on the configured stream, group and limits."""
+        return cls(
+            client if client is not None else redis.Redis.from_url(settings.queue_url),
+            stream=settings.queue_stream,
+            group=settings.queue_group,
+            dead_stream=settings.queue_dead_stream,
+            max_deliveries=settings.queue_max_deliveries,
+            claim_idle_seconds=settings.queue_claim_idle_seconds,
+        )
+
+    @property
+    def client(self) -> redis.Redis:
+        """The underlying Redis client."""
+        return self._r
+
+    def ping(self) -> bool:
+        """Whether Redis answers; the API's readiness check."""
+        return bool(self._r.ping())
+
+    def ensure_group(self) -> None:
+        """Create the stream and consumer group if they do not exist yet.
+
+        Idempotent: Redis answers ``BUSYGROUP`` for a group that exists, and
+        that is the only error swallowed here.
+        """
+        try:
+            self._r.xgroup_create(self.stream, self.group, id="0", mkstream=True)
+        except redis.ResponseError as exc:
+            if "BUSYGROUP" not in str(exc):
+                raise
+
+    def enqueue(self, job: Job) -> str:
+        """Put *job* on the stream and return its entry id."""
+        entry_id: bytes = self._r.xadd(self.stream, {b"job": job.to_bytes()})
+        return entry_id.decode()
+
+    def receive(self, consumer: str, block_seconds: float) -> Optional[Delivery]:
+        """Take the next job for *consumer*, or None if none arrived in time.
+
+        A pending job another worker left idle for longer than
+        ``claim_idle_seconds`` is taken first; otherwise the call blocks up to
+        *block_seconds* for a new entry.
+        """
+        stale = self._claim_stale(consumer)
+        if stale is not None:
+            return stale
+        response = self._r.xreadgroup(
+            self.group,
+            consumer,
+            {self.stream: ">"},
+            count=1,
+            block=int(block_seconds * 1000),
+        )
+        if not response:
+            return None
+        entry_id, fields = response[0][1][0]
+        return Delivery(entry_id, Job.from_bytes(fields[b"job"]), deliveries=1)
+
+    def _claim_stale(self, consumer: str) -> Optional[Delivery]:
+        """Take over one pending job whose worker went quiet, if there is one."""
+        claimed = self._r.xautoclaim(
+            self.stream,
+            self.group,
+            consumer,
+            min_idle_time=self.claim_idle_ms,
+            start_id="0-0",
+            count=1,
+        )
+        entries = claimed[1]
+        if not entries:
+            return None
+        entry_id, fields = entries[0]
+        if fields is None:
+            # Redis 6.2 reports an entry deleted from the stream this way;
+            # 7.0 drops it from the group itself.  Nothing to run.
+            self._r.xack(self.stream, self.group, entry_id)
+            return None
+        deliveries = self._deliveries(entry_id)
+        job = Job.from_bytes(fields[b"job"])
+        if deliveries > self.max_deliveries:
+            logger.error(
+                "job %s delivered %d times (limit %d): dead-lettering it",
+                job.job_id,
+                deliveries,
+                self.max_deliveries,
+            )
+            self._dead_letter(entry_id, fields, deliveries)
+            return Delivery(entry_id, job, deliveries, poisoned=True)
+        logger.warning(
+            "job %s taken over after %d earlier deliver%s",
+            job.job_id,
+            deliveries - 1,
+            "y" if deliveries == 2 else "ies",
+        )
+        return Delivery(entry_id, job, deliveries)
+
+    def _deliveries(self, entry_id: bytes) -> int:
+        """How many times a pending entry has been delivered."""
+        pending = self._r.xpending_range(
+            self.stream, self.group, min=entry_id, max=entry_id, count=1
+        )
+        return int(pending[0]["times_delivered"]) if pending else 1
+
+    def _dead_letter(self, entry_id: bytes, fields: dict, deliveries: int) -> None:
+        pipe = self._r.pipeline(transaction=True)
+        pipe.xadd(
+            self.dead_stream,
+            {
+                **fields,
+                b"source_id": entry_id,
+                b"deliveries": str(deliveries).encode(),
+                b"dead_at": repr(time.time()).encode(),
+            },
+        )
+        pipe.xack(self.stream, self.group, entry_id)
+        pipe.execute()
+
+    def touch(self, entry_id: bytes, consumer: str) -> None:
+        """Reset a running job's idle time so no other worker claims it.
+
+        ``XCLAIM ... JUSTID`` re-assigns the entry to the same consumer and
+        resets its idle clock without counting as a delivery.
+        """
+        self._r.xclaim(
+            self.stream,
+            self.group,
+            consumer,
+            min_idle_time=0,
+            message_ids=[entry_id],
+            justid=True,
+        )
+
+    def ack(self, entry_id: bytes) -> None:
+        """Mark a job done: its result has been delivered."""
+        self._r.xack(self.stream, self.group, entry_id)
+
+    def stats(self) -> QueueStats:
+        """Lag and pending counts of the consumer group (zero before it exists)."""
+        for group in self._r.xinfo_groups(self.stream):
+            if group["name"] == self.group.encode():
+                return QueueStats(
+                    lag=int(group.get("lag") or 0), pending=int(group["pending"])
+                )
+        return QueueStats(lag=0, pending=0)
+
+
+# ---------------------------------------------------------------------------
+# Result store
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StoredResult:
+    """A job's answer as the store holds it.
+
+    Attributes:
+        compressed: The serialized response as one zstd frame.
+        size: Its uncompressed length in bytes.
+        http_status: The status the API should answer with.
+    """
+
+    compressed: bytes
+    size: int
+    http_status: int
+
+    def decompress(self) -> bytes:
+        """The serialized response."""
+        body: bytes = zstandard.ZstdDecompressor().decompress(
+            self.compressed, max_output_size=self.size
+        )
+        return body
+
+
+class ResultStore:
+    """Results of ``/query`` jobs, kept in Redis until the API collects them.
+
+    A result is one zstd frame stored in ``chunk_bytes`` pieces under
+    ``<prefix>:<job_id>:chunk:<n>``, described by a ``<prefix>:<job_id>:meta``
+    hash, and announced by a push onto ``<prefix>:<job_id>:done`` that the
+    waiting API process blocks on.  Every key carries the TTL, so a result
+    nobody collects (the client gave up) expires on its own.
+
+    Args:
+        client: A ``redis.Redis`` returning bytes.
+        prefix: Key prefix.
+        ttl_seconds: How long an uncollected result lives.
+        chunk_bytes: Largest value written to one key.
+        zstd_level: Compression level for the stored frame.
+    """
+
+    def __init__(
+        self,
+        client: redis.Redis,
+        *,
+        prefix: str = "gandalf:result",
+        ttl_seconds: int,
+        chunk_bytes: int,
+        zstd_level: int,
+    ):
+        self._r = client
+        self.prefix = prefix
+        self.ttl = ttl_seconds
+        self.chunk_bytes = chunk_bytes
+        self.zstd_level = zstd_level
+
+    @classmethod
+    def from_settings(cls, client: Optional[redis.Redis] = None) -> "ResultStore":
+        """A store with the configured TTL, chunk size and compression level."""
+        return cls(
+            client if client is not None else redis.Redis.from_url(settings.queue_url),
+            ttl_seconds=settings.result_ttl_seconds,
+            chunk_bytes=settings.result_chunk_bytes,
+            zstd_level=settings.compress_zstd_level,
+        )
+
+    def _key(self, job_id: str, suffix: str) -> str:
+        return f"{self.prefix}:{job_id}:{suffix}"
+
+    def put(self, job_id: str, body: bytes, *, http_status: int = 200) -> int:
+        """Store a serialized response and wake the waiter.
+
+        Returns:
+            The compressed size in bytes.
+        """
+        compressed = zstandard.ZstdCompressor(level=self.zstd_level).compress(body)
+        chunks = [
+            compressed[i : i + self.chunk_bytes]
+            for i in range(0, len(compressed), self.chunk_bytes)
+        ] or [b""]
+        pipe = self._r.pipeline(transaction=False)
+        for n, chunk in enumerate(chunks):
+            pipe.set(self._key(job_id, f"chunk:{n}"), chunk, ex=self.ttl)
+        meta = self._key(job_id, "meta")
+        pipe.hset(
+            meta,
+            mapping={
+                "chunks": len(chunks),
+                "size": len(body),
+                "compressed_size": len(compressed),
+                "http_status": http_status,
+                "content_encoding": "zstd",
+            },
+        )
+        pipe.expire(meta, self.ttl)
+        done = self._key(job_id, "done")
+        pipe.rpush(done, b"1")
+        pipe.expire(done, self.ttl)
+        pipe.execute()
+        return len(compressed)
+
+    def wait(self, job_id: str, timeout: float) -> Optional[StoredResult]:
+        """Block until the job's result is stored, or *timeout* seconds pass.
+
+        Returns:
+            The result, or None if it did not arrive in time.
+        """
+        # BLPOP's zero means "forever", so the shortest wait is one tick.
+        popped = self._r.blpop([self._key(job_id, "done")], timeout=max(timeout, 0.01))
+        if popped is None:
+            return None
+        return self.get(job_id)
+
+    def get(self, job_id: str) -> Optional[StoredResult]:
+        """The stored result, or None if there is none (or it expired)."""
+        meta = self._r.hgetall(self._key(job_id, "meta"))
+        if not meta:
+            return None
+        n_chunks = int(meta[b"chunks"])
+        chunks = self._r.mget(
+            [self._key(job_id, f"chunk:{n}") for n in range(n_chunks)]
+        )
+        if any(chunk is None for chunk in chunks):
+            return None
+        return StoredResult(
+            compressed=b"".join(chunks),
+            size=int(meta[b"size"]),
+            http_status=int(meta[b"http_status"]),
+        )
+
+    def delete(self, job_id: str) -> None:
+        """Drop a collected result rather than wait for its TTL."""
+        meta = self._r.hgetall(self._key(job_id, "meta"))
+        n_chunks = int(meta[b"chunks"]) if meta else 0
+        self._r.delete(
+            self._key(job_id, "meta"),
+            self._key(job_id, "done"),
+            *[self._key(job_id, f"chunk:{n}") for n in range(n_chunks)],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Keepalive
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def keepalive(
+    queue: JobQueue,
+    entry_id: bytes,
+    consumer: str,
+    interval_seconds: float,
+    on_tick: Optional[Callable[[], None]] = None,
+) -> Iterator[None]:
+    """Refresh a running job's idle time every *interval_seconds*.
+
+    Runs :meth:`JobQueue.touch` on a daemon thread for the duration of the
+    block, and *on_tick* with it (the worker uses it to refresh its liveness
+    heartbeat during a long query).  A thread rather than a check inside the
+    query: the query code knows nothing about the queue.
+    """
+    stop = threading.Event()
+
+    def _loop() -> None:
+        while not stop.wait(interval_seconds):
+            queue.touch(entry_id, consumer)
+            if on_tick is not None:
+                on_tick()
+
+    thread = threading.Thread(target=_loop, daemon=True, name="gandalf-keepalive")
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()

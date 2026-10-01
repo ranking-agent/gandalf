@@ -73,6 +73,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from gandalf.biolink import NAMED_THING
 from gandalf.config import settings
+from gandalf.logging_config import log_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,29 @@ class Deadline:
     def __init__(self, budget: Optional[float]):
         self.budget = budget
         self._start = time.monotonic()
+
+    @classmethod
+    def started_ago(cls, budget: Optional[float], elapsed: float) -> "Deadline":
+        """A deadline whose clock started *elapsed* seconds ago.
+
+        A queued query's budget runs from the moment the server accepted it,
+        not from when a worker picks it up, so the worker rebuilds the
+        deadline with the time already spent waiting.
+
+        Examples:
+            >>> d = Deadline.started_ago(30.0, 10.0)
+            >>> d.budget
+            30.0
+            >>> 9.9 < d.elapsed < 10.5
+            True
+            >>> Deadline.started_ago(1.0, 2.0).expired
+            True
+            >>> bool(Deadline.started_ago(None, 100.0))
+            False
+        """
+        deadline = cls(budget)
+        deadline._start -= elapsed
+        return deadline
 
     def __bool__(self) -> bool:
         return self.budget is not None
@@ -602,6 +626,41 @@ def timeout_response(
         f"Query exceeded the requested timeout of {deadline.budget}s "
         f"after {deadline.elapsed:.1f}s."
     )
+    response: ResponseDict = {"message": _empty_message(query), "logs": logs}
+    return finalize_response(response, query, status="Timeout", description=description)
+
+
+def error_response(query: QueryDict, description: str) -> ResponseDict:
+    """Build the Response for a query that failed outright.
+
+    The shape of :func:`timeout_response` with a ``status`` of ``Error``: the
+    query graph echoed back, no results, and one ERROR log entry carrying
+    *description*, so a client that only reads TRAPI (an async callback
+    receiver, say) learns what happened without an HTTP status to go on.
+
+    Args:
+        query: The original request dict.
+        description: What went wrong, in one sentence.
+
+    Returns:
+        A complete TRAPI Response with ``status`` of ``Error``.
+
+    Examples:
+        >>> r = error_response({"message": {}}, "worker ran out of memory")
+        >>> r["status"], r["message"]["results"], r["logs"][0]["level"]
+        ('Error', [], 'ERROR')
+    """
+    log: LogEntryDict = {
+        "timestamp": log_timestamp(),
+        "level": "ERROR",
+        "message": description,
+    }
+    response: ResponseDict = {"message": _empty_message(query), "logs": [log]}
+    return finalize_response(response, query, status="Error", description=description)
+
+
+def _empty_message(query: QueryDict) -> MessageDict:
+    """A Message with no results that echoes the request's query graph."""
     message: MessageDict = {
         "knowledge_graph": KnowledgeGraphDict(nodes={}, edges={}),
         "results": [],
@@ -613,6 +672,4 @@ def timeout_response(
     query_graph = incoming.get("query_graph") if incoming else None
     if query_graph is not None:
         message["query_graph"] = query_graph
-
-    response: ResponseDict = {"message": message, "logs": logs}
-    return finalize_response(response, query, status="Timeout", description=description)
+    return message

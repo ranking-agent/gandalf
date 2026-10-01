@@ -11,7 +11,11 @@ import importlib
 import orjson
 import pytest
 
-from tests.search_fixtures import graph  # noqa: F401
+import gandalf.execute as gandalf_execute
+
+from gandalf.execute import orjson_default
+
+from tests.search_fixtures import bare_request, graph  # noqa: F401
 from tests.test_single_path_fast_path import (  # noqa: F401
     DIABETES,
     HYPOGLYCEMIA,
@@ -267,7 +271,9 @@ def server(graph, bmt, monkeypatch):  # noqa: F811
 
 
 def test_server_serves_the_same_bytes(server, graph, bmt):  # noqa: F811
-    rendered = server.sync_lookup(request=dict(TWO_HOP_MIXED), profile=None)
+    rendered = server.sync_lookup(
+        bare_request(), body=dict(TWO_HOP_MIXED), profile=None
+    )
     served = orjson.dumps(orjson.loads(rendered.body)["message"])
     reference = lookup(graph, TWO_HOP_MIXED, bmt=bmt)
     assert served == orjson.dumps(reference["message"])
@@ -281,9 +287,9 @@ def test_server_annotators_read_results(server, monkeypatch):
             seen.append(type(result))
             result["analyses"][0]["score"] = 0.5
 
-    monkeypatch.setattr(server, "annotate_response", annotate)
+    monkeypatch.setattr(gandalf_execute, "annotate_response", annotate)
     query = dict(TWO_HOP_MIXED, parameters={"annotator_config": {"any": {}}})
-    rendered = server.sync_lookup(request=query, profile=None)
+    rendered = server.sync_lookup(bare_request(), body=query, profile=None)
     assert seen and set(seen) == {dict}
     results = orjson.loads(rendered.body)["message"]["results"]
     assert len(results) == len(seen)
@@ -292,11 +298,13 @@ def test_server_annotators_read_results(server, monkeypatch):
 
 def test_validating_server_gets_result_dicts(server, monkeypatch):
     monkeypatch.setattr(server, "_validate", True)
-    response = server.sync_lookup(request=dict(TWO_HOP_MIXED), profile=None)
+    response = server.sync_lookup(
+        bare_request(), body=dict(TWO_HOP_MIXED), profile=None
+    )
     assert all(type(r) is dict for r in response["message"]["results"])
 
 
 def test_server_default_serializes_a_stray_block(server):
     block = b'{"node_bindings":{}},{"node_bindings":{}}'
-    data = orjson.dumps({"results": [block]}, default=server._orjson_default)
+    data = orjson.dumps({"results": [block]}, default=orjson_default)
     assert data == b'{"results":[{"node_bindings":{}},{"node_bindings":{}}]}'

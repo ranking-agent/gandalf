@@ -3,6 +3,7 @@
 import os
 
 import pytest
+from starlette.requests import Request
 
 from gandalf.loader import build_graph_from_jsonl
 
@@ -15,3 +16,8 @@ EDGES_FILE = os.path.join(FIXTURES_DIR, "edges.jsonl")
 def graph():
     """Build a graph from test fixtures."""
     return build_graph_from_jsonl(EDGES_FILE, NODES_FILE)
+
+
+def bare_request(path: str = "/query", method: str = "POST") -> Request:
+    """A Starlette Request with no headers, for calling a handler directly."""
+    return Request({"type": "http", "method": method, "path": path, "headers": []})
