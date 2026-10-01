@@ -28,6 +28,21 @@ from prometheus_client import (
     multiprocess,
 )
 
+
+def multiprocess_dir() -> str:
+    """The ``PROMETHEUS_MULTIPROC_DIR`` in effect, or ``""`` when unset."""
+    return os.environ.get("PROMETHEUS_MULTIPROC_DIR", "")
+
+
+# In multiprocess mode the client opens a file under the directory as soon as
+# a metric is defined -- the definitions below, at import -- so the directory
+# has to exist first.  The Docker image sets the variable; this creates the
+# directory.  A container starts with an empty /tmp, so no stale files from
+# an earlier run need clearing.
+if multiprocess_dir():
+    os.makedirs(multiprocess_dir(), exist_ok=True)
+
+
 #: Duration buckets spanning a sub-second one-hop to a multi-minute query.
 _DURATION_BUCKETS = (
     0.05,
@@ -124,9 +139,18 @@ PROCESS_RSS_ANON_BYTES = Gauge(
 )
 
 
-def multiprocess_dir() -> str:
-    """The ``PROMETHEUS_MULTIPROC_DIR`` in effect, or ``""`` when unset."""
-    return os.environ.get("PROMETHEUS_MULTIPROC_DIR", "")
+def metrics_registry() -> CollectorRegistry:
+    """The registry to serve: every process's metrics in multiprocess mode.
+
+    In multiprocess mode the values live in the files under
+    ``PROMETHEUS_MULTIPROC_DIR`` and a ``MultiProcessCollector`` reads them
+    all at scrape time; otherwise the default in-process registry is it.
+    """
+    if multiprocess_dir():
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+        return registry
+    return REGISTRY
 
 
 def metrics_payload() -> tuple[bytes, str]:
@@ -135,12 +159,7 @@ def metrics_payload() -> tuple[bytes, str]:
     Returns:
         The body and its ``Content-Type``.
     """
-    if multiprocess_dir():
-        registry = CollectorRegistry()
-        multiprocess.MultiProcessCollector(registry)
-    else:
-        registry = REGISTRY
-    return generate_latest(registry), CONTENT_TYPE_LATEST
+    return generate_latest(metrics_registry()), CONTENT_TYPE_LATEST
 
 
 # --- Process memory --------------------------------------------------------

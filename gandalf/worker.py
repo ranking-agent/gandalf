@@ -46,6 +46,7 @@ from gandalf.metrics import (
     JOBS,
     JOBS_INFLIGHT,
     PROCESS_RSS_ANON_BYTES,
+    metrics_registry,
     rss_anon_kb,
 )
 from gandalf.queue import (
@@ -259,7 +260,10 @@ def main() -> int:
         heartbeat_file=settings.worker_heartbeat_file,
     )
     if settings.worker_metrics_port:
-        start_http_server(settings.worker_metrics_port)
+        # The image sets PROMETHEUS_MULTIPROC_DIR for the API's gunicorn
+        # workers; a worker is one process, and metrics_registry() serves
+        # its metrics correctly either way.
+        start_http_server(settings.worker_metrics_port, registry=metrics_registry())
 
     def _stop(signum: int, _frame: object) -> None:
         logger.info("Signal %d: stopping after the current job", signum)
