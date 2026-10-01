@@ -40,6 +40,7 @@ from gandalf.config import settings
 from gandalf.execute import execute_to_bytes, load_runtime, post_callback
 from gandalf.execute import serialize_response
 from gandalf.logging_config import configure_logging, request_id_var
+from gandalf.notify import Event, Notifier, mark_worker_leaving
 from gandalf.metrics import (
     JOB_DURATION,
     JOB_QUEUE_WAIT,
@@ -82,6 +83,8 @@ class Worker:
         heartbeat_file: Touched to show the process is alive, or ``""``.
         registry: Where this worker reports its state for the status page.
         history: Where finished jobs are recorded for the status page.
+        notifier: Where this worker's events (start, stop, a job retried,
+            dead-lettered or failed) go.
     """
 
     def __init__(
@@ -98,6 +101,7 @@ class Worker:
         heartbeat_file: str = "",
         registry: Optional[WorkerRegistry] = None,
         history: Optional[JobHistory] = None,
+        notifier: Optional[Notifier] = None,
     ):
         self.graph = graph
         self.bmt = bmt
@@ -110,6 +114,7 @@ class Worker:
         self.heartbeat_file = Path(heartbeat_file) if heartbeat_file else None
         self.registry = registry
         self.history = history
+        self.notifier = notifier
         self.jobs_done = 0
         self.started_at = time.time()
         self.last_outcome = ""
@@ -163,19 +168,57 @@ class Worker:
             self.queue.group,
             os.getpid(),
         )
+        self.report()
+        self.notify(
+            Event(
+                "worker_started",
+                "Worker started",
+                f"Worker {self.consumer} is taking jobs; {self._pool_size()} alive.",
+                {"worker": self.consumer, "pool": self._pool_size()},
+            )
+        )
+        recycled = False
         while not self._stop.is_set():
             if self.max_jobs and self.jobs_done >= self.max_jobs:
                 logger.info(
                     "Worker %s done %d jobs; recycling", self.consumer, self.jobs_done
                 )
+                recycled = True
                 break
             self.heartbeat()
             delivery = self.queue.receive(self.consumer, self.block_seconds)
             if delivery is not None:
                 self.handle(delivery)
+        # Leaving on purpose: say so before the registry entry goes, or the
+        # monitor reports a lost worker.
         if self.registry is not None:
+            mark_worker_leaving(self.registry.client, self.consumer)
             self.registry.forget(self.consumer)
+        pool = self._pool_size()
+        self.notify(
+            Event(
+                "worker_recycled" if recycled else "worker_stopped",
+                "Worker recycled" if recycled else "Worker stopped",
+                f"Worker {self.consumer} exited after {self.jobs_done} jobs "
+                + (
+                    f"(its {self.max_jobs}-job limit); Kubernetes restarts it."
+                    if recycled
+                    else "on SIGTERM (a scale-down or a rollout)."
+                )
+                + f" {pool} alive.",
+                {"worker": self.consumer, "jobs done": self.jobs_done, "pool": pool},
+            )
+        )
         return self.jobs_done
+
+    def notify(self, event: Event) -> None:
+        """Emit *event* if a notifier is attached."""
+        if self.notifier is not None:
+            self.notifier.emit(event)
+
+    def _pool_size(self) -> int:
+        """How many workers currently report, this one included if it does."""
+        return len(self.registry.workers()) if self.registry is not None else 0
 
     def handle(self, delivery: Delivery) -> str:
         """Run one delivered job, deliver its answer and acknowledge it.
@@ -203,6 +246,33 @@ class Worker:
             job.elapsed(),
             delivery.deliveries,
         )
+        summary = summarize_query(job.query)
+        describe = (
+            f"{summary['nodes']} nodes / {summary['edges']} edges, "
+            f"ids {', '.join(summary['ids']) or 'none'}"
+        )
+        if delivery.poisoned:
+            self.notify(
+                Event(
+                    "job_dead_lettered",
+                    "Job dead-lettered",
+                    f"Job {job.job_id[:8]} ended {delivery.deliveries - 1} workers "
+                    "without a result and was not run again; the client gets an "
+                    "Error response.",
+                    {"job": job.job_id, "query": describe, "mode": job.mode},
+                )
+            )
+        elif delivery.deliveries > 1:
+            self.notify(
+                Event(
+                    "job_retried",
+                    "Job retried",
+                    f"Job {job.job_id[:8]} was abandoned by its previous worker "
+                    f"and is being run again by {self.consumer} "
+                    f"(attempt {delivery.deliveries}).",
+                    {"job": job.job_id, "query": describe, "mode": job.mode},
+                )
+            )
         if delivery.poisoned:
             body = serialize_response(
                 error_response(
@@ -225,6 +295,17 @@ class Worker:
                 JOBS_INFLIGHT.track_inprogress(),
             ):
                 body, http_status, outcome = self.execute(job)
+        if outcome == "error":
+            self.notify(
+                Event(
+                    "job_failed",
+                    "Job failed",
+                    f"Job {job.job_id[:8]} raised on worker {self.consumer}; the "
+                    "client gets an Error response. See the worker log for the "
+                    "traceback.",
+                    {"job": job.job_id, "query": describe, "mode": job.mode},
+                )
+            )
         self.deliver(job, body, http_status)
         self.queue.ack(delivery.entry_id)
         self.jobs_done += 1
@@ -325,6 +406,7 @@ def main() -> int:
         heartbeat_file=settings.worker_heartbeat_file,
         registry=WorkerRegistry.from_settings(client),
         history=JobHistory.from_settings(client),
+        notifier=Notifier.from_settings(client),
     )
     if settings.worker_metrics_port:
         # The image sets PROMETHEUS_MULTIPROC_DIR for the API's gunicorn
@@ -340,6 +422,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop)
 
     done = worker.run()
+    if worker.notifier is not None and worker.notifier.webhook is not None:
+        worker.notifier.webhook.flush()
     logger.info("Worker exiting after %d jobs", done)
     return 0
 

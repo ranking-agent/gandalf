@@ -653,3 +653,241 @@ def test_status_shows_a_running_job_and_a_dead_letter(
     assert data["jobs"]["recent"][0]["outcome"] == "poisoned"
     assert data["jobs"]["windows"]["5m"]["failed"] == 1
     queue.ack(delivery.entry_id)
+
+
+# ---------------------------------------------------------------------------
+# Alerts: the log, throttling, the monitor, the worker's events
+# ---------------------------------------------------------------------------
+
+from gandalf.notify import (  # noqa: E402
+    BACKLOG_FLAG,
+    KNOWN_WORKERS,
+    LOG_STREAM,
+    Event,
+    Monitor,
+    Notifier,
+    SlackWebhook,
+    mark_worker_leaving,
+)
+from tests.test_notify import webhook_server  # noqa: E402, F401
+
+
+@pytest.fixture
+def notifier(client, webhook_server):  # noqa: F811
+    url, hook = webhook_server
+    n = Notifier(
+        client,
+        webhook=SlackWebhook(url),
+        kinds=frozenset(
+            {
+                "worker_started",
+                "worker_stopped",
+                "worker_lost",
+                "job_retried",
+                "job_dead_lettered",
+                "job_failed",
+                "queue_backlog",
+                "queue_backlog_cleared",
+                "queue_stuck",
+            }
+        ),
+        throttle_seconds=0.3,
+        log_maxlen=50,
+    )
+    yield n, hook
+
+
+def test_alert_log_keeps_every_event_newest_first(notifier):
+    n, _ = notifier
+    n.emit(Event("worker_started", "Worker started", "w1 up", {"worker": "w1"}))
+    n.emit(Event("worker_recycled", "Worker recycled"))  # not a Slack kind here
+    recent = n.recent()
+    assert [a["kind"] for a in recent] == ["worker_recycled", "worker_started"]
+    assert recent[1]["fields"] == {"worker": "w1"}
+    assert recent[1]["severity"] == "info"
+    assert isinstance(recent[1]["at"], float)
+
+
+def test_noisy_kinds_are_throttled_and_counted(notifier):
+    n, hook = notifier
+    sent = [n.emit(Event("job_failed", "Job failed", f"job {i}")) for i in range(3)]
+    assert sent == [True, False, False]
+    time.sleep(0.35)
+    assert n.emit(Event("job_failed", "Job failed", "job 3")) is True
+    assert n.webhook.flush(5.0)
+    assert len(hook.received) == 2
+    assert (
+        "_2 similar events since the last message_"
+        in hook.received[1]["blocks"][0]["text"]["text"]
+    )
+    # every one of them is in the log regardless
+    assert sum(1 for a in n.recent() if a["kind"] == "job_failed") == 4
+
+
+def test_unthrottled_kinds_always_send(notifier):
+    n, hook = notifier
+    assert [n.emit(Event("worker_lost", "Worker lost")) for _ in range(3)] == [True] * 3
+    assert n.webhook.flush(5.0)
+    assert len(hook.received) == 3
+
+
+@pytest.fixture
+def monitor(client, queue, registry, notifier):
+    n, _ = notifier
+    return Monitor(
+        client,
+        queue,
+        registry,
+        n,
+        interval_seconds=0.2,
+        lag_threshold=2,
+        stuck_seconds=0.3,
+    )
+
+
+def test_monitor_reports_a_worker_that_vanished(monitor, registry):
+    registry.report(
+        "w1",
+        state="running",
+        job_id="abcdef0123",
+        job_query={"nodes": 2, "edges": 1, "ids": ["X:1"]},
+        job_started_at=time.time() - 42,
+        jobs_done=7,
+        rss_anon_kb=2048 * 1024,
+    )
+    assert monitor.tick() == []  # learned about w1
+    time.sleep(0.4)  # the registry TTL (0.3s) passes without a refresh
+    events = monitor.tick()
+    assert [e.kind for e in events] == ["worker_lost"]
+    lost = events[0]
+    assert lost.fields["worker"] == "w1" and lost.fields["jobs done"] == 7
+    assert lost.fields["was running"].startswith(
+        "abcdef01 (2 nodes / 1 edges, ids X:1) for 4"
+    )
+    assert lost.fields["anon RSS"] == "2048 MB"
+    assert monitor.tick() == []  # reported once
+
+
+def test_monitor_ignores_a_worker_that_left_on_purpose(monitor, registry, client):
+    registry.report("w1", state="idle", jobs_done=1)
+    monitor.tick()
+    mark_worker_leaving(client, "w1")
+    registry.forget("w1")
+    assert monitor.tick() == []
+    assert not client.hexists(KNOWN_WORKERS, "w1")
+
+
+def test_monitor_alerts_on_backlog_once_and_on_clearing(monitor, queue, registry):
+    registry.report("w1", state="idle", jobs_done=0)
+    for _ in range(3):
+        queue.enqueue(Job.new(dict(ONE_HOP)))
+    events = monitor.tick()
+    assert [e.kind for e in events] == ["queue_backlog"]
+    assert events[0].fields == {"waiting": 3, "running": 0, "workers": 1}
+    assert monitor.tick() == []  # still over, already said
+    for _ in range(3):
+        d = queue.receive("w1", block_seconds=0.1)
+        queue.ack(d.entry_id)
+    events = monitor.tick()
+    assert [e.kind for e in events] == ["queue_backlog_cleared"]
+    assert monitor.tick() == []
+
+
+def test_monitor_alerts_on_a_stuck_job(monitor, queue):
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    d = queue.receive("slow", block_seconds=0.1)
+    assert monitor.tick() == []
+    time.sleep(0.35)
+    events = monitor.tick()
+    assert [e.kind for e in events] == ["queue_stuck"]
+    assert events[0].fields["worker"] == "slow"
+    assert monitor.tick() == []  # the same stuck job is not repeated
+    queue.ack(d.entry_id)
+    assert monitor.tick() == []
+
+
+def test_only_one_monitor_is_active(client, queue, registry, notifier):
+    n, _ = notifier
+    first = Monitor(client, queue, registry, n, interval_seconds=0.2, lag_threshold=1)
+    second = Monitor(client, queue, registry, n, interval_seconds=0.2, lag_threshold=1)
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert first.is_leader() is True
+    assert second.is_leader() is False
+    assert second.tick() == []
+    assert [e.kind for e in first.tick()] == ["queue_backlog"]
+    client.delete("gandalf:notify:monitor")  # the leader died
+    assert second.is_leader() is True
+
+
+def test_worker_emits_its_lifecycle_and_job_events(
+    graph, bmt, queue, store, registry, history, notifier, client
+):  # noqa: F811
+    n, hook = notifier
+    w = Worker(
+        graph,
+        bmt,
+        queue,
+        store,
+        consumer="w1",
+        max_jobs=3,
+        block_seconds=0.05,
+        registry=registry,
+        history=history,
+        notifier=n,
+    )
+    retried = Job.new(dict(ONE_HOP))
+    queue.enqueue(retried)
+    first = queue.receive("died", block_seconds=0.1)  # a worker took it and died
+    assert first.job == retried
+    broken = Job.new(
+        {
+            "message": {
+                "query_graph": {
+                    "nodes": {"n0": {"ids": ["X:1"]}},
+                    "edges": {"e0": {"subject": "n0", "object": "n9"}},
+                }
+            }
+        }
+    )
+    queue.enqueue(broken)
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    time.sleep(0.3)  # past claim_idle_seconds: the abandoned job is claimable
+
+    assert w.run() == 3
+    kinds = [a["kind"] for a in reversed(n.recent())]
+    assert kinds == [
+        "worker_started",
+        "job_retried",
+        "job_failed",
+        "worker_recycled",
+    ] or kinds == ["worker_started", "job_failed", "job_retried", "worker_recycled"]
+    assert not client.hexists(KNOWN_WORKERS, "w1")
+    assert n.webhook.flush(5.0)
+    texts = [r["text"] for r in hook.received]
+    assert any("Worker started" in t for t in texts)
+    assert any("Job retried" in t for t in texts)
+    assert any("Job failed" in t for t in texts)
+    assert not any("recycled" in t for t in texts)  # not an enabled kind
+
+
+def test_worker_reports_a_dead_letter(graph, bmt, queue, store, notifier):  # noqa: F811
+    n, hook = notifier
+    job = Job.new(dict(ONE_HOP))
+    queue.enqueue(job)
+    delivery = queue.receive("w", block_seconds=0.1)
+    w = Worker(graph, bmt, queue, store, consumer="w", notifier=n)
+    w.handle(Delivery(delivery.entry_id, job, deliveries=3, poisoned=True))
+    assert n.recent()[0]["kind"] == "job_dead_lettered"
+    assert n.webhook.flush(5.0)
+    assert "Job dead-lettered" in hook.received[0]["text"]
+
+
+def test_status_json_lists_alerts(api, notifier, monkeypatch):
+    n, _ = notifier
+    monkeypatch.setattr(gandalf_server, "NOTIFIER", n)
+    n.emit(Event("queue_backlog", "Queue backlog", "7 waiting", {"waiting": 7}))
+    alerts = api.get("/status.json").json()["alerts"]
+    assert alerts["slack"] is True
+    assert "worker_lost" in alerts["kinds"]
+    assert alerts["recent"][0]["title"] == "Queue backlog"
+    assert alerts["recent"][0]["fields"] == {"waiting": 7}

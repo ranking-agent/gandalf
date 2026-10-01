@@ -35,6 +35,9 @@
   .badge.timeout .dot, .badge.expired .dot, .badge.stopping .dot { background: var(--warning); }
   .badge.error .dot { background: var(--serious); }
   .badge.poisoned .dot, .badge.bad .dot { background: var(--critical); }
+  .badge.info .dot { background: var(--accent); }
+  .badge.warning .dot { background: var(--warning); }
+  .badge.critical .dot { background: var(--critical); }
   .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   .tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 8px; padding: 10px 12px; }
   .tile .label { color: var(--ink-2); font-size: 12px; }
@@ -87,6 +90,9 @@
         <span style="--c: var(--critical)">✕ failed</span>
       </div>
     </div>
+
+    <h2>Alerts <span id="alerts-sub" class="meta"></span></h2>
+    <div class="card"><table id="alerts"></table></div>
 
     <h2>Workers</h2>
     <div class="card"><table id="workers"></table></div>
@@ -215,6 +221,14 @@
     $("queue-section").style.display = d.queue ? "" : "none";
     if (d.queue) {
       chart(d.jobs ? d.jobs.per_minute : []);
+      const al = d.alerts || {recent: [], slack: false, kinds: []};
+      $("alerts-sub").textContent = al.slack ? "· Slack on for " + al.kinds.length + " kinds" : "· Slack not configured (GANDALF_SLACK_WEBHOOK_URL)";
+      const sevIcon = {info: "ℹ", warning: "⚠", critical: "‼"};
+      table($("alerts"), [{label: "When"}, {label: "Severity"}, {label: "Event"}, {label: "Detail"}],
+        al.recent.map((a) => [td(fmtT(a.at)), td(badge(a.severity, sevIcon[a.severity] + " " + a.severity)),
+          td(`<b>${esc(a.title)}</b><br><span class="meta">${esc(a.kind)}</span>`),
+          td(esc(a.detail) + (Object.keys(a.fields).length ? `<br><span class="meta">${Object.entries(a.fields).map(([k, v]) => esc(k) + ": " + esc(v)).join(" · ")}</span>` : ""))]),
+        "Nothing has happened worth a message.");
       const w = (d.workers && d.workers.reports) || [];
       table($("workers"), [{label: "Worker"}, {label: "State"}, {label: "Current job"}, {label: "Query"}, {label: "Running for", num: true}, {label: "Done", num: true}, {label: "Last outcome"}, {label: "Anon RSS", num: true}, {label: "Seen", num: true}],
         w.map((r) => [td(esc(r.name), "mono"), td(badge(r.stopping === "true" ? "stopping" : r.state, r.stopping === "true" ? "stopping" : r.state)),

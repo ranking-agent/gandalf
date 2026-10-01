@@ -54,6 +54,17 @@ itself, so it needs no access to the cluster, Prometheus or Jaeger.  Port-
 forward or expose the Service and open it in a browser; `/status.json` is
 the same data for scripts.
 
+## Alerts
+
+With a Slack incoming webhook in the `gandalf-slack` Secret (key
+`webhook-url`), both tiers post events to its channel: workers joining and
+leaving (scaling, rollouts), a worker lost without a clean exit (an OOM
+kill, with what it was running), jobs retried or dead-lettered, failed
+queries, the backlog crossing a threshold and clearing, and a job stuck
+too long.  Without the Secret the same events still appear in the
+"Alerts" section of `/status`.  The kinds and thresholds are settings;
+see "Alerts and Slack" in the README.
+
 ## Scaling signal
 
 KEDA's `redis-streams` scaler reads the consumer group's lag

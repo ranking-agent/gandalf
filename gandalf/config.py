@@ -122,6 +122,28 @@ class Settings(BaseSettings):
     # Redis Stream, gandalf:jobs:history).
     history_maxlen: int = 2000
 
+    # Alerts (gandalf/notify.py).  Every event goes to the alert log shown
+    # on /status; with a Slack incoming-webhook URL the enabled kinds are
+    # posted to its channel too.
+    slack_webhook_url: str = ""
+    # Comma-separated kinds, or "all".  worker_recycled (a routine exit
+    # after worker_max_jobs) is off by default.
+    slack_events: str = (
+        "worker_started,worker_stopped,worker_lost,job_retried,"
+        "job_dead_lettered,job_failed,queue_backlog,queue_backlog_cleared,"
+        "queue_stuck"
+    )
+    slack_environment: str = ""  # label in front of every title, e.g. "prod"
+    slack_status_url: str = ""  # linked from messages; default <server_url>/status
+    # Minimum gap between Slack messages of one noisy kind (job_failed,
+    # job_retried); the next message counts what was suppressed.
+    slack_throttle_seconds: float = 300.0
+    # Monitor (runs in the API; one active instance across all pods).
+    monitor_interval_seconds: float = 15.0
+    alert_queue_lag_threshold: int = 5
+    alert_stuck_seconds: float = 1800.0
+    alert_log_maxlen: int = 500
+
     # Worker process (python -m gandalf.worker)
     worker_name: str = ""  # consumer name; default "<hostname>-<pid>"
     # Exit after this many jobs so Kubernetes restarts the process and

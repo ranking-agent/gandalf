@@ -78,6 +78,7 @@ gandalf/
 ├── worker.py         # Queue worker entry point (python -m gandalf.worker)
 ├── metrics.py        # Prometheus metrics for both processes
 ├── status.py         # /status.json snapshot: queue, workers, job history, this pod
+├── notify.py         # Events, the alert log, Slack webhook, the elected monitor
 ├── static/status.html  # The /status page (self-contained; polls status.json)
 ├── server.py         # FastAPI application
 └── main.py           # Dev server entry point
@@ -343,6 +344,14 @@ through a consumer group and run them.  Rules that follow:
   `Worker.handle` appends each finished job to the `JobHistory` (a capped
   stream).  `/status.json` is built from those plus `XINFO`/`XPENDING`;
   the page never needs more than the API's own port.
+- **Events fire once.**  `gandalf.notify.Event`s go through
+  `Notifier.emit` (alert log in Redis, Slack when configured).  The worker
+  emits what only it sees (its start/stop, a job it retried, dead-lettered
+  or that raised); the `Monitor` in the API emits what needs a view of the
+  whole deployment (a lost worker, the backlog, a stuck job) and holds a
+  Redis lock so one instance across all pods is active.  A clean worker
+  exit calls `mark_worker_leaving` before `registry.forget`, or the
+  monitor reports it lost.  New kinds go in `KINDS` with a severity.
 - **Tests against a real Redis** live in `tests/test_queue_redis.py`
   under the `integration` marker (they start a local `redis-server`, or
   use `GANDALF_TEST_REDIS_URL`); CI runs them with a Redis service.  The

@@ -21,6 +21,7 @@ from gandalf import __version__
 from gandalf.config import settings
 from gandalf.metrics import metrics_registry, rss_anon_kb, rss_kb
 from gandalf.jobs import JobHistory, JobQueue, WorkerRegistry
+from gandalf.notify import Notifier
 
 #: Outcomes a job can end with, in the order the page lists them.
 OUTCOMES = ("ok", "timeout", "expired", "error", "poisoned")
@@ -144,6 +145,7 @@ def snapshot(
     queue: Optional[JobQueue],
     workers: Optional[WorkerRegistry],
     history: Optional[JobHistory],
+    notifier: Optional[Notifier] = None,
     *,
     recent: int = 50,
     now: Optional[float] = None,
@@ -193,6 +195,12 @@ def snapshot(
             },
             "per_minute": per_minute(records, 60, now),
             "history_size": len(records),
+        }
+    if notifier is not None:
+        data["alerts"] = {
+            "slack": notifier.slack_enabled,
+            "kinds": sorted(notifier.kinds),
+            "recent": notifier.recent(recent),
         }
     return data
 

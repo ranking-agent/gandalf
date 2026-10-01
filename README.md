@@ -397,6 +397,15 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_RESULT_TTL_SECONDS` | `900` | How long an uncollected `/query` result lives in Redis |
 | `GANDALF_RESULT_CHUNK_BYTES` | `67108864` | Largest value written to one Redis key |
 | `GANDALF_HISTORY_MAXLEN` | `2000` | Finished jobs the status page's history keeps |
+| `GANDALF_SLACK_WEBHOOK_URL` | _(empty)_ | Slack incoming-webhook URL; set it to post alerts to its channel |
+| `GANDALF_SLACK_EVENTS` | all but `worker_recycled` | Comma-separated event kinds Slack receives, or `all` |
+| `GANDALF_SLACK_ENVIRONMENT` | _(empty)_ | Label in front of every Slack title, e.g. `prod` |
+| `GANDALF_SLACK_STATUS_URL` | `<GANDALF_SERVER_URL>/status` | Linked from every Slack message |
+| `GANDALF_SLACK_THROTTLE_SECONDS` | `300` | Minimum gap between Slack messages of one noisy kind (`job_failed`, `job_retried`) |
+| `GANDALF_MONITOR_INTERVAL_SECONDS` | `15` | How often the (single, elected) monitor looks |
+| `GANDALF_ALERT_QUEUE_LAG_THRESHOLD` | `5` | Jobs waiting for a worker at which `queue_backlog` fires |
+| `GANDALF_ALERT_STUCK_SECONDS` | `1800` | A job delivered and unfinished this long fires `queue_stuck` |
+| `GANDALF_ALERT_LOG_MAXLEN` | `500` | Alerts the status page keeps |
 | `GANDALF_WORKER_NAME` | `<hostname>-<pid>` | The worker's consumer name |
 | `GANDALF_WORKER_MAX_JOBS` | `500` | A worker exits after this many jobs (0 = never) |
 | `GANDALF_WORKER_METRICS_PORT` | `9100` | Worker Prometheus port (0 = off) |
@@ -541,6 +550,36 @@ Prometheus or Jaeger -- so it works for anyone who can reach the API:
 HTML file (`gandalf/static/status.html`) that polls `status.json` every
 five seconds; nothing is fetched from outside the server.  Without a queue
 it shows the in-process sections only.
+
+### Alerts and Slack
+
+Things worth a message are *events*.  Every event goes to the alert log
+shown on `/status`; with `GANDALF_SLACK_WEBHOOK_URL` set to a Slack
+[incoming webhook](https://api.slack.com/messaging/webhooks), the kinds in
+`GANDALF_SLACK_EVENTS` are posted to the webhook's channel as well, with a
+link back to the status page:
+
+| Kind | Severity | When |
+|---|---|---|
+| `worker_started` | info | A worker joined the pool (a scale-up, a rollout, a restart) |
+| `worker_stopped` | info | A worker left on SIGTERM (a scale-down or a rollout) |
+| `worker_recycled` | info | A worker exited after its `GANDALF_WORKER_MAX_JOBS` (routine; off by default) |
+| `worker_lost` | critical | A worker stopped reporting without a clean exit: an OOM kill, usually. Says what it was running |
+| `job_retried` | warning | A job abandoned by a dead worker is being run again |
+| `job_dead_lettered` | critical | A job ended two workers and was answered with an error instead of a third try |
+| `job_failed` | warning | A query raised; the client got an Error response |
+| `queue_backlog` / `queue_backlog_cleared` | warning / info | Jobs waiting for a worker crossed `GANDALF_ALERT_QUEUE_LAG_THRESHOLD`, then dropped to zero |
+| `queue_stuck` | warning | A job has been with one worker longer than `GANDALF_ALERT_STUCK_SECONDS` |
+
+Each event is emitted exactly once however many pods run.  The worker
+events come from the worker that saw them.  The threshold events
+(`worker_lost`, `queue_backlog`, `queue_stuck`) come from a monitor thread
+that every API process runs but only one, elected through a Redis lock, is
+active; if that pod dies another takes over within a few intervals.
+`job_failed` and `job_retried` can come in bursts, so Slack gets at most
+one of each per `GANDALF_SLACK_THROTTLE_SECONDS`, and the next message says
+how many were suppressed.  Scaling itself shows up as `worker_started` and
+`worker_stopped`, each with the pool size after the change.
 
 `docker compose --profile queue up --build` runs the API, a Redis and one
 worker locally with `GANDALF_QUEUE_URL=redis://redis:6379/0`.

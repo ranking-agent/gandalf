@@ -60,6 +60,7 @@ from gandalf.jobs import (
     StoredResult,
     WorkerRegistry,
 )
+from gandalf.notify import Monitor, Notifier
 from gandalf.status import snapshot
 from translator_tom import TOMBase
 from translator_tom.model_dicts import QueryDict
@@ -258,6 +259,8 @@ QUEUE: Optional[JobQueue] = None
 RESULTS: Optional[ResultStore] = None
 WORKERS: Optional[WorkerRegistry] = None
 HISTORY: Optional[JobHistory] = None
+NOTIFIER: Optional[Notifier] = None
+MONITOR: Optional[Monitor] = None
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +270,7 @@ HISTORY: Optional[JobHistory] = None
 
 def open_queue() -> None:
     """Connect this process to the configured job queue (no-op without one)."""
-    global QUEUE, RESULTS, WORKERS, HISTORY
+    global QUEUE, RESULTS, WORKERS, HISTORY, NOTIFIER, MONITOR
     if not settings.queue_url or QUEUE is not None:
         return
     client = redis.Redis.from_url(settings.queue_url)
@@ -275,6 +278,19 @@ def open_queue() -> None:
     RESULTS = ResultStore.from_settings(client)
     WORKERS = WorkerRegistry.from_settings(client)
     HISTORY = JobHistory.from_settings(client)
+    NOTIFIER = Notifier.from_settings(client)
+    # Every API process runs a monitor thread; the Redis lock inside makes
+    # exactly one of them, across all pods, the one that looks and alerts.
+    MONITOR = Monitor(
+        client,
+        QUEUE,
+        WORKERS,
+        NOTIFIER,
+        interval_seconds=settings.monitor_interval_seconds,
+        lag_threshold=settings.alert_queue_lag_threshold,
+        stuck_seconds=settings.alert_stuck_seconds,
+    )
+    MONITOR.start()
     QUEUE.ensure_group()
     logger.info(
         "Queue mode: jobs go to %s on %s", settings.queue_stream, settings.queue_url
@@ -296,6 +312,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down — releasing resources...")
     if heartbeat_stop is not None:
         heartbeat_stop.set()
+    if MONITOR is not None:
+        MONITOR.stop()
     if QUEUE is not None:
         QUEUE.client.close()
     if (
@@ -564,7 +582,7 @@ async def status_page() -> HTMLResponse:
 @APP.get("/status.json", include_in_schema=False)
 def status_json(recent: int = Query(50, ge=1, le=500)) -> dict:
     """The data behind ``/status``; see :mod:`gandalf.status`."""
-    return snapshot(GRAPH, QUEUE, WORKERS, HISTORY, recent=recent)
+    return snapshot(GRAPH, QUEUE, WORKERS, HISTORY, NOTIFIER, recent=recent)
 
 
 # ---------------------------------------------------------------------------

@@ -629,6 +629,11 @@ class WorkerRegistry:
             ttl_seconds=settings.queue_claim_idle_seconds,
         )
 
+    @property
+    def client(self) -> redis.Redis:
+        """The underlying Redis client."""
+        return self._r
+
     def report(self, name: str, **fields: object) -> None:
         """Record *fields* as *name*'s current state (replacing the last report)."""
         now = time.time()

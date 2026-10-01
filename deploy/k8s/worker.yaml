@@ -31,6 +31,13 @@ spec:
             - {name: GANDALF_GRAPH_PATH, value: /data/graph}
             - {name: GANDALF_LOG_FORMAT, value: json}
             - {name: GANDALF_QUEUE_URL, value: redis://redis:6379/0}
+            # Alerts to Slack (optional).  The API's monitor sends the
+            # threshold alerts, the workers their own events, so both tiers
+            # need the webhook.  See "Alerts and Slack" in the README.
+            - name: GANDALF_SLACK_WEBHOOK_URL
+              valueFrom: {secretKeyRef: {name: gandalf-slack, key: webhook-url, optional: true}}
+            - {name: GANDALF_SLACK_ENVIRONMENT, value: prod}
+            - {name: GANDALF_SLACK_STATUS_URL, value: https://gandalf.example.org/status}
             # The pod name makes the consumer name unique and traceable.
             - name: GANDALF_WORKER_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
