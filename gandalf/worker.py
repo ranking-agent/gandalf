@@ -28,6 +28,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -60,6 +61,7 @@ from gandalf.jobs import (
     WorkerRegistry,
     default_consumer_name,
     keepalive,
+    redis_client,
     summarize_query,
 )
 from gandalf.trapi import error_response, timeout_response
@@ -168,16 +170,10 @@ class Worker:
             self.queue.group,
             os.getpid(),
         )
+        self.notify(self._start_event())
         self.report()
-        self.notify(
-            Event(
-                "worker_started",
-                "Worker started",
-                f"Worker {self.consumer} is taking jobs; {self._pool_size()} alive.",
-                {"worker": self.consumer, "pool": self._pool_size()},
-            )
-        )
         recycled = False
+        backoff = 1.0
         while not self._stop.is_set():
             if self.max_jobs and self.jobs_done >= self.max_jobs:
                 logger.info(
@@ -185,10 +181,27 @@ class Worker:
                 )
                 recycled = True
                 break
-            self.heartbeat()
-            delivery = self.queue.receive(self.consumer, self.block_seconds)
-            if delivery is not None:
-                self.handle(delivery)
+            # Redis trouble (a timeout, an outage, a restart) is waited out
+            # here rather than ending the process: the graph took seconds to
+            # open, and a job that was not acknowledged is redelivered.
+            try:
+                self.heartbeat()
+                delivery = self.queue.receive(self.consumer, self.block_seconds)
+                if delivery is not None:
+                    self.handle(delivery)
+            except redis.RedisError as exc:
+                logger.warning(
+                    "Worker %s: Redis unavailable (%s: %s); retrying in %.0fs",
+                    self.consumer,
+                    type(exc).__name__,
+                    exc,
+                    backoff,
+                )
+                self._current = {}
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, 30.0)
+                continue
+            backoff = 1.0
         # Leaving on purpose: say so before the registry entry goes, or the
         # monitor reports a lost worker.
         if self.registry is not None:
@@ -210,6 +223,55 @@ class Worker:
             )
         )
         return self.jobs_done
+
+    def _start_event(self) -> Event:
+        """ "Worker started", or "Worker restarted" when the last instance died.
+
+        A report under this worker's name that is still live means the
+        previous process with this name never exited cleanly (a clean exit
+        removes it): it crashed, or was killed.  Its last words, if it
+        managed any, say which.
+        """
+        previous = self.registry.get(self.consumer) if self.registry else None
+        pool = self._pool_size() + (0 if previous else 1)
+        if previous is None:
+            return Event(
+                "worker_started",
+                "Worker started",
+                f"Worker {self.consumer} is taking jobs; {pool} alive.",
+                {"worker": self.consumer, "pool": pool},
+            )
+        now = time.time()
+        last_words = self.registry.last_words(self.consumer) if self.registry else ""
+        fields: dict = {
+            "worker": self.consumer,
+            "previous lifetime": f"{now - float(previous.get('started_at') or now):.0f}s",
+            "jobs done": previous.get("jobs_done", 0),
+            "last report": f"{now - float(previous.get('last_seen') or now):.0f}s ago",
+        }
+        if previous.get("state") == "running":
+            query = previous.get("job_query") or {}
+            fields["was running"] = (
+                f"{str(previous.get('job_id', ''))[:8]} "
+                f"({query.get('nodes', '?')} nodes / {query.get('edges', '?')} edges, "
+                f"ids {', '.join(query.get('ids') or []) or 'none'})"
+            )
+            fields["anon RSS"] = f"{int(previous.get('rss_anon_kb', 0)) // 1024} MB"
+        if last_words:
+            fields["died with"] = last_words
+            cause = "It died with the error below."
+        else:
+            cause = (
+                "It recorded no error, so it was killed from outside: a kernel "
+                "OOM kill or a liveness probe, usually."
+            )
+        return Event(
+            "worker_restarted",
+            "Worker restarted after dying",
+            f"Worker {self.consumer} is back, but its previous instance never "
+            f"exited cleanly. {cause} {pool} alive.",
+            fields,
+        )
 
     def notify(self, event: Event) -> None:
         """Emit *event* if a notifier is attached."""
@@ -393,7 +455,7 @@ def main() -> int:
         raise SystemExit("GANDALF_QUEUE_URL must be set to run a worker")
 
     graph, bmt = load_runtime()
-    client = redis.Redis.from_url(settings.queue_url)
+    client = redis_client()
     worker = Worker(
         graph,
         bmt,
@@ -421,7 +483,21 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
-    done = worker.run()
+    try:
+        done = worker.run()
+    except Exception:
+        # The last words: whatever killed the loop, kept for the next
+        # instance of this worker to report (see Worker._start_event).  A
+        # kill signal leaves none, which is itself the diagnosis.
+        logger.exception("Worker %s died", worker.consumer)
+        if worker.registry is not None:
+            try:
+                worker.registry.record_last_words(
+                    worker.consumer, traceback.format_exc(limit=-3).strip()[-1500:]
+                )
+            except redis.RedisError:
+                pass  # dying because Redis is gone: nowhere to leave them
+        raise
     if worker.notifier is not None and worker.notifier.webhook is not None:
         worker.notifier.webhook.flush()
     logger.info("Worker exiting after %d jobs", done)

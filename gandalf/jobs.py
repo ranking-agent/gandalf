@@ -184,6 +184,40 @@ def default_consumer_name() -> str:
     return f"{socket.gethostname()}-{os.getpid()}"
 
 
+def redis_client(url: Optional[str] = None) -> redis.Redis:
+    """A Redis client for the queue, with timeouts so nothing hangs forever.
+
+    Query parameters on the URL (``?socket_timeout=5``) take precedence over
+    the configured defaults, as redis-py has it.
+    """
+    return redis.Redis.from_url(
+        url if url is not None else settings.queue_url,
+        socket_timeout=settings.queue_socket_timeout_seconds,
+        socket_connect_timeout=settings.queue_connect_timeout_seconds,
+        health_check_interval=30,
+    )
+
+
+def blocking_slice(client: redis.Redis, wanted: float) -> float:
+    """How long one blocking read may last on *client*.
+
+    redis-py applies the socket timeout to blocking commands too, so a
+    ``BLPOP`` or ``XREADGROUP BLOCK`` longer than it raises
+    ``TimeoutError`` instead of waiting.  Blocking waits here are done in
+    slices of at most half the socket timeout and looped.
+
+    Examples:
+        >>> blocking_slice(redis.Redis(socket_timeout=None), 5.0)
+        5.0
+        >>> blocking_slice(redis.Redis(socket_timeout=4), 5.0)
+        2.0
+    """
+    socket_timeout = client.connection_pool.connection_kwargs.get("socket_timeout")
+    if socket_timeout is None:
+        return wanted
+    return min(wanted, max(float(socket_timeout) / 2, 0.05))
+
+
 def summarize_query(query: QueryDict) -> dict:
     """A few words about a query, for the status page and the job history.
 
@@ -261,7 +295,7 @@ class JobQueue:
     def from_settings(cls, client: Optional[redis.Redis] = None) -> "JobQueue":
         """A queue on the configured stream, group and limits."""
         return cls(
-            client if client is not None else redis.Redis.from_url(settings.queue_url),
+            client if client is not None else redis_client(),
             stream=settings.queue_stream,
             group=settings.queue_group,
             dead_stream=settings.queue_dead_stream,
@@ -310,7 +344,7 @@ class JobQueue:
             consumer,
             {self.stream: ">"},
             count=1,
-            block=int(block_seconds * 1000),
+            block=int(blocking_slice(self._r, block_seconds) * 1000),
         )
         if not response:
             return None
@@ -513,7 +547,7 @@ class ResultStore:
     def from_settings(cls, client: Optional[redis.Redis] = None) -> "ResultStore":
         """A store with the configured TTL, chunk size and compression level."""
         return cls(
-            client if client is not None else redis.Redis.from_url(settings.queue_url),
+            client if client is not None else redis_client(),
             ttl_seconds=settings.result_ttl_seconds,
             chunk_bytes=settings.result_chunk_bytes,
             zstd_level=settings.compress_zstd_level,
@@ -560,11 +594,19 @@ class ResultStore:
         Returns:
             The result, or None if it did not arrive in time.
         """
-        # BLPOP's zero means "forever", so the shortest wait is one tick.
-        popped = self._r.blpop([self._key(job_id, "done")], timeout=max(timeout, 0.01))
-        if popped is None:
-            return None
-        return self.get(job_id)
+        key = self._key(job_id, "done")
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            # BLPOP's zero means "forever", so the shortest wait is one tick;
+            # each wait stays under the socket timeout (blocking_slice).
+            popped = self._r.blpop(
+                [key], timeout=max(blocking_slice(self._r, remaining), 0.01)
+            )
+            if popped is not None:
+                return self.get(job_id)
 
     def get(self, job_id: str) -> Optional[StoredResult]:
         """The stored result, or None if there is none (or it expired)."""
@@ -625,7 +667,7 @@ class WorkerRegistry:
     def from_settings(cls, client: Optional[redis.Redis] = None) -> "WorkerRegistry":
         """A registry whose reports outlive a few missed keepalives."""
         return cls(
-            client if client is not None else redis.Redis.from_url(settings.queue_url),
+            client if client is not None else redis_client(),
             ttl_seconds=settings.queue_claim_idle_seconds,
         )
 
@@ -647,6 +689,20 @@ class WorkerRegistry:
         pipe.pexpire(key, int(self.ttl * 1000))
         pipe.zadd(self._index, {name: now})
         pipe.execute()
+
+    def get(self, name: str) -> Optional[dict]:
+        """*name*'s live report, or None if it has none (never ran, or expired)."""
+        fields = self._r.hgetall(f"{self.prefix}:{name}")
+        return _typed_report(_decode(fields)) if fields else None
+
+    def record_last_words(self, name: str, text: str, ttl_seconds: int = 3600) -> None:
+        """Keep why *name* is dying, for its next incarnation to report."""
+        self._r.set(f"{self.prefix}:{name}:last_words", text, ex=ttl_seconds)
+
+    def last_words(self, name: str) -> str:
+        """What *name*'s previous incarnation recorded as it died, consumed."""
+        words = self._r.getdel(f"{self.prefix}:{name}:last_words")
+        return words.decode() if words else ""
 
     def forget(self, name: str) -> None:
         """Drop *name*'s report (a clean exit)."""
@@ -727,7 +783,7 @@ class JobHistory:
     def from_settings(cls, client: Optional[redis.Redis] = None) -> "JobHistory":
         """A history of the configured length."""
         return cls(
-            client if client is not None else redis.Redis.from_url(settings.queue_url),
+            client if client is not None else redis_client(),
             maxlen=settings.history_maxlen,
         )
 

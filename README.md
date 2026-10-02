@@ -386,6 +386,8 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_SKIP_PRELOAD` | `false` | Skip module-level graph loading |
 | `GANDALF_WORKERS` | `2` | Gunicorn worker count |
 | `GANDALF_QUEUE_URL` | _(empty)_ | Redis URL; set it to run queries in worker processes (see [Queue mode](#queue-mode-workers-and-autoscaling)) |
+| `GANDALF_QUEUE_SOCKET_TIMEOUT_SECONDS` | `30` | Redis socket timeout; a `?socket_timeout=` on the URL overrides it. Blocking waits are sliced to stay under it |
+| `GANDALF_QUEUE_CONNECT_TIMEOUT_SECONDS` | `5` | Redis connect timeout |
 | `GANDALF_QUEUE_STREAM` | `gandalf:jobs` | Redis Stream the jobs go on |
 | `GANDALF_QUEUE_GROUP` | `gandalf-workers` | Consumer group the workers read through |
 | `GANDALF_QUEUE_DEAD_STREAM` | `gandalf:jobs:dead` | Where jobs over the delivery limit are moved |
@@ -564,12 +566,18 @@ link back to the status page:
 | `worker_started` | info | A worker joined the pool (a scale-up, a rollout, a restart) |
 | `worker_stopped` | info | A worker left on SIGTERM (a scale-down or a rollout) |
 | `worker_recycled` | info | A worker exited after its `GANDALF_WORKER_MAX_JOBS` (routine; off by default) |
+| `worker_restarted` | critical | A worker came back under a name whose last instance never exited cleanly. Says how long it lived, what it was running, and the error it died with, or that it recorded none and was killed from outside (an OOM kill, a probe) |
 | `worker_lost` | critical | A worker stopped reporting without a clean exit: an OOM kill, usually. Says what it was running |
 | `job_retried` | warning | A job abandoned by a dead worker is being run again |
 | `job_dead_lettered` | critical | A job ended two workers and was answered with an error instead of a third try |
 | `job_failed` | warning | A query raised; the client got an Error response |
 | `queue_backlog` / `queue_backlog_cleared` | warning / info | Jobs waiting for a worker crossed `GANDALF_ALERT_QUEUE_LAG_THRESHOLD`, then dropped to zero |
 | `queue_stuck` | warning | A job has been with one worker longer than `GANDALF_ALERT_STUCK_SECONDS` |
+
+A worker never dies of Redis trouble: a timeout, an outage or a restart
+of Redis is logged and retried with backoff, and a job that was not
+acknowledged is redelivered.  When the API cannot reach Redis, `/query`,
+`/asyncquery` and `/status.json` answer 503 and `/ready` reports it.
 
 Each event is emitted exactly once however many pods run.  The worker
 events come from the worker that saw them.  The threshold events

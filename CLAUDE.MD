@@ -338,6 +338,18 @@ through a consumer group and run them.  Rules that follow:
 - **Results do not go through the stream.**  `/query` results go to the
   `ResultStore` (zstd, chunked under Redis's 512 MB value cap, with a TTL);
   async results go straight to the callback.
+- **Blocking Redis reads are sliced.**  redis-py applies the socket
+  timeout to blocking commands, so `XREADGROUP BLOCK` and `BLPOP` longer
+  than it raise `TimeoutError`.  `JobQueue.receive` and `ResultStore.wait`
+  wait in slices of at most half the socket timeout (`blocking_slice`)
+  and loop; make any new blocking wait do the same.  The worker loop
+  catches `redis.RedisError` and retries with backoff rather than exiting;
+  the API turns it into a 503.
+- **A worker explains its own restart.**  A live registry report under a
+  starting worker's own name means the previous instance never exited
+  cleanly; the start is reported as `worker_restarted` with what it was
+  running and its last words (`WorkerRegistry.record_last_words`, written
+  by `main()` on an unhandled exception; none means a kill from outside).
 - **Workers report, jobs are recorded.**  `Worker.report` writes the
   worker's state to the `WorkerRegistry` (a hash with a TTL, refreshed on
   every poll and keepalive tick, so a dead worker drops off the page), and

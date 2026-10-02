@@ -682,6 +682,7 @@ def notifier(client, webhook_server):  # noqa: F811
             {
                 "worker_started",
                 "worker_stopped",
+                "worker_restarted",
                 "worker_lost",
                 "job_retried",
                 "job_dead_lettered",
@@ -891,3 +892,249 @@ def test_status_json_lists_alerts(api, notifier, monkeypatch):
     assert "worker_lost" in alerts["kinds"]
     assert alerts["recent"][0]["title"] == "Queue backlog"
     assert alerts["recent"][0]["fields"] == {"waiting": 7}
+
+
+# ---------------------------------------------------------------------------
+# Redis timeouts and outages
+# ---------------------------------------------------------------------------
+
+from gandalf.jobs import blocking_slice, redis_client  # noqa: E402
+
+
+def test_redis_client_defaults_and_url_override(redis_url, monkeypatch):
+    monkeypatch.setattr(settings, "queue_socket_timeout_seconds", 12.0)
+    kwargs = redis_client(redis_url).connection_pool.connection_kwargs
+    assert kwargs["socket_timeout"] == 12.0 and kwargs["socket_connect_timeout"] == 5.0
+    kwargs = redis_client(
+        redis_url + "?socket_timeout=2"
+    ).connection_pool.connection_kwargs
+    assert kwargs["socket_timeout"] == 2.0  # the URL wins, as redis-py has it
+
+
+def test_blocking_reads_stay_under_a_short_socket_timeout(redis_url):
+    """A ?socket_timeout shorter than the waits raised TimeoutError; now it is sliced."""
+    short = redis.Redis.from_url(redis_url + "?socket_timeout=1")
+    assert blocking_slice(short, 5.0) == 0.5
+    q = JobQueue(
+        short,
+        stream="t:jobs",
+        group="t:workers",
+        dead_stream="t:dead",
+        max_deliveries=2,
+        claim_idle_seconds=1,
+    )
+    q.ensure_group()
+    t0 = time.monotonic()
+    assert q.receive("w", block_seconds=5.0) is None  # one slice, no exception
+    assert time.monotonic() - t0 < 1.5
+
+    store = ResultStore(
+        short, prefix="t:result", ttl_seconds=60, chunk_bytes=1024, zstd_level=1
+    )
+    t0 = time.monotonic()
+    assert store.wait("nobody", timeout=2.2) is None  # several slices, no exception
+    assert 2.0 <= time.monotonic() - t0 < 3.5
+
+    def _later():
+        time.sleep(1.3)
+        store.put("late", b'{"ok":1}')
+
+    threading.Thread(target=_later, daemon=True).start()
+    result = store.wait("late", timeout=5.0)
+    assert result is not None and result.decompress() == b'{"ok":1}'
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _start_redis(port: int) -> subprocess.Popen:
+    binary = shutil.which("redis-server")
+    if binary is None:
+        pytest.fail("redis-server binary needed for the outage test")
+    proc = subprocess.Popen(
+        [binary, "--port", str(port), "--save", "", "--appendonly", "no"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    probe = redis.Redis(port=port, socket_connect_timeout=0.2)
+
+    def _up() -> bool:
+        try:
+            return bool(probe.ping())
+        except redis.ConnectionError:
+            return False
+
+    assert _wait_for(_up, 10.0), "redis-server did not start"
+    return proc
+
+
+def test_worker_survives_a_redis_outage(graph, bmt):  # noqa: F811
+    """Redis goes away and comes back; the worker waits it out and keeps working."""
+    port = _free_port()
+    proc = _start_redis(port)
+    url = f"redis://127.0.0.1:{port}/0?socket_timeout=1"
+    client = redis_client(url)
+    queue = JobQueue(
+        client,
+        stream="o:jobs",
+        group="o:w",
+        dead_stream="o:dead",
+        max_deliveries=2,
+        claim_idle_seconds=5,
+    )
+    store = ResultStore(
+        client, prefix="o:result", ttl_seconds=60, chunk_bytes=1024, zstd_level=1
+    )
+    registry = WorkerRegistry(client, prefix="o:worker", ttl_seconds=30)
+    w = Worker(
+        graph,
+        bmt,
+        queue,
+        store,
+        consumer="w1",
+        block_seconds=0.2,
+        keepalive_seconds=0.1,
+        registry=registry,
+    )
+    thread = threading.Thread(target=w.run, daemon=True)
+    thread.start()
+    try:
+        queue.enqueue(Job.new(dict(ONE_HOP)))
+        assert _wait_for(lambda: w.jobs_done == 1)
+
+        proc.terminate()
+        proc.wait(timeout=10)
+        time.sleep(2.5)  # several failed polls: the loop must still be alive
+        assert thread.is_alive()
+
+        proc = _start_redis(port)
+        queue.ensure_group()  # the group died with the (unpersisted) server
+        queue.enqueue(Job.new(dict(ONE_HOP)))
+        # the retry backoff was growing during the outage (1, 2, 4 ... up to 30s)
+        assert _wait_for(lambda: w.jobs_done == 2, timeout=40.0)
+        assert thread.is_alive()
+    finally:
+        w.stop()
+        thread.join(timeout=10)
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_worker_reports_a_restart_after_a_crash(
+    graph, bmt, queue, store, registry, notifier
+):  # noqa: F811
+    """A live report under its own name tells a starting worker its last instance died."""
+    n, hook = notifier
+    registry.report(
+        "w1",
+        pid=1,
+        state="running",
+        started_at=time.time() - 20,
+        jobs_done=7,
+        job_id="deadbeef0000",
+        job_query={"nodes": 3, "edges": 2, "ids": ["CHEBI:6801"]},
+        job_started_at=time.time() - 4,
+        rss_anon_kb=9 * 1024 * 1024,
+        stopping=False,
+    )
+    w = Worker(
+        graph,
+        bmt,
+        queue,
+        store,
+        consumer="w1",
+        max_jobs=1,
+        block_seconds=0.05,
+        registry=registry,
+        notifier=n,
+    )
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert w.run() == 1
+    kinds = [a["kind"] for a in reversed(n.recent())]
+    assert kinds == ["worker_restarted", "worker_recycled"]
+    restarted = n.recent()[-1]
+    assert restarted["severity"] == "critical"
+    assert "killed from outside" in restarted["detail"]
+    f = restarted["fields"]
+    assert f["jobs done"] == 7 and f["was running"].startswith(
+        "deadbeef (3 nodes / 2 edges, ids CHEBI:6801)"
+    )
+    assert f["anon RSS"] == "9216 MB" and f["previous lifetime"].endswith("s")
+    assert "died with" not in f
+
+
+def test_worker_restart_reports_its_last_words(
+    graph, bmt, queue, store, registry, notifier
+):  # noqa: F811
+    n, _ = notifier
+    registry.report(
+        "w1",
+        pid=1,
+        state="idle",
+        started_at=time.time() - 5,
+        jobs_done=0,
+        stopping=False,
+    )
+    registry.record_last_words(
+        "w1", "redis.exceptions.TimeoutError: Timeout reading from socket"
+    )
+    w = Worker(
+        graph,
+        bmt,
+        queue,
+        store,
+        consumer="w1",
+        max_jobs=0,
+        block_seconds=0.05,
+        registry=registry,
+        notifier=n,
+    )
+    w.notify(w._start_event())
+    event = n.recent()[0]
+    assert event["kind"] == "worker_restarted"
+    assert "died with the error below" in event["detail"]
+    assert event["fields"]["died with"].startswith("redis.exceptions.TimeoutError")
+    assert registry.last_words("w1") == ""  # consumed
+
+
+def test_worker_events_are_throttled_per_worker(notifier):
+    n, hook = notifier
+    sent = [
+        n.emit(Event("worker_started", "Worker started", fields={"worker": "flapper"})),
+        n.emit(Event("worker_started", "Worker started", fields={"worker": "flapper"})),
+        n.emit(Event("worker_started", "Worker started", fields={"worker": "other"})),
+        n.emit(
+            Event("worker_restarted", "Worker restarted", fields={"worker": "flapper"})
+        ),
+    ]
+    assert sent == [True, False, True, True]
+
+
+def test_api_answers_503_when_redis_is_gone(api, graph, bmt, monkeypatch):  # noqa: F811
+    dead = redis.Redis(host="127.0.0.1", port=1, socket_connect_timeout=0.1)
+    monkeypatch.setattr(
+        gandalf_server,
+        "QUEUE",
+        JobQueue(
+            dead,
+            stream="x",
+            group="x",
+            dead_stream="x",
+            max_deliveries=1,
+            claim_idle_seconds=1,
+        ),
+    )
+    monkeypatch.setattr(
+        gandalf_server,
+        "RESULTS",
+        ResultStore(dead, ttl_seconds=1, chunk_bytes=1, zstd_level=1),
+    )
+    resp = api.post("/query", json=ONE_HOP)
+    assert resp.status_code == 503 and "Queue unavailable" in resp.json()["detail"]
+    body = dict(ONE_HOP)
+    body["callback"] = "http://cb.invalid/x"
+    assert api.post("/asyncquery", json=body).status_code == 503
+    assert api.get("/status.json").status_code == 503

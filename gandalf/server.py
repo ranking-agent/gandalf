@@ -59,6 +59,7 @@ from gandalf.jobs import (
     ResultStore,
     StoredResult,
     WorkerRegistry,
+    redis_client,
 )
 from gandalf.notify import Monitor, Notifier
 from gandalf.status import snapshot
@@ -273,7 +274,7 @@ def open_queue() -> None:
     global QUEUE, RESULTS, WORKERS, HISTORY, NOTIFIER, MONITOR
     if not settings.queue_url or QUEUE is not None:
         return
-    client = redis.Redis.from_url(settings.queue_url)
+    client = redis_client()
     QUEUE = JobQueue.from_settings(client)
     RESULTS = ResultStore.from_settings(client)
     WORKERS = WorkerRegistry.from_settings(client)
@@ -582,7 +583,10 @@ async def status_page() -> HTMLResponse:
 @APP.get("/status.json", include_in_schema=False)
 def status_json(recent: int = Query(50, ge=1, le=500)) -> dict:
     """The data behind ``/status``; see :mod:`gandalf.status`."""
-    return snapshot(GRAPH, QUEUE, WORKERS, HISTORY, NOTIFIER, recent=recent)
+    try:
+        return snapshot(GRAPH, QUEUE, WORKERS, HISTORY, NOTIFIER, recent=recent)
+    except redis.RedisError as exc:
+        raise HTTPException(503, f"Queue unavailable: {type(exc).__name__}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -765,13 +769,18 @@ def _queued_lookup(
         budget=deadline.budget if deadline is not None else None,
         request_id=request_id_var.get(""),
     )
-    QUEUE.enqueue(job)
-    JOBS_ENQUEUED.labels("sync").inc()
     wait = job.wait_seconds()
-    logger.info("job %s enqueued; waiting up to %.0fs", job.job_id, wait)
-
     t0 = time.monotonic()
-    result = RESULTS.wait(job.job_id, timeout=wait)
+    # Redis down is a 503, not a 500: the client can retry, and /ready is
+    # already telling the load balancer the same thing.
+    try:
+        QUEUE.enqueue(job)
+        JOBS_ENQUEUED.labels("sync").inc()
+        logger.info("job %s enqueued; waiting up to %.0fs", job.job_id, wait)
+        result = RESULTS.wait(job.job_id, timeout=wait)
+    except redis.RedisError as exc:
+        logger.error("job %s: queue unavailable: %s", job.job_id, exc)
+        raise HTTPException(503, f"Queue unavailable: {type(exc).__name__}") from exc
     SYNC_WAIT.observe(time.monotonic() - t0)
     if result is None:
         SYNC_WAIT_TIMEOUTS.inc()
@@ -870,7 +879,13 @@ def _dispatch_async(
             trace_headers=trace_headers,
             request_id=request_id_var.get(""),
         )
-        QUEUE.enqueue(job)
+        try:
+            QUEUE.enqueue(job)
+        except redis.RedisError as exc:
+            logger.error("job %s: queue unavailable: %s", job.job_id, exc)
+            raise HTTPException(
+                503, f"Queue unavailable: {type(exc).__name__}"
+            ) from exc
         JOBS_ENQUEUED.labels("callback").inc()
         logger.info("job %s enqueued for callback %s", job.job_id, callback)
         return _async_accepted(callback, job.job_id)

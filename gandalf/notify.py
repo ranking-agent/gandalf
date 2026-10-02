@@ -46,6 +46,7 @@ KINDS: dict[str, str] = {
     "worker_started": "info",
     "worker_stopped": "info",
     "worker_recycled": "info",
+    "worker_restarted": "critical",
     "worker_lost": "critical",
     "job_retried": "warning",
     "job_dead_lettered": "critical",
@@ -55,8 +56,19 @@ KINDS: dict[str, str] = {
     "queue_stuck": "warning",
 }
 
-#: Kinds that can fire in bursts and go through the per-kind throttle.
-THROTTLED_KINDS = frozenset({"job_failed", "job_retried"})
+#: Kinds that can fire in bursts and go through the throttle: job kinds per
+#: kind, worker kinds per kind and worker (a flapping worker sends one
+#: message per interval; a scale-up of several workers announces each).
+THROTTLED_KINDS = frozenset(
+    {
+        "job_failed",
+        "job_retried",
+        "worker_started",
+        "worker_stopped",
+        "worker_recycled",
+        "worker_restarted",
+    }
+)
 
 _EMOJI = {
     "info": ":information_source:",
@@ -96,6 +108,20 @@ class Event:
     def severity(self) -> str:
         """``info``, ``warning`` or ``critical``, from the kind."""
         return KINDS[self.kind]
+
+    @property
+    def throttle_key(self) -> str:
+        """What the throttle counts this event under.
+
+        Examples:
+            >>> Event("job_failed", "x").throttle_key
+            'job_failed'
+            >>> Event("worker_started", "x", fields={"worker": "w1"}).throttle_key
+            'worker_started:w1'
+        """
+        if self.kind.startswith("worker_") and self.fields.get("worker"):
+            return f"{self.kind}:{self.fields['worker']}"
+        return self.kind
 
 
 def enabled_kinds(spec: str) -> frozenset[str]:
@@ -287,7 +313,7 @@ class Notifier:
         self._log(event)
         if self.webhook is None or event.kind not in self.kinds:
             return False
-        suppressed = self._throttle(event.kind)
+        suppressed = self._throttle(event)
         if suppressed is None:
             return False
         self.webhook.post(
@@ -317,11 +343,15 @@ class Notifier:
             approximate=True,
         )
 
-    def _throttle(self, kind: str) -> Optional[int]:
-        """None if a message of *kind* was sent too recently, else the suppressed count."""
-        if self._r is None or kind not in THROTTLED_KINDS or self.throttle_seconds <= 0:
+    def _throttle(self, event: Event) -> Optional[int]:
+        """None if one like *event* was sent too recently, else the suppressed count."""
+        if (
+            self._r is None
+            or event.kind not in THROTTLED_KINDS
+            or self.throttle_seconds <= 0
+        ):
             return 0
-        key = f"{THROTTLE_PREFIX}:{kind}"
+        key = f"{THROTTLE_PREFIX}:{event.throttle_key}"
         counter = f"{key}:suppressed"
         if self._r.set(key, "1", nx=True, px=int(self.throttle_seconds * 1000)):
             suppressed = self._r.getdel(counter)

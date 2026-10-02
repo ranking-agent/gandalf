@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     # and separate worker processes execute them; empty runs queries in the
     # API process as before.
     queue_url: str = ""  # e.g. "redis://redis:6379/0"
+    # Redis socket timeouts.  A query parameter on queue_url
+    # (?socket_timeout=5) overrides these.  Blocking reads (a worker waiting
+    # for a job, /query waiting for a result) are sliced to stay under the
+    # socket timeout whatever it is, so a short one is safe, if chatty.
+    queue_socket_timeout_seconds: float = 30.0
+    queue_connect_timeout_seconds: float = 5.0
     queue_stream: str = "gandalf:jobs"
     queue_group: str = "gandalf-workers"
     queue_dead_stream: str = "gandalf:jobs:dead"
@@ -129,7 +135,7 @@ class Settings(BaseSettings):
     # Comma-separated kinds, or "all".  worker_recycled (a routine exit
     # after worker_max_jobs) is off by default.
     slack_events: str = (
-        "worker_started,worker_stopped,worker_lost,job_retried,"
+        "worker_started,worker_stopped,worker_restarted,worker_lost,job_retried,"
         "job_dead_lettered,job_failed,queue_backlog,queue_backlog_cleared,"
         "queue_stuck"
     )
