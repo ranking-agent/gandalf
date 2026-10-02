@@ -58,6 +58,7 @@ pytest -m integration
 gandalf/
 ├── graph.py          # CSRGraph class (core data structure)
 ├── loader.py         # JSONL to graph conversion
+├── edge_id_store.py  # Original edge IDs (memory-mapped JSON blob)
 ├── node_annotations.py  # Build-time node annotation (biothings_annotator)
 ├── trapi.py          # TRAPI 2.0 envelope, query parameters, timeouts
 ├── search/           # Search & path finding (package)
@@ -238,6 +239,20 @@ as Fragments.  The rules:
   `_single_path_json` too; `tests/test_results_as_json.py` compares the two
   byte for byte across the query shapes.
 
+**Edge IDs are a memory-mapped blob of their JSON** (`gandalf/edge_id_store.py`):
+`edge_ids.bin` holds each edge's ID encoded as a JSON string, in forward-CSR
+order, and `edge_id_offsets.npy` (`int64`, `num_edges + 1`) where each one
+starts; an edge with no ID has an empty span.  Like the `.npy` arrays, both
+are shared by every worker through the page cache.  `_single_path_json`
+copies the stored JSON into results as it is and decodes it only for the KG
+keys; the per-group loop gets `str`s through `get_edge_ids_batch`, for its
+own edges only.  The build records in `metadata.pkl` whether the IDs are
+unique (`edge_ids_unique`; if so no query checks its own for duplicates) and
+whether any needed escaping (`edge_ids_escaped`; if not, an ID decodes as the
+UTF-8 between its quotes).  A graph without `edge_ids_format` keeps its IDs
+in LMDB and is refused with a rebuild message.  Memory and speed against
+LMDB: `scripts/benchmarks/edge_id_memory.py`.
+
 Library callers get plain lists by default, and so does the server when
 `validate_responses` is on, since FastAPI's validation needs them.
 
@@ -314,10 +329,12 @@ Some 2.0 requirements are satisfied in the serialized graph and only change
 on a rebuild: `knowledge_level`/`agent_type` interning, `Node.name` /
 `Node.categories` normalization, `RetrievalSource.upstream_resource_ids`
 pruning (done in the loader so it covers both graph sources), the persisted
-`meta_kg.json` / `sri_testing_data.json`, and the storage format of edge
+`meta_kg.json` / `sri_testing_data.json`, the storage format of edge
 attributes (JSON arrays in `edge_properties.lmdb`, recorded as
 `edge_attributes_format` in `metadata.pkl`; `load_mmap` refuses a graph
-without it).  Everything else is
+without it), the storage format of edge IDs (below), and the order of each
+edge's qualifiers (sorted by type, so it no longer depends on the build's
+`PYTHONHASHSEED`).  Everything else is
 computed per query.  When changing a serialization rule, check which side it
 lands on -- a fix applied only in the loader will not reach an already-built
 graph.

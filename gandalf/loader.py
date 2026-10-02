@@ -38,6 +38,7 @@ import numpy as np
 
 from gandalf.biolink import NAMED_THING
 from gandalf.graph import CSRGraph, EdgePropertyStoreBuilder
+from gandalf.edge_id_store import EdgeIdStore
 from gandalf.lmdb_store import (
     LMDBPropertyStore,
     _INITIAL_WRITE_MAP_SIZE,
@@ -369,8 +370,8 @@ def _build_graph_from_source(
     graph.rev_to_fwd = rev_to_fwd
 
     graph.edge_properties = edge_properties
-    graph.edge_ids = edge_ids_sorted
-    graph._edge_ids_env = None
+    graph.edge_id_store = EdgeIdStore.from_ids(edge_ids_sorted)
+    del edge_ids_sorted
     graph.lmdb_store = lmdb_store
     graph.source_urls_store = source_urls_store
 

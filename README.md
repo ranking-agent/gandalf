@@ -91,6 +91,12 @@ graph.save_mmap("data/processed/gandalf_mmap")
 > carries, so the server can copy them into a response without decoding them;
 > `load_mmap` refuses a graph that still stores them as msgpack.
 >
+> **So do graphs that store their edge IDs in LMDB.** Edge IDs are now a
+> memory-mapped blob of their JSON (`edge_ids.bin` + `edge_id_offsets.npy`),
+> shared by every worker, and `load_mmap` refuses a graph with
+> `edge_ids.lmdb` instead. The same rebuild also sorts each edge's
+> qualifiers by type, so their order no longer varies from build to build.
+>
 > Everything else 2.0 changed is computed per query and takes effect on
 > deploy: binding shapes, `QEdge.constraints`, the `parameters` object and its
 > timeout, the response envelope, and the remaining null / empty-container
@@ -536,11 +542,12 @@ should not (the one case seen so far: a graph built before
 source lists; a rebuild fixes it).  Every load logs where its private memory went, stage by
 stage (`Private memory taken by the load: +N MB (...)`), and the status
 page shows each worker's memory at start; the usual culprits are a graph
-in a legacy format (`edge_ids.pkl` instead of `edge_ids.lmdb`, node data
-in `metadata.pkl` instead of `node_store.lmdb`, a missing
+in a legacy format (`source_record_urls` kept in the interned source
+lists, node data in `metadata.pkl` instead of `node_store.lmdb`, a missing
 `rev_to_fwd.npy`), each of which the load warns about and a rebuild with
 `gandalf-build` fixes, and the metadata JSONs, which only the API needs and
-a worker no longer loads.
+a worker no longer loads.  A graph whose edge IDs predate the memory-mapped
+blob is refused outright with the same rebuild message.
 
 **One query at a time, by design.**  A query is single-threaded Python, so
 a worker uses one core and a second CPU would go unused; concurrent queries

@@ -252,23 +252,3 @@ def test_load_ledger_and_metadata_free_load(graph, tmp_path, caplog):  # noqa: F
     from tests.conftest import MockBMT
 
     assert b'"results"' in execute_to_bytes(bare, MockBMT(), dict(ONE_HOP))
-
-
-def test_legacy_edge_ids_pickle_is_warned_about(graph, tmp_path, caplog):  # noqa: F811
-    import logging
-    import pickle
-    import shutil
-
-    from gandalf.graph import CSRGraph
-
-    graph.save_mmap(tmp_path / "g")
-    ids = [graph.get_edge_id(i) for i in range(len(graph.fwd_targets))]
-    shutil.rmtree(tmp_path / "g" / "edge_ids.lmdb")
-    with open(tmp_path / "g" / "edge_ids.pkl", "wb") as f:
-        pickle.dump(ids, f)
-    with caplog.at_level(logging.WARNING, logger="gandalf.graph"):
-        legacy = CSRGraph.load_mmap(tmp_path / "g")
-    assert legacy.get_edge_id(0) == ids[0]
-    assert any(
-        "edge_ids.pkl rather than edge_ids.lmdb" in r.message for r in caplog.records
-    )

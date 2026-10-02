@@ -623,7 +623,7 @@ def _single_path_json(
     node_id_cache,
     node_cache,
     idx_to_predicate,
-    edge_id_map: dict,
+    query_edges: np.ndarray,
     edge_detail_map: dict,
     edge_urls_map: dict,
     edge_templates: dict,
@@ -643,9 +643,11 @@ def _single_path_json(
     into entries of at most *block* results, cut wherever a result the loop
     builds comes in between.
 
-    Returns None if the query's edges do not all have distinct IDs (an edge
-    would then not own its KG entry, and which edge the entry holds would
-    depend on the order results are built in), else a dict with:
+    Edge IDs come from ``graph.edge_id_store`` already encoded as JSON.
+
+    Returns None if the query's edges (*query_edges*) do not all have distinct
+    IDs (an edge would then not own its KG entry, and which edge the entry
+    holds would depend on the order results are built in), else a dict with:
 
         dict_groups: the groups left to the loop, by group index
         cuts: for each of those, how many fast results come before it
@@ -655,8 +657,12 @@ def _single_path_json(
         nodes, edges: the KG entries to file, as ``(keys, values, group,
             position)`` in first-appearance order within the fast results
     """
-    if len(set(edge_id_map.values())) != len(edge_id_map):
-        return None
+    store = graph.edge_id_store
+    if store is not None and not store.unique:
+        # The build found IDs shared between edges; see if this query has any.
+        spans = [span for span in store.get_json_batch(query_edges) if span]
+        if len(set(spans)) != len(spans):
+            return None
     rows, starts, sizes = layout
     first = rows[starts]
     fast = sizes == 1
@@ -673,19 +679,33 @@ def _single_path_json(
         )
         return unique, first_at, inverse.reshape(-1)
 
+    def id_lengths(edges: np.ndarray) -> np.ndarray:
+        if store is None:
+            return np.zeros(len(edges), dtype=np.int64)
+        return store.lengths(edges)
+
     fast_rows = first[fast_groups]
+    # Each unique edge's ID as the JSON a result binds it by, and as the str
+    # its KG entry is filed under.
+    enc_edges = np.empty(0, dtype=object)
+    len_edges = np.zeros(0, dtype=np.int64)
     edge_ids: list = []
     if m:
         u_edges, e_first, e_inv = unique_edges(fast_rows)
-        edge_ids = [edge_id_map.get(e) for e in u_edges.tolist()]
-        has_id = np.fromiter(map(bool, edge_ids), dtype=bool, count=len(edge_ids))
-        with_ids = has_id[e_inv].reshape(-1, m).all(axis=1)
+        len_edges = id_lengths(u_edges)
+        with_ids = (len_edges[e_inv] > 0).reshape(-1, m).all(axis=1)
         if not with_ids.all():
             # An edge without an ID gets a fresh one per result: the loop's.
             fast_groups = fast_groups[with_ids]
             fast_rows = fast_rows[with_ids]
             u_edges, e_first, e_inv = unique_edges(fast_rows)
-            edge_ids = [edge_id_map.get(e) for e in u_edges.tolist()]
+            len_edges = id_lengths(u_edges)
+        if store is not None and len(u_edges):
+            spans = store.get_json_batch(u_edges)
+            enc_edges = np.empty(len(spans), dtype=object)
+            enc_edges[:] = spans
+            edge_ids = store.decode(spans)
+            del spans
     n = len(fast_rows)
     deadline.check("response building")
 
@@ -739,7 +759,6 @@ def _single_path_json(
         return enc, np.fromiter(map(len, enc), dtype=np.int64, count=len(enc))
 
     enc_nodes, len_nodes = encoded(node_ids)
-    enc_edges, len_edges = encoded(edge_ids)
 
     # The template's literal pieces, around k node IDs then m edge IDs; a
     # NUL never appears in orjson output, so it marks the gaps.  Each result
@@ -1163,24 +1182,26 @@ def _build_response(
     # Prefetch cold-path edge data in bulk.  The per-group loop below builds
     # edge dicts only for unique edges, but previously hit LMDB once per edge
     # (a fresh transaction + msgpack unpack each).  Collect every forward edge
-    # index up front and issue a single sorted batch read per store, then look
-    # the detail up in-memory inside the loop.  Edge attributes are only needed
-    # when not in lightweight mode; edge IDs are needed in both.
+    # index up front and issue a single sorted batch read, then look the
+    # detail up in-memory inside the loop.  Edge attributes are only needed
+    # when not in lightweight mode.  Edge IDs are read later: as JSON by
+    # _single_path_json, and as str only for the edges the loop builds with.
     edge_detail_map: dict = {}
     edge_urls_map: dict = {}
-    edge_id_map: dict = {}
+    query_edges = np.zeros(0, dtype=np.int64)
     if pa_num_edges > 0 and pa_fwd_eidx.size:
-        unique_eidx = [int(e) for e in np.unique(pa_fwd_eidx) if e >= 0]
-        if unique_eidx:
-            if not lightweight and graph.lmdb_store is not None:
+        query_edges = np.unique(pa_fwd_eidx)
+        query_edges = query_edges[query_edges >= 0]
+        if len(query_edges) and not lightweight:
+            unique_eidx = query_edges.tolist()
+            if graph.lmdb_store is not None:
                 if attributes_as_json:
                     edge_detail_map = graph.lmdb_store.get_json_batch(unique_eidx)
                 else:
                     edge_detail_map = graph.lmdb_store.get_batch(unique_eidx)
             urls_store = getattr(graph, "source_urls_store", None)
-            if not lightweight and urls_store is not None:
+            if urls_store is not None:
                 edge_urls_map = urls_store.get_json_batch(unique_eidx)
-            edge_id_map = graph.get_edge_ids_batch(unique_eidx)
 
     kg_nodes = response["message"]["knowledge_graph"]["nodes"]
     kg_edges = response["message"]["knowledge_graph"]["edges"]
@@ -1274,7 +1295,7 @@ def _build_response(
             node_id_cache=node_id_cache,
             node_cache=node_cache,
             idx_to_predicate=idx_to_predicate,
-            edge_id_map=edge_id_map,
+            query_edges=query_edges,
             edge_detail_map=edge_detail_map,
             edge_urls_map=edge_urls_map,
             edge_templates=edge_templates,
@@ -1299,6 +1320,13 @@ def _build_response(
             kg_nodes, kg_edges = {}, {}
             results_out = []
             marks = []
+
+    # Edge IDs of the edges the loop below builds results with; those written
+    # as JSON above took theirs from the store directly.
+    edge_id_map: dict = {}
+    if pa_num_edges > 0 and len(path_groups):
+        loop_edges = pa_fwd_eidx[np.concatenate(path_groups)]
+        edge_id_map = graph.get_edge_ids_batch(np.unique(loop_edges[loop_edges >= 0]))
 
     # GC is already disabled for the entire query (see top of lookup()).
     # Build results -- one per unique node binding combination.

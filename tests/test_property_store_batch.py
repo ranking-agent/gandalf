@@ -80,7 +80,7 @@ def test_lmdb_store_get_batch_matches_individual(tmp_path):
 
 @pytest.fixture
 def lmdb_graph(tmp_path):
-    """A graph reloaded from mmap, so node_store/lmdb_store/edge_ids are LMDB-backed."""
+    """A graph reloaded from mmap: LMDB-backed node/edge stores, mmapped edge IDs."""
     from gandalf.graph import CSRGraph
 
     graph = build_graph_from_jsonl(EDGES_FILE, NODES_FILE)
