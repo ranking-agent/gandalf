@@ -194,3 +194,26 @@ def test_metrics_survive_a_queue_outage(client, monkeypatch):
     resp = client.get("/metrics")
     assert resp.status_code == 200
     assert "gandalf_http_requests_total" in resp.text
+
+
+def test_trim_heap_returns_freed_memory():
+    from gandalf.metrics import rss_anon_kb, trim_heap, trim_heap_if_large
+
+    # Interleave kept and freed 64 KB blocks: the freed ones become holes
+    # inside the heap that glibc cannot shrink away on its own (it only
+    # trims the top), which is what a query's scattered garbage looks like.
+    kept, junk = [], []
+    for _ in range(3000):
+        kept.append(bytes(64 * 1024))
+        junk.append(bytes(64 * 1024))
+    del junk
+    before = rss_anon_kb()
+    assert trim_heap() is True  # glibc in CI and in the image
+    after = rss_anon_kb()
+    assert after <= before
+    assert (
+        after < before - 50 * 1024
+    ), f"trim returned only {(before - after) // 1024} MB"
+    assert trim_heap_if_large(0) is False
+    assert trim_heap_if_large(10**6) is False  # far above any test process
+    assert len(kept) == 3000

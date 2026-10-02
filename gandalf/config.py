@@ -150,6 +150,11 @@ class Settings(BaseSettings):
     alert_stuck_seconds: float = 1800.0
     alert_log_maxlen: int = 500
 
+    # Return freed heap to the OS (gandalf.metrics.trim_heap) after a job,
+    # and before a query in the API, whenever the process's anonymous RSS
+    # is above this many MB.  0 disables.
+    heap_trim_threshold_mb: int = 512
+
     # Worker process (python -m gandalf.worker)
     worker_name: str = ""  # consumer name; default "<hostname>-<pid>"
     # Exit after this many jobs so Kubernetes restarts the process and

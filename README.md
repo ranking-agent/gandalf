@@ -399,6 +399,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_RESULT_TTL_SECONDS` | `900` | How long an uncollected `/query` result lives in Redis |
 | `GANDALF_RESULT_CHUNK_BYTES` | `67108864` | Largest value written to one Redis key |
 | `GANDALF_HISTORY_MAXLEN` | `2000` | Finished jobs the status page's history keeps |
+| `GANDALF_HEAP_TRIM_THRESHOLD_MB` | `512` | Return freed heap to the OS after a job (worker) or before a query (API) when the process's anonymous RSS is above this; 0 disables |
 | `GANDALF_SLACK_WEBHOOK_URL` | _(empty)_ | Slack incoming-webhook URL; set it to post alerts to its channel |
 | `GANDALF_SLACK_EVENTS` | all but `worker_recycled` | Comma-separated event kinds Slack receives, or `all` |
 | `GANDALF_SLACK_ENVIRONMENT` | _(empty)_ | Label in front of every Slack title, e.g. `prod` |
@@ -508,6 +509,24 @@ Both open the same graph.  A `/query` waits for its job's result, which the
 worker stores zstd-compressed in Redis and the API streams back (as is, to a
 client that accepts zstd).  An `/asyncquery` returns immediately and the
 worker POSTs the result to the callback itself.
+
+**What a worker costs in memory.**  The graph is memory-mapped, so opening
+it costs a worker no private memory at all: its arrays and LMDB stores live
+in the page cache, shared by every process on the node that maps the same
+files.  A worker's private memory is a ~100 MB Python baseline plus whatever
+the *last large query* left behind: building a response allocates
+hundreds of megabytes to gigabytes, and glibc keeps the freed pages for
+reuse rather than returning them.  A worker therefore hands them back with
+`malloc_trim` after each job once its anonymous RSS is above
+`GANDALF_HEAP_TRIM_THRESHOLD_MB` (measured: a 373 MB response left 560 MB
+behind, 200 MB after the trim, in 10 ms), and the API does the same before
+each query.  Size a worker for one query's peak, not for the graph.
+
+**One query at a time, by design.**  A query is single-threaded Python, so
+a worker uses one core and a second CPU would go unused; concurrent queries
+in one process would share the GIL and, worse, add their memory peaks
+together.  Concurrency is more workers: on one node they share the graph's
+page cache, so each extra worker costs only its private memory above.
 
 What the queue gives, beyond "more workers":
 

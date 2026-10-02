@@ -14,6 +14,8 @@ Metric names are stable: dashboards and the KEDA ``ScaledObject`` in
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import os
 
 import psutil
@@ -195,3 +197,49 @@ def rss_anon_kb() -> int:
         return int(psutil.Process().memory_full_info().uss) // 1024
     except Exception:
         return -1
+
+
+# --- Heap trimming ---------------------------------------------------------
+
+_libc = None
+_malloc_trim_missing = False
+
+
+def trim_heap() -> bool:
+    """Give the memory freed after a large query back to the operating system.
+
+    glibc keeps freed heap pages around for reuse, so a process that built a
+    multi-hundred-megabyte response stays that big after it is gone: the
+    graph itself costs no private memory (it is memory-mapped), but a few
+    large queries leave gigabytes of retained heap per process.
+    ``malloc_trim(0)`` returns the free pages; measured on a 373 MB
+    response, anonymous RSS fell from 560 MB to 200 MB in about 10 ms.
+
+    Returns:
+        Whether a trim happened (False on a libc without ``malloc_trim``).
+    """
+    global _libc, _malloc_trim_missing
+    if _malloc_trim_missing:
+        return False
+    if _libc is None:
+        name = ctypes.util.find_library("c")
+        try:
+            _libc = ctypes.CDLL(name) if name else ctypes.CDLL(None)
+            _libc.malloc_trim.argtypes = [ctypes.c_size_t]
+            _libc.malloc_trim.restype = ctypes.c_int
+        except (OSError, AttributeError):
+            _malloc_trim_missing = True
+            return False
+    _libc.malloc_trim(0)
+    return True
+
+
+def trim_heap_if_large(threshold_mb: int) -> bool:
+    """Trim when anonymous RSS is above *threshold_mb* (0 disables).
+
+    Reading the size costs microseconds; the trim itself scales with the
+    heap, so a small process is left alone.
+    """
+    if threshold_mb <= 0 or rss_anon_kb() < threshold_mb * 1024:
+        return False
+    return trim_heap()

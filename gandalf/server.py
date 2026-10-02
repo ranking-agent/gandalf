@@ -51,6 +51,7 @@ from gandalf.metrics import (
     metrics_payload,
     rss_anon_kb,
     rss_kb,
+    trim_heap_if_large,
 )
 from gandalf.jobs import (
     Job,
@@ -709,6 +710,9 @@ def sync_lookup(
     otel.record_baggage()
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
+    # The previous response's pages are free by now; return them before
+    # building (or receiving) the next one.
+    trim_heap_if_large(settings.heap_trim_threshold_mb)
 
     raw = _request_dict(body, TRAPIQuery)
 

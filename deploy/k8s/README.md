@@ -27,9 +27,14 @@ Both tiers run the same image; the worker overrides the command with
 
 - **Worker memory.** A worker runs one query at a time, so its limit is one
   query's peak anonymous RSS (around 11 GB on the largest Translator
-  queries) plus page-cache headroom for the mapped graph.  The cgroup
-  charges mapped file pages to the pod; too tight a limit thrashes the
-  mapping before it OOM-kills.
+  queries) plus page-cache headroom for the mapped graph.  The graph itself
+  costs no private memory (it is memory-mapped and shared across the pods on
+  a node); what a worker keeps between queries is retained heap, which it
+  returns to the OS after each job (`GANDALF_HEAP_TRIM_THRESHOLD_MB`).  The
+  cgroup charges mapped file pages to the pod; too tight a limit thrashes
+  the mapping before it OOM-kills.
+- **CPU.** One per worker.  A query is single-threaded Python, so a second
+  core goes unused; more throughput is more workers, not bigger ones.
 - **`terminationGracePeriodSeconds`** on the worker must cover one query:
   SIGTERM makes the worker finish its current job before exiting, and a
   KEDA scale-down or a rollout sends SIGTERM.

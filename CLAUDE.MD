@@ -350,6 +350,11 @@ through a consumer group and run them.  Rules that follow:
   cleanly; the start is reported as `worker_restarted` with what it was
   running and its last words (`WorkerRegistry.record_last_words`, written
   by `main()` on an unhandled exception; none means a kill from outside).
+- **Private memory is retained heap, not the graph.**  Opening a graph
+  costs no anonymous memory (mmap + LMDB); a large response does, and glibc
+  keeps the freed pages.  `gandalf.metrics.trim_heap_if_large` hands them
+  back (`malloc_trim`) after each worker job and before each API query,
+  above `heap_trim_threshold_mb`.  Measure with `RssAnon`, not RSS.
 - **Workers report, jobs are recorded.**  `Worker.report` writes the
   worker's state to the `WorkerRegistry` (a hash with a TTL, refreshed on
   every poll and keepalive tick, so a dead worker drops off the page), and

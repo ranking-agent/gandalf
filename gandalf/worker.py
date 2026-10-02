@@ -51,6 +51,7 @@ from gandalf.metrics import (
     PROCESS_RSS_ANON_BYTES,
     metrics_registry,
     rss_anon_kb,
+    trim_heap_if_large,
 )
 from gandalf.jobs import (
     Delivery,
@@ -370,6 +371,10 @@ class Worker:
             )
         self.deliver(job, body, http_status)
         self.queue.ack(delivery.entry_id)
+        body_size = len(body)
+        del body
+        # The response is gone; hand its pages back rather than keep them.
+        trim_heap_if_large(settings.heap_trim_threshold_mb)
         self.jobs_done += 1
         self.last_outcome = outcome
         self._current = {}
@@ -390,7 +395,7 @@ class Worker:
                 finished_at=finished_at,
                 wait_s=wait_s,
                 duration_s=finished_at - started_at,
-                bytes=len(body),
+                bytes=body_size,
                 query=summarize_query(job.query),
             )
         self.report()
@@ -399,7 +404,7 @@ class Worker:
             job.job_id,
             outcome,
             http_status,
-            len(body),
+            body_size,
         )
         return outcome
 
