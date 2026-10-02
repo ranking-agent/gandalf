@@ -13,6 +13,7 @@ import orjson
 import numpy as np
 
 from gandalf.config import settings
+from gandalf.memory import MemoryLedger
 from gandalf.lmdb_store import EDGE_ATTRIBUTES_FORMAT, LMDBPropertyStore
 from gandalf.node_store import NodeStore
 
@@ -433,6 +434,10 @@ class CSRGraph:
     - Cold path (attributes, including publications): disk-backed LMDB (LMDBPropertyStore)
     """
 
+    #: What each stage of ``load_mmap`` cost in private memory; empty for a
+    #: graph built in memory.
+    load_memory: "MemoryLedger"
+
     def __init__(
         self,
         num_nodes,
@@ -486,6 +491,7 @@ class CSRGraph:
         self.meta_kg = None
         self.sri_testing_data = None
         self.graph_metadata = None
+        self.load_memory = MemoryLedger()
 
         # Build both forward and reverse CSR structures
         logger.debug("Building forward CSR...")
@@ -1532,12 +1538,27 @@ class CSRGraph:
 
     @staticmethod
     def load_mmap(
-        directory: Union[str, Path], mmap_mode: Literal["r+", "r", "w+", "c"] = "r"
+        directory: Union[str, Path],
+        mmap_mode: Literal["r+", "r", "w+", "c"] = "r",
+        serve_metadata: bool = True,
     ):
         """Load graph from memory-mapped format.
 
         Supports both the new hybrid format (dedup store + LMDB) and
         the legacy format (full EdgePropertyStore with pubs/sources/quals).
+
+        Args:
+            directory: The saved graph.
+            mmap_mode: How the NumPy arrays are mapped.
+            serve_metadata: Load ``meta_kg.json`` and ``sri_testing_data.json``
+                (and build them if missing).  Only the HTTP endpoints serve
+                them; a queue worker passes False and saves their private
+                memory, which on a large graph is hundreds of megabytes.
+
+        The anonymous memory each stage of the load took is recorded on
+        ``graph.load_memory`` (a :class:`~gandalf.memory.MemoryLedger`) and
+        logged, since a mapped graph should take almost none: a stage that
+        does is a legacy file format or a metadata JSON.
         """
         directory = Path(directory)
         logger.info(
@@ -1547,8 +1568,10 @@ class CSRGraph:
             settings.load_mmaps_into_memory,
         )
         t0 = time.perf_counter()
+        ledger = MemoryLedger()
 
         graph = CSRGraph.__new__(CSRGraph)
+        graph.load_memory = ledger
 
         # Open plugin-owned traversal metadata if persisted at save time.
         # Missing namespaces (legacy graphs or newly-registered plugins)
@@ -1591,10 +1614,12 @@ class CSRGraph:
             graph.rev_to_fwd = _load_npy(rev_to_fwd_path, mmap_mode=mmap_mode)
         else:
             graph.rev_to_fwd = None  # rebuilt after full load
+        ledger.mark("csr arrays")
 
         # Load metadata
         with open(directory / "metadata.pkl", "rb") as f:
             metadata = pickle.load(f)
+        ledger.mark("metadata.pkl")
 
         graph.num_nodes = metadata["num_nodes"]
         graph.predicate_to_idx = metadata["predicate_to_idx"]
@@ -1612,12 +1637,19 @@ class CSRGraph:
             graph.node_properties = None
         else:
             # Legacy: node data was in metadata.pkl
+            logger.warning(
+                "%s has no node_store.lmdb: node ids and properties are held "
+                "as Python objects in every process (gigabytes on a large "
+                "graph). Rebuild the graph with gandalf-build.",
+                directory,
+            )
             graph.node_store = None
             graph.node_id_to_idx = metadata["node_id_to_idx"]
             graph.idx_to_node_id = {
                 idx: nid for nid, idx in graph.node_id_to_idx.items()
             }
             graph.node_properties = metadata["node_properties"]
+        ledger.mark("node store")
 
         # Load edge properties - detect format
         t_props_start = time.perf_counter()
@@ -1639,6 +1671,7 @@ class CSRGraph:
                 )
         else:
             raise FileNotFoundError(f"No edge property files found in {directory}")
+        ledger.mark("edge property pools")
 
         # Load LMDB store if present
         if lmdb_path.exists():
@@ -1670,12 +1703,19 @@ class CSRGraph:
             )
             graph.edge_ids = None  # signal: use LMDB
         elif edge_ids_pkl_path.exists():
+            logger.warning(
+                "%s has edge_ids.pkl rather than edge_ids.lmdb: every edge id "
+                "is a Python string in every process (gigabytes on a large "
+                "graph). Rebuild the graph with gandalf-build.",
+                directory,
+            )
             with open(edge_ids_pkl_path, "rb") as f:
                 graph.edge_ids = pickle.load(f)
             graph._edge_ids_env = None
         else:
             graph.edge_ids = None
             graph._edge_ids_env = None
+        ledger.mark("edge ids")
 
         t_props_end = time.perf_counter()
 
@@ -1695,8 +1735,13 @@ class CSRGraph:
 
         # Rebuild rev_to_fwd if not present (legacy format)
         if graph.rev_to_fwd is None:
-            logger.debug("  Rebuilding rev_to_fwd mapping...")
+            logger.warning(
+                "%s has no rev_to_fwd.npy: rebuilding it in memory in every "
+                "process. Rebuild the graph with gandalf-build to map it.",
+                directory,
+            )
             graph._rebuild_rev_to_fwd()
+            ledger.mark("rev_to_fwd rebuild")
 
         t1 = time.perf_counter()
         logger.info(
@@ -1714,21 +1759,27 @@ class CSRGraph:
         # Load pre-computed meta_kg from disk if available (avoids
         # expensive full LMDB scan at query-time startup).
         meta_kg_path = directory / "meta_kg.json"
-        if meta_kg_path.exists():
+        if not serve_metadata:
+            graph.meta_kg = None  # not loaded: this process does not serve it
+        elif meta_kg_path.exists():
             with open(meta_kg_path, "r", encoding="utf-8") as f:
                 graph.meta_kg = json.load(f)
             logger.info("  Loaded meta_kg from %s", meta_kg_path)
         else:
             graph.meta_kg = None  # will be built by build_metadata()
+        ledger.mark("meta_kg.json")
 
         # Load pre-computed sri_testing_data from disk if available.
         sri_testing_path = directory / "sri_testing_data.json"
-        if sri_testing_path.exists():
+        if not serve_metadata:
+            graph.sri_testing_data = None
+        elif sri_testing_path.exists():
             with open(sri_testing_path, "r", encoding="utf-8") as f:
                 graph.sri_testing_data = json.load(f)
             logger.info("  Loaded sri_testing_data from %s", sri_testing_path)
         else:
             graph.sri_testing_data = None  # will be built by build_metadata()
+        ledger.mark("sri_testing_data.json")
 
         metadata_path = directory / "graph-metadata.json"
         if metadata_path.exists():
@@ -1738,12 +1789,16 @@ class CSRGraph:
         else:
             graph.graph_metadata = None
 
-        graph.build_metadata()
+        if serve_metadata:
+            graph.build_metadata()
+            ledger.mark("build_metadata (missing JSON)")
 
         # Run plugin enrichers so traversal_metadata is populated before any
         # query is executed against this graph.
         from gandalf.plugins.enrichers import run_enrichers
 
         run_enrichers(graph)
+        ledger.mark("plugin enrichers")
 
+        logger.info("  Private memory taken by the load: %s", ledger.summary())
         return graph

@@ -235,7 +235,8 @@
           td(r.job_id ? esc(r.job_id.slice(0, 8)) + (r.job_deliveries > 1 ? ` <span class="meta">(attempt ${esc(r.job_deliveries)})</span>` : "") : "", "mono"),
           td(esc(querySummary(r.job_query)), "query"), td(r.job_elapsed_s != null ? fmtS(r.job_elapsed_s) : "", "num"),
           td(fmtN(r.jobs_done) + (r.max_jobs ? `<span class="meta"> / ${fmtN(r.max_jobs)}</span>` : ""), "num"),
-          td(r.last_outcome ? outcome(r.last_outcome) : ""), td(fmtB(r.rss_anon_kb * 1024), "num"), td(ago(r.age_s), "num")]),
+          td(r.last_outcome ? outcome(r.last_outcome) : ""),
+          td(fmtB(r.rss_anon_kb * 1024) + (r.startup_anon_kb ? `<br><span class="meta" title="${esc(r.startup_memory || "")}">${fmtB(r.startup_anon_kb * 1024)} at start</span>` : ""), "num"), td(ago(r.age_s), "num")]),
         "No worker has reported. Start one with: python -m gandalf.worker");
       const jobs = (d.jobs && d.jobs.recent) || [];
       table($("jobs"), [{label: "Finished"}, {label: "Job"}, {label: "Mode"}, {label: "Outcome"}, {label: "Waited", num: true}, {label: "Ran", num: true}, {label: "Size", num: true}, {label: "Worker"}, {label: "Query"}],

@@ -217,3 +217,58 @@ def test_trim_heap_returns_freed_memory():
     assert trim_heap_if_large(0) is False
     assert trim_heap_if_large(10**6) is False  # far above any test process
     assert len(kept) == 3000
+
+
+def test_load_ledger_and_metadata_free_load(graph, tmp_path, caplog):  # noqa: F811
+    """A mapped graph takes almost no private memory, and a worker skips the metadata."""
+    import logging
+
+    from gandalf.graph import CSRGraph
+
+    graph.save_mmap(tmp_path / "g")
+    with caplog.at_level(logging.INFO, logger="gandalf.graph"):
+        served = CSRGraph.load_mmap(tmp_path / "g")
+    ledger = served.load_memory
+    assert set(ledger.stages) >= {
+        "csr arrays",
+        "metadata.pkl",
+        "node store",
+        "edge property pools",
+        "edge ids",
+        "meta_kg.json",
+        "plugin enrichers",
+    }
+    assert ledger.total_kb() < 64 * 1024, ledger.summary()  # not the graph
+    assert served.meta_kg is not None and served.sri_testing_data is not None
+    assert any("Private memory taken by the load" in r.message for r in caplog.records)
+
+    # LMDB refuses to open one environment twice in a process: a second copy.
+    graph.save_mmap(tmp_path / "g2")
+    bare = CSRGraph.load_mmap(tmp_path / "g2", serve_metadata=False)
+    assert bare.meta_kg is None and bare.sri_testing_data is None
+    assert "build_metadata (missing JSON)" not in bare.load_memory.stages
+    # and it still answers queries
+    from gandalf.execute import execute_to_bytes
+    from tests.conftest import MockBMT
+
+    assert b'"results"' in execute_to_bytes(bare, MockBMT(), dict(ONE_HOP))
+
+
+def test_legacy_edge_ids_pickle_is_warned_about(graph, tmp_path, caplog):  # noqa: F811
+    import logging
+    import pickle
+    import shutil
+
+    from gandalf.graph import CSRGraph
+
+    graph.save_mmap(tmp_path / "g")
+    ids = [graph.get_edge_id(i) for i in range(len(graph.fwd_targets))]
+    shutil.rmtree(tmp_path / "g" / "edge_ids.lmdb")
+    with open(tmp_path / "g" / "edge_ids.pkl", "wb") as f:
+        pickle.dump(ids, f)
+    with caplog.at_level(logging.WARNING, logger="gandalf.graph"):
+        legacy = CSRGraph.load_mmap(tmp_path / "g")
+    assert legacy.get_edge_id(0) == ids[0]
+    assert any(
+        "edge_ids.pkl rather than edge_ids.lmdb" in r.message for r in caplog.records
+    )

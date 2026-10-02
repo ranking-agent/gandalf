@@ -120,6 +120,11 @@ class Worker:
         self.notifier = notifier
         self.jobs_done = 0
         self.started_at = time.time()
+        # What this process cost before its first job, and where it went,
+        # from the graph load's ledger when there is one.
+        self.startup_anon_kb = rss_anon_kb()
+        ledger = getattr(graph, "load_memory", None)
+        self.startup_memory = ledger.summary() if ledger is not None else ""
         self.last_outcome = ""
         self._current: dict = {}  # the running job's report fields
         self._stop = threading.Event()
@@ -153,6 +158,8 @@ class Worker:
             max_jobs=self.max_jobs,
             last_outcome=self.last_outcome,
             rss_anon_kb=rss_anon_kb(),
+            startup_anon_kb=self.startup_anon_kb,
+            startup_memory=self.startup_memory,
             stopping=self.stopping,
             **self._current,
         )
@@ -459,7 +466,7 @@ def main() -> int:
     if not settings.queue_url:
         raise SystemExit("GANDALF_QUEUE_URL must be set to run a worker")
 
-    graph, bmt = load_runtime()
+    graph, bmt = load_runtime(serve_metadata=False)
     client = redis_client()
     worker = Worker(
         graph,

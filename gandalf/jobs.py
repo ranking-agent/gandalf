@@ -745,6 +745,7 @@ _NUMERIC_REPORT_FIELDS = frozenset(
         "last_seen",
         "job_started_at",
         "rss_anon_kb",
+        "startup_anon_kb",
         "max_jobs",
     }
 )

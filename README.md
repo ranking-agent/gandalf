@@ -522,6 +522,16 @@ reuse rather than returning them.  A worker therefore hands them back with
 behind, 200 MB after the trim, in 10 ms), and the API does the same before
 each query.  Size a worker for one query's peak, not for the graph.
 
+A worker that is large *before its first query* is loading something it
+should not.  Every load logs where its private memory went, stage by
+stage (`Private memory taken by the load: +N MB (...)`), and the status
+page shows each worker's memory at start; the usual culprits are a graph
+in a legacy format (`edge_ids.pkl` instead of `edge_ids.lmdb`, node data
+in `metadata.pkl` instead of `node_store.lmdb`, a missing
+`rev_to_fwd.npy`), each of which the load warns about and a rebuild with
+`gandalf-build` fixes, and the metadata JSONs, which only the API needs and
+a worker no longer loads.
+
 **One query at a time, by design.**  A query is single-threaded Python, so
 a worker uses one core and a second CPU would go unused; concurrent queries
 in one process would share the GIL and, worse, add their memory peaks

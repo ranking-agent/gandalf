@@ -355,6 +355,11 @@ through a consumer group and run them.  Rules that follow:
   keeps the freed pages.  `gandalf.metrics.trim_heap_if_large` hands them
   back (`malloc_trim`) after each worker job and before each API query,
   above `heap_trim_threshold_mb`.  Measure with `RssAnon`, not RSS.
+  `CSRGraph.load_mmap` keeps a `gandalf.memory.MemoryLedger` of what each
+  load stage took (`graph.load_memory`, logged at the end of the load) and
+  warns about legacy file formats that cost private memory; a worker loads
+  with `serve_metadata=False`, since only the API serves the meta knowledge
+  graph and SRI testing data.
 - **Workers report, jobs are recorded.**  `Worker.report` writes the
   worker's state to the `WorkerRegistry` (a hash with a TTL, refreshed on
   every poll and keepalive tick, so a dead worker drops off the page), and

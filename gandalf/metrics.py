@@ -14,11 +14,8 @@ Metric names are stable: dashboards and the KEDA ``ScaledObject`` in
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import os
 
-import psutil
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     REGISTRY,
@@ -164,82 +161,11 @@ def metrics_payload() -> tuple[bytes, str]:
     return generate_latest(metrics_registry()), CONTENT_TYPE_LATEST
 
 
-# --- Process memory --------------------------------------------------------
+# --- Process memory (gandalf.memory, re-exported) --------------------------
 
-
-def rss_kb() -> int:
-    """Current resident set size in KB. Cross-platform via psutil.
-
-    Constructs psutil.Process() per call rather than caching, so that with
-    gunicorn preload_app=True each worker reads its own RSS instead of the
-    master's PID it inherited at fork time.
-    """
-    return int(psutil.Process().memory_info().rss) // 1024
-
-
-def rss_anon_kb() -> int:
-    """Anonymous (private, non-file-backed) RSS in KB.
-
-    Reads RssAnon from /proc/self/status on Linux -- this is the precise
-    metric for OOM risk, since file-backed pages (LMDB, .so files) are
-    reclaimable but anon pages are not. Falls back to psutil's USS on
-    non-Linux; USS additionally includes private file mappings, but it's
-    the closest cross-platform approximation.
-    """
-    try:
-        with open("/proc/self/status", "rb") as f:
-            for line in f:
-                if line.startswith(b"RssAnon:"):
-                    return int(line.split()[1])
-    except OSError:
-        pass
-    try:
-        return int(psutil.Process().memory_full_info().uss) // 1024
-    except Exception:
-        return -1
-
-
-# --- Heap trimming ---------------------------------------------------------
-
-_libc = None
-_malloc_trim_missing = False
-
-
-def trim_heap() -> bool:
-    """Give the memory freed after a large query back to the operating system.
-
-    glibc keeps freed heap pages around for reuse, so a process that built a
-    multi-hundred-megabyte response stays that big after it is gone: the
-    graph itself costs no private memory (it is memory-mapped), but a few
-    large queries leave gigabytes of retained heap per process.
-    ``malloc_trim(0)`` returns the free pages; measured on a 373 MB
-    response, anonymous RSS fell from 560 MB to 200 MB in about 10 ms.
-
-    Returns:
-        Whether a trim happened (False on a libc without ``malloc_trim``).
-    """
-    global _libc, _malloc_trim_missing
-    if _malloc_trim_missing:
-        return False
-    if _libc is None:
-        name = ctypes.util.find_library("c")
-        try:
-            _libc = ctypes.CDLL(name) if name else ctypes.CDLL(None)
-            _libc.malloc_trim.argtypes = [ctypes.c_size_t]
-            _libc.malloc_trim.restype = ctypes.c_int
-        except (OSError, AttributeError):
-            _malloc_trim_missing = True
-            return False
-    _libc.malloc_trim(0)
-    return True
-
-
-def trim_heap_if_large(threshold_mb: int) -> bool:
-    """Trim when anonymous RSS is above *threshold_mb* (0 disables).
-
-    Reading the size costs microseconds; the trim itself scales with the
-    heap, so a small process is left alone.
-    """
-    if threshold_mb <= 0 or rss_anon_kb() < threshold_mb * 1024:
-        return False
-    return trim_heap()
+from gandalf.memory import (  # noqa: E402,F401
+    rss_anon_kb,
+    rss_kb,
+    trim_heap,
+    trim_heap_if_large,
+)

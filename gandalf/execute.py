@@ -26,6 +26,7 @@ from translator_tom.model_dicts import QueryDict, ResponseDict
 from gandalf import CSRGraph, annotate_response, enrich_knowledge_graph, lookup
 from gandalf.biolink import make_toolkit
 from gandalf.config import settings
+from gandalf.memory import rss_anon_kb
 from gandalf.search.gc_utils import gc_disabled
 from gandalf.trapi import Deadline, finalize_response, query_parameters, to_fragments
 
@@ -37,12 +38,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def load_graph(path: str, format: str = "auto") -> CSRGraph:
+def load_graph(
+    path: str, format: str = "auto", serve_metadata: bool = True
+) -> CSRGraph:
     """Load graph from disk.
 
     Args:
         path: Path to graph directory (mmap format)
         format: "auto" (detect from path) or "mmap"
+        serve_metadata: Load the meta knowledge graph and SRI testing data
+            (only the HTTP endpoints serve them).
 
     Returns:
         Loaded CSRGraph
@@ -58,19 +63,25 @@ def load_graph(path: str, format: str = "auto") -> CSRGraph:
             )
 
     if format == "mmap":
-        graph: CSRGraph = CSRGraph.load_mmap(resolved_path)
+        graph: CSRGraph = CSRGraph.load_mmap(
+            resolved_path, serve_metadata=serve_metadata
+        )
         return graph
     else:
         raise ValueError(f"Unknown format: {format}")
 
 
-def load_runtime() -> tuple[CSRGraph, Toolkit]:
+def load_runtime(serve_metadata: bool = True) -> tuple[CSRGraph, Toolkit]:
     """Open the configured graph and build the Biolink Model Toolkit.
 
     Everything allocated by then (the graph and BMT) is frozen into a
     permanent GC generation that the cyclic collector never scans again, so
     Gen 2 collections stay cheap at query time, and the thresholds are raised
     so those collections are rare for the (now small) unfrozen object set.
+
+    Args:
+        serve_metadata: Load the meta knowledge graph and SRI testing data;
+            the API needs them, a worker does not.
 
     Returns:
         The loaded graph and toolkit.
@@ -80,13 +91,19 @@ def load_runtime() -> tuple[CSRGraph, Toolkit]:
         settings.graph_path,
         settings.graph_format,
     )
-    graph = load_graph(settings.graph_path, settings.graph_format)
+    graph = load_graph(settings.graph_path, settings.graph_format, serve_metadata)
     logger.info("Initializing Biolink Model Toolkit...")
     bmt = make_toolkit()
+    graph.load_memory.mark("biolink toolkit")
 
     gc.collect()
     gc.freeze()
     gc.set_threshold(50_000, 50, 50)
+    logger.info(
+        "Runtime ready: %s; anonymous RSS now %d MB",
+        graph.load_memory.summary(),
+        rss_anon_kb() // 1024,
+    )
     return graph, bmt
 
 
