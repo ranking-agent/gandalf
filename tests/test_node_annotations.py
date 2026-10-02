@@ -291,3 +291,159 @@ class TestAnnotatorService:
             annotations_of(graph.node_properties, graph.node_id_to_idx, "GO:0006006")
             is None
         )
+
+
+# ---------------------------------------------------------------------------
+# Resilience: retries, bisecting, outage, cache
+# ---------------------------------------------------------------------------
+#
+# The Annotator fans out to BioThings APIs that answer 500 now and then, for
+# a while or for one CURIE.  The policy that absorbs that is exercised here
+# against callables that fail on purpose; the live service is covered by the
+# integration tests above.
+
+import asyncio  # noqa: E402
+
+from gandalf.node_annotations import (  # noqa: E402
+    AnnotationCache,
+    AnnotatorUnavailable,
+    _run_annotation,
+    annotate_resilient,
+    annotate_with_retry,
+)
+
+
+class _Service:
+    """An Annotator stand-in: answers {curie: {"symbol": curie}}, with faults."""
+
+    def __init__(
+        self, *, fail_first: int = 0, poison: set = frozenset(), down: bool = False
+    ):
+        self.fail_first = fail_first  # the first N calls fail outright
+        self.poison = set(poison)  # any batch containing one of these fails
+        self.down = down
+        self.calls: list = []
+
+    async def __call__(self, batch):
+        self.calls.append(list(batch))
+        if self.down or len(self.calls) <= self.fail_first or self.poison & set(batch):
+            raise RuntimeError("500 Internal Server Error from mydisease.info")
+        return {c: {"symbol": c} for c in batch}
+
+
+async def _no_sleep(seconds):
+    _no_sleep.waited.append(seconds)
+
+
+_no_sleep.waited = []
+
+
+@pytest.fixture(autouse=True)
+def _reset_sleep():
+    _no_sleep.waited = []
+
+
+def test_retry_backs_off_then_succeeds():
+    service = _Service(fail_first=2)
+    result = asyncio.run(
+        annotate_with_retry(
+            service, ["A:1", "A:2"], attempts=5, backoff_seconds=2.0, sleep=_no_sleep
+        )
+    )
+    assert result == {"A:1": {"symbol": "A:1"}, "A:2": {"symbol": "A:2"}}
+    assert len(service.calls) == 3
+    assert _no_sleep.waited == [2.0, 4.0]
+
+
+def test_retry_gives_up_with_the_last_error():
+    service = _Service(down=True)
+    with pytest.raises(RuntimeError, match="500"):
+        asyncio.run(
+            annotate_with_retry(
+                service, ["A:1"], attempts=3, backoff_seconds=1.0, sleep=_no_sleep
+            )
+        )
+    assert len(service.calls) == 3 and _no_sleep.waited == [1.0, 2.0]
+
+
+def test_bisecting_isolates_the_curie_the_service_rejects():
+    service = _Service(poison={"A:7"})
+    failed: list = []
+    batch = [f"A:{i}" for i in range(16)]
+    result = asyncio.run(
+        annotate_resilient(
+            service,
+            batch,
+            attempts=2,
+            backoff_seconds=0.1,
+            failed=failed,
+            sleep=_no_sleep,
+        )
+    )
+    assert failed == ["A:7"]
+    assert set(result) == set(batch) - {"A:7"}
+    assert all(result[c] == {"symbol": c} for c in result)
+    # one failing half per level, each with its own retries, not thousands of calls
+    assert len(service.calls) < 30
+
+
+def test_a_down_service_aborts_instead_of_silently_skipping():
+    service = _Service(down=True)
+    failed: list = []
+    with pytest.raises(AnnotatorUnavailable, match="unavailable"):
+        asyncio.run(
+            annotate_resilient(
+                service,
+                [f"A:{i}" for i in range(64)],
+                attempts=2,
+                backoff_seconds=0.1,
+                failed=failed,
+                sleep=_no_sleep,
+            )
+        )
+    assert len(service.calls) < 40  # it does not grind through every CURIE
+
+
+def test_cache_makes_a_rerun_fetch_only_what_is_missing(tmp_path):
+    cache = tmp_path / "annotations.jsonl"
+    curies = [f"A:{i}" for i in range(10)]
+    first = _Service(poison={"A:3"})
+    got: dict = {}
+    queried = _run_annotation(
+        curies, 4, got.update, attempts=2, cache_path=cache, annotate=first
+    )
+    assert queried == 10
+    assert set(got) == set(curies) - {"A:3"}
+
+    # The cache holds every answer the service gave, not the CURIE it rejected.
+    known = AnnotationCache(cache).known
+    assert set(known) == set(curies) - {"A:3"}
+
+    second = _Service()
+    got2: dict = {}
+    _run_annotation(
+        curies, 4, got2.update, attempts=2, cache_path=cache, annotate=second
+    )
+    assert got2 == got | {"A:3": {"symbol": "A:3"}}
+    assert second.calls == [["A:3"]]  # only the one that was missing
+    assert "A:3" in AnnotationCache(cache).known
+
+
+def test_cache_remembers_nothing_available_too(tmp_path):
+    cache = tmp_path / "annotations.jsonl"
+
+    async def nothing(batch):
+        return {c: {} for c in batch}  # the Annotator's "no annotation" answer
+
+    got: dict = {}
+    _run_annotation(["A:1"], 10, got.update, cache_path=cache, annotate=nothing)
+    assert got == {}
+    assert AnnotationCache(cache).known == {"A:1": None}
+    calls = []
+
+    async def counting(batch):
+        calls.append(batch)
+        return {}
+
+    _run_annotation(["A:1"], 10, got.update, cache_path=cache, annotate=counting)
+    assert calls == []  # not asked again

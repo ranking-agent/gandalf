@@ -24,14 +24,28 @@ Usage from the loader::
 or from the CLI::
 
     gandalf-build --edges edges.jsonl --nodes nodes.jsonl -o graph/ --annotate
+
+The Annotator fans each call out to the BioThings APIs (mygene.info,
+mydisease.info, ...), any of which can answer 500 for a while, or for one
+particular CURIE.  A whole-graph run must not die of either, so each batch
+is retried with backoff (:func:`annotate_with_retry`), a batch that keeps
+failing is split in half until the CURIEs the service rejects are isolated
+and left unannotated (:func:`annotate_resilient`), and a service that fails
+everything, even one CURIE at a time, aborts the build with
+:class:`AnnotatorUnavailable` rather than quietly producing a graph with no
+annotations.  An :class:`AnnotationCache` (``--annotation-cache``) records
+every answer as it arrives, so a run that is aborted, or a later rebuild,
+fetches only what it does not have yet.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import (
     Any,
+    Awaitable,
     Callable,
     Dict,
     Iterable,
@@ -40,7 +54,10 @@ from typing import (
     MutableMapping,
     Optional,
     Tuple,
+    Union,
 )
+
+import orjson
 
 from gandalf.biolink import NAMED_THING
 
@@ -51,6 +68,26 @@ BIOTHINGS_ANNOTATIONS_ATTRIBUTE_TYPE_ID = "biothings_annotations"
 
 # Number of CURIEs sent to the Annotator in a single call.
 DEFAULT_ANNOTATION_BATCH_SIZE = 1000
+
+# How many times one batch is tried before it is split, and the first wait
+# between tries (doubling each time, up to _MAX_BACKOFF_SECONDS).
+DEFAULT_ANNOTATION_ATTEMPTS = 5
+DEFAULT_ANNOTATION_BACKOFF_SECONDS = 2.0
+_MAX_BACKOFF_SECONDS = 60.0
+
+#: One Annotator call: a batch of CURIEs to ``curie -> raw result``.
+Annotate = Callable[[List[str]], Awaitable[Dict[str, Any]]]
+#: ``asyncio.sleep`` or a stand-in, so the retry policy is testable in no time.
+Sleep = Callable[[float], Awaitable[None]]
+
+
+class AnnotatorUnavailable(RuntimeError):
+    """The Annotator fails every CURIE, even one at a time: it is down.
+
+    Raised instead of finishing the build with the remaining nodes
+    unannotated, which nothing downstream would notice.
+    """
+
 
 _MISSING_PACKAGE_MESSAGE = (
     "Node annotation requires the 'biothings_annotator' package, which is not "
@@ -202,38 +239,238 @@ def attach_annotations(
     return annotated
 
 
+async def annotate_with_retry(
+    annotate: Annotate,
+    batch: List[str],
+    *,
+    attempts: int = DEFAULT_ANNOTATION_ATTEMPTS,
+    backoff_seconds: float = DEFAULT_ANNOTATION_BACKOFF_SECONDS,
+    sleep: Sleep = asyncio.sleep,
+) -> Dict[str, Any]:
+    """Call *annotate* on *batch* up to *attempts* times, backing off between.
+
+    A BioThings backend answering 500 for a minute is the common case this
+    absorbs: the waits double from *backoff_seconds* (2, 4, 8, 16 s ...),
+    capped at a minute.  The last failure is raised as it came.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return await annotate(batch)
+        except Exception as exc:
+            if attempt == attempts:
+                raise
+            delay = min(backoff_seconds * 2 ** (attempt - 1), _MAX_BACKOFF_SECONDS)
+            logger.warning(
+                "Annotator call for %s CURIEs failed (%s: %s); retry %d/%d in %.0fs",
+                f"{len(batch):,}",
+                type(exc).__name__,
+                str(exc)[:200],
+                attempt + 1,
+                attempts,
+                delay,
+            )
+            await sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def annotate_resilient(
+    annotate: Annotate,
+    batch: List[str],
+    *,
+    attempts: int = DEFAULT_ANNOTATION_ATTEMPTS,
+    backoff_seconds: float = DEFAULT_ANNOTATION_BACKOFF_SECONDS,
+    failed: List[str],
+    sleep: Sleep = asyncio.sleep,
+) -> Dict[str, Any]:
+    """Annotate *batch*, retrying, then splitting it to isolate what the service rejects.
+
+    A batch that still fails after its retries is split in half and each
+    half tried again (with fewer attempts, since the retries just showed the
+    failure persists), down to single CURIEs.  A CURIE that fails alone is
+    appended to *failed* and left unannotated: the service cannot handle
+    that one, and a graph without its annotation beats no graph.  When both
+    halves of a batch fail outright the service is failing everything, and
+    :class:`AnnotatorUnavailable` is raised.
+
+    Returns:
+        ``curie -> raw result`` for the CURIEs that were annotated.
+    """
+    try:
+        return await annotate_with_retry(
+            annotate,
+            batch,
+            attempts=attempts,
+            backoff_seconds=backoff_seconds,
+            sleep=sleep,
+        )
+    except Exception as exc:
+        if len(batch) == 1:
+            logger.warning(
+                "Annotator cannot annotate %s (%s: %s); leaving it unannotated",
+                batch[0],
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            failed.append(batch[0])
+            return {}
+        logger.warning(
+            "Annotator failed a batch of %s after %d attempts; splitting it to "
+            "find the CURIEs it rejects",
+            f"{len(batch):,}",
+            attempts,
+        )
+        mid = len(batch) // 2
+        results: Dict[str, Any] = {}
+        halves_lost = 0
+        for half in (batch[:mid], batch[mid:]):
+            failed_before = len(failed)
+            results.update(
+                await annotate_resilient(
+                    annotate,
+                    half,
+                    attempts=min(attempts, 2),
+                    backoff_seconds=backoff_seconds,
+                    failed=failed,
+                    sleep=sleep,
+                )
+            )
+            if len(failed) - failed_before == len(half):
+                halves_lost += 1
+        if halves_lost == 2:
+            raise AnnotatorUnavailable(
+                f"The Annotator failed every CURIE of a batch of {len(batch):,}, "
+                "even one at a time, after retries: the service is unavailable. "
+                "Re-run the build when it is back; with --annotation-cache the "
+                "CURIEs already annotated are not fetched again."
+            ) from exc
+        return results
+
+
+class AnnotationCache:
+    """Every Annotator answer so far, as JSON lines, so nothing is fetched twice.
+
+    Each line is ``{"curie": ..., "annotation": ...}`` with ``null`` for a
+    CURIE the service had nothing for (so it is not asked again either).
+    CURIEs the service *failed* on are not recorded: they are retried next
+    run.  Opening the cache reads what is there; :meth:`record` appends.
+
+    Examples:
+        >>> import tempfile, os
+        >>> path = os.path.join(tempfile.mkdtemp(), "annotations.jsonl")
+        >>> cache = AnnotationCache(path)
+        >>> cache.record({"NCBIGene:1": {"symbol": "A1BG"}, "MONDO:1": None})
+        >>> sorted(AnnotationCache(path).known)
+        ['MONDO:1', 'NCBIGene:1']
+        >>> AnnotationCache(path).annotations()
+        {'NCBIGene:1': {'symbol': 'A1BG'}}
+    """
+
+    def __init__(self, path: Union[str, Path]):
+        self.path = Path(path)
+        self.known: Dict[str, Any] = {}
+        if self.path.exists():
+            with open(self.path, "rb") as f:
+                for line in f:
+                    if line.strip():
+                        entry = orjson.loads(line)
+                        self.known[entry["curie"]] = entry.get("annotation")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def annotations(self) -> Dict[str, Any]:
+        """The cached CURIEs that have an annotation."""
+        return {c: a for c, a in self.known.items() if a is not None}
+
+    def record(self, answers: Mapping[str, Any]) -> None:
+        """Append *answers* (``curie -> annotation or None``) and remember them."""
+        with open(self.path, "ab") as f:
+            for curie, annotation in answers.items():
+                f.write(orjson.dumps({"curie": curie, "annotation": annotation}))
+                f.write(b"\n")
+        self.known.update(answers)
+
+
 async def _annotate_batches(
-    curies: List[str], batch_size: int, on_batch: Callable[[Dict[str, Any]], None]
-) -> None:
+    curies: List[str],
+    batch_size: int,
+    on_batch: Callable[[Dict[str, Any]], None],
+    *,
+    annotate: Optional[Annotate] = None,
+    attempts: int = DEFAULT_ANNOTATION_ATTEMPTS,
+    backoff_seconds: float = DEFAULT_ANNOTATION_BACKOFF_SECONDS,
+    cache: Optional[AnnotationCache] = None,
+    sleep: Sleep = asyncio.sleep,
+) -> List[str]:
     """Annotate *curies* batch by batch, handing each batch to *on_batch*.
 
     One Annotator instance serves every batch so its backend-discovery cache is
     reused.  Batches are handed off as they arrive rather than accumulated, so
     a whole-graph run never holds more than one batch of annotations at a time.
-    """
-    annotator_cls, _ = _import_annotator()
-    annotator = annotator_cls()
 
+    Args:
+        annotate: The call to make per batch; the real Annotator's
+            ``annotate_curie_list`` when None.
+        cache: Answers already in hand are handed to *on_batch* first and
+            not fetched; every new answer is recorded as it arrives.
+
+    Returns:
+        The CURIEs the service could not annotate after retries.
+    """
+    if annotate is None:
+        annotator_cls, _ = _import_annotator()
+        annotator = annotator_cls()
+        annotate = annotator.annotate_curie_list
+
+    if cache is not None:
+        cached = cache.annotations()
+        if cached:
+            on_batch({c: a for c, a in cached.items() if c in set(curies)})
+        pending = [c for c in curies if c not in cache.known]
+        logger.info(
+            "  %s CURIEs already in %s; fetching %s",
+            f"{len(curies) - len(pending):,}",
+            cache.path,
+            f"{len(pending):,}",
+        )
+        curies = pending
+
+    failed: List[str] = []
     for start in range(0, len(curies), batch_size):
         batch = curies[start : start + batch_size]
-        results = await annotator.annotate_curie_list(batch)
-        annotations = {}
-        for curie, result in results.items():
-            annotation = clean_annotation(result)
-            if annotation is not None:
-                annotations[curie] = annotation
-        on_batch(annotations)
+        results = await annotate_resilient(
+            annotate,
+            batch,
+            attempts=attempts,
+            backoff_seconds=backoff_seconds,
+            failed=failed,
+            sleep=sleep,
+        )
+        answers = {curie: clean_annotation(result) for curie, result in results.items()}
+        if cache is not None:
+            cache.record(answers)
+        on_batch({c: a for c, a in answers.items() if a is not None})
         logger.debug(
             "  annotated %s/%s CURIEs...",
             f"{min(start + batch_size, len(curies)):,}",
             f"{len(curies):,}",
         )
+    if failed:
+        logger.warning(
+            "  %s CURIEs could not be annotated and were left without "
+            "annotations (first few: %s)",
+            f"{len(failed):,}",
+            ", ".join(failed[:5]),
+        )
+    return failed
 
 
 def _run_annotation(
     node_ids: Iterable[str],
     batch_size: int,
     on_batch: Callable[[Dict[str, Any]], None],
+    *,
+    attempts: int = DEFAULT_ANNOTATION_ATTEMPTS,
+    cache_path: Optional[Union[str, Path]] = None,
+    annotate: Optional[Annotate] = None,
 ) -> int:
     """Filter *node_ids*, annotate them, and stream each batch to *on_batch*.
 
@@ -241,18 +478,32 @@ def _run_annotation(
         The number of annotatable CURIEs that were queried (not the number
         that came back with an annotation).
     """
-    curies = annotatable_curies(node_ids)
+    curies = annotatable_curies(node_ids) if annotate is None else sorted(set(node_ids))
     if not curies:
         logger.info("No annotatable CURIE prefixes found; skipping annotation")
         return 0
 
     logger.info("Annotating %s nodes via biothings_annotator...", f"{len(curies):,}")
-    asyncio.run(_annotate_batches(curies, batch_size, on_batch))
+    cache = AnnotationCache(cache_path) if cache_path else None
+    asyncio.run(
+        _annotate_batches(
+            curies,
+            batch_size,
+            on_batch,
+            annotate=annotate,
+            attempts=attempts,
+            cache=cache,
+        )
+    )
     return len(curies)
 
 
 def fetch_annotations(
-    node_ids: Iterable[str], batch_size: int = DEFAULT_ANNOTATION_BATCH_SIZE
+    node_ids: Iterable[str],
+    batch_size: int = DEFAULT_ANNOTATION_BATCH_SIZE,
+    *,
+    attempts: int = DEFAULT_ANNOTATION_ATTEMPTS,
+    cache_path: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Fetch annotations for every annotatable CURIE in *node_ids*.
 
@@ -260,13 +511,22 @@ def fetch_annotations(
         node_ids: Node ID strings to annotate.  Unsupported prefixes are
             dropped by :func:`annotatable_curies` before any request is made.
         batch_size: CURIEs per Annotator call.
+        attempts: Tries per batch before it is split (see
+            :func:`annotate_resilient`).
+        cache_path: An :class:`AnnotationCache` file to read and extend.
 
     Returns:
         ``curie -> annotation`` for the nodes that had one.  CURIEs the
         Annotator has nothing for are absent, not present-and-empty.
     """
     annotations: Dict[str, Any] = {}
-    queried = _run_annotation(node_ids, batch_size, annotations.update)
+    queried = _run_annotation(
+        node_ids,
+        batch_size,
+        annotations.update,
+        attempts=attempts,
+        cache_path=cache_path,
+    )
     logger.info(
         "  Retrieved annotations for %s/%s nodes",
         f"{len(annotations):,}",
@@ -279,6 +539,9 @@ def annotate_node_properties(
     node_properties: MutableMapping[int, dict],
     node_id_to_idx: Mapping[str, int],
     batch_size: int = DEFAULT_ANNOTATION_BATCH_SIZE,
+    *,
+    attempts: int = DEFAULT_ANNOTATION_ATTEMPTS,
+    cache_path: Optional[Union[str, Path]] = None,
 ) -> int:
     """Annotate every node in the graph vocabulary and store the results.
 
@@ -290,6 +553,11 @@ def annotate_node_properties(
             attributes}``.  Mutated in place.
         node_id_to_idx: The graph's node ID -> index vocabulary.
         batch_size: CURIEs per Annotator call.
+        attempts: Tries per batch before it is split (see
+            :func:`annotate_resilient`).
+        cache_path: An :class:`AnnotationCache` file to read and extend, so
+            a rebuild (or a run the service interrupted) fetches only what
+            it does not have.
 
     Returns:
         The number of nodes that received an annotation.
@@ -305,7 +573,13 @@ def annotate_node_properties(
         nonlocal annotated
         annotated += attach_annotations(node_properties, node_id_to_idx, annotations)
 
-    queried = _run_annotation(node_id_to_idx.keys(), batch_size, attach_batch)
+    queried = _run_annotation(
+        node_id_to_idx.keys(),
+        batch_size,
+        attach_batch,
+        attempts=attempts,
+        cache_path=cache_path,
+    )
     logger.info(
         "  Retrieved annotations for %s/%s nodes", f"{annotated:,}", f"{queried:,}"
     )

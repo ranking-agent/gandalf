@@ -447,7 +447,15 @@ Run them explicitly with `python -m pytest -m integration`.
 - Node annotation (`--annotate`) is optional: it needs network access and the
   `biothings_annotator` package (`pip install -r requirements-annotate.txt`),
   which is not on PyPI and so is deliberately not a pyproject extra — PyPI
-  rejects distributions with direct-URL dependencies
+  rejects distributions with direct-URL dependencies.  The Annotator's
+  backends answer 500 now and then, so `gandalf.node_annotations` retries
+  each batch with backoff, bisects a batch that keeps failing to isolate the
+  CURIEs the service rejects, aborts with `AnnotatorUnavailable` when the
+  service fails everything, and keeps an `AnnotationCache` JSONL
+  (`--annotation-cache`) so a rerun fetches only what it lacks.  The policy
+  is tested against failing callables (the one place a stand-in is the only
+  way to exercise failure paths); the live service stays under the
+  `integration` marker
 - CI/CD pipeline configured via `.github/workflows/ci.yml` (lint, test, typecheck)
 - Dockerfile available for containerized deployment
 - Server configurable via environment variables (see README.md)

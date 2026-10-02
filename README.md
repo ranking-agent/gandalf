@@ -152,6 +152,26 @@ This requires network access and the optional dependency:
 pip install -r requirements-annotate.txt
 ```
 
+The Annotator fans each call out to the BioThings APIs (mygene.info,
+mydisease.info, ...), and any of them can answer 500 for a while or for one
+particular CURIE.  A whole-graph run survives both: each batch is retried
+with backoff (`--annotate-attempts`, default 5: waits of 2, 4, 8, 16 s), a
+batch that keeps failing is split in half until the CURIEs the service
+rejects are isolated and left unannotated (logged, with a count at the
+end), and a service that fails everything even one CURIE at a time aborts
+the build with a clear error rather than quietly producing an unannotated
+graph.  Give the build an annotation cache so an aborted run, or a later
+rebuild of the same nodes, fetches only what it does not have yet:
+
+```bash
+gandalf-build --edges data/edges.jsonl --nodes data/nodes.jsonl --output graph_mmap/ \
+    --annotate --annotation-cache data/annotations.jsonl
+```
+
+The cache is a JSON-lines file of every answer so far, including "nothing
+available"; CURIEs the service failed on are not recorded and are tried
+again next run.
+
 ### Query paths (TRAPI format)
 
 ```python

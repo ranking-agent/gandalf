@@ -32,7 +32,7 @@ See ``gandalf.node_annotations``.
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -47,6 +47,7 @@ from gandalf.lmdb_store import (
     _put_with_resize,
 )
 from gandalf.node_annotations import (
+    DEFAULT_ANNOTATION_ATTEMPTS,
     DEFAULT_ANNOTATION_BATCH_SIZE,
     annotate_node_properties,
 )
@@ -64,6 +65,8 @@ def _build_graph_from_source(
     source: GraphSource,
     annotate_nodes: bool = False,
     annotation_batch_size: int = DEFAULT_ANNOTATION_BATCH_SIZE,
+    annotation_attempts: int = DEFAULT_ANNOTATION_ATTEMPTS,
+    annotation_cache: Optional[Union[str, Path]] = None,
 ) -> CSRGraph:
     """Build a CSR graph from a :class:`GraphSource` using three-pass streaming.
 
@@ -78,6 +81,10 @@ def _build_graph_from_source(
             ``biothings_annotations`` node attribute. Requires network access
             and the optional ``biothings_annotator`` package.
         annotation_batch_size: CURIEs per Annotator request.
+        annotation_attempts: Tries per Annotator request before it is split
+            to isolate the CURIEs the service rejects.
+        annotation_cache: A JSON-lines file of answers so far, read first and
+            extended as the run goes (``gandalf.node_annotations.AnnotationCache``).
     """
     # =================================================================
     # Pass 1: Vocabulary collection
@@ -134,7 +141,11 @@ def _build_graph_from_source(
     # annotations travel with the graph and cost nothing at query time.
     if annotate_nodes:
         annotated = annotate_node_properties(
-            node_properties, node_id_to_idx, batch_size=annotation_batch_size
+            node_properties,
+            node_id_to_idx,
+            batch_size=annotation_batch_size,
+            attempts=annotation_attempts,
+            cache_path=annotation_cache,
         )
         logger.info("  Annotated %s nodes", f"{annotated:,}")
 
@@ -418,6 +429,8 @@ def build_graph_from_jsonl(
     node_jsonl_path,
     annotate_nodes: bool = False,
     annotation_batch_size: int = DEFAULT_ANNOTATION_BATCH_SIZE,
+    annotation_attempts: int = DEFAULT_ANNOTATION_ATTEMPTS,
+    annotation_cache: Optional[Union[str, Path]] = None,
 ) -> CSRGraph:
     """Build a CSR graph from KGX jsonl files.
 
@@ -431,12 +444,16 @@ def build_graph_from_jsonl(
         annotate_nodes: Annotate nodes via ``biothings_annotator`` (see
             :func:`gandalf.node_annotations.annotate_node_properties`).
         annotation_batch_size: CURIEs per Annotator request.
+        annotation_attempts: Tries per Annotator request before it is split.
+        annotation_cache: JSON-lines file of answers so far, read and extended.
     """
     source = KGXJsonlSource(edge_jsonl_path, node_jsonl_path)
     return _build_graph_from_source(
         source,
         annotate_nodes=annotate_nodes,
         annotation_batch_size=annotation_batch_size,
+        annotation_attempts=annotation_attempts,
+        annotation_cache=annotation_cache,
     )
 
 
@@ -448,6 +465,8 @@ def build_graph_from_mongo(
     edges_collection: str,
     annotate_nodes: bool = False,
     annotation_batch_size: int = DEFAULT_ANNOTATION_BATCH_SIZE,
+    annotation_attempts: int = DEFAULT_ANNOTATION_ATTEMPTS,
+    annotation_cache: Optional[Union[str, Path]] = None,
 ) -> CSRGraph:
     """Build a CSR graph from already-normalized documents in MongoDB.
 
@@ -477,6 +496,8 @@ def build_graph_from_mongo(
             source,
             annotate_nodes=annotate_nodes,
             annotation_batch_size=annotation_batch_size,
+            annotation_attempts=annotation_attempts,
+            annotation_cache=annotation_cache,
         )
     finally:
         source.close()

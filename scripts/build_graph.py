@@ -13,7 +13,10 @@ from pathlib import Path
 
 from gandalf import build_graph_from_jsonl
 from gandalf.logging_config import configure_logging
-from gandalf.node_annotations import DEFAULT_ANNOTATION_BATCH_SIZE
+from gandalf.node_annotations import (
+    DEFAULT_ANNOTATION_ATTEMPTS,
+    DEFAULT_ANNOTATION_BATCH_SIZE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,27 @@ Examples:
     )
 
     parser.add_argument(
+        "--annotate-attempts",
+        type=int,
+        default=DEFAULT_ANNOTATION_ATTEMPTS,
+        help=(
+            "Tries per Annotator request, with backoff, before it is split to "
+            "isolate the CURIEs the service rejects (default: %(default)s)"
+        ),
+    )
+
+    parser.add_argument(
+        "--annotation-cache",
+        type=Path,
+        default=None,
+        help=(
+            "JSON-lines file of Annotator answers, read first and extended as "
+            "the run goes, so an aborted run or a rebuild fetches only what it "
+            "does not have yet"
+        ),
+    )
+
+    parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable debug logging"
     )
 
@@ -93,6 +117,8 @@ Examples:
             node_jsonl_path=str(args.nodes),
             annotate_nodes=args.annotate,
             annotation_batch_size=args.annotate_batch_size,
+            annotation_attempts=args.annotate_attempts,
+            annotation_cache=args.annotation_cache,
         )
 
         # Save graph
