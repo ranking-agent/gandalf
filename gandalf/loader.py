@@ -50,10 +50,11 @@ from gandalf.node_annotations import (
     annotate_node_properties,
 )
 from gandalf.sources import GraphSource, KGXJsonlSource
-from gandalf.trapi import prune_retrieval_sources
+from gandalf.trapi import prune_retrieval_sources, split_source_record_urls
 
 import logging
 import lmdb
+import orjson
 
 logger = logging.getLogger(__name__)
 
@@ -166,9 +167,24 @@ def _build_graph_from_source(
         max_dbs=0,
         readahead=False,
     )
+    # Per-edge source_record_urls: unique per edge, so kept out of the
+    # interned source lists (see gandalf.trapi.split_source_record_urls) in
+    # a sparse cold store of their own.
+    temp_urls_path = Path(temp_dir) / "temp_source_urls.lmdb"
+    temp_urls_path.mkdir(parents=True, exist_ok=True)
+    urls_env = lmdb.open(
+        str(temp_urls_path),
+        map_size=_INITIAL_WRITE_MAP_SIZE,
+        readonly=False,
+        max_dbs=0,
+        readahead=False,
+    )
+    edges_with_urls = 0
 
     txn = temp_env.begin(write=True)
+    urls_txn = urls_env.begin(write=True)
     pending: List[Tuple[bytes, bytes]] = []
+    urls_pending: List[Tuple[bytes, bytes]] = []
     try:
         for i, edge in enumerate(source.iter_edges()):
             # Fill numpy arrays
@@ -182,10 +198,11 @@ def _build_graph_from_source(
             # Hot path: intern qualifiers, sources and the knowledge_level /
             # agent_type pair TRAPI 2.0 requires on every Edge (already
             # normalized; a source that omits either yields "not_provided").
+            hot_sources, record_urls = split_source_record_urls(edge["sources"])
             prop_builder.add(
                 i,
                 {
-                    "sources": prune_retrieval_sources(edge["sources"]),
+                    "sources": prune_retrieval_sources(hot_sources),
                     "qualifiers": edge["qualifiers"],
                     "knowledge_level": edge.get("knowledge_level"),
                     "agent_type": edge.get("agent_type"),
@@ -197,11 +214,19 @@ def _build_graph_from_source(
             key = _encode_key(i)
             val = encode_attributes(edge["attributes"])
             txn = _put_with_resize(temp_env, txn, key, val, pending)
+            if record_urls:
+                urls_txn = _put_with_resize(
+                    urls_env, urls_txn, key, orjson.dumps(record_urls), urls_pending
+                )
+                edges_with_urls += 1
 
             if (i + 1) % 50_000 == 0:
                 txn.commit()
                 pending.clear()
                 txn = temp_env.begin(write=True)
+                urls_txn.commit()
+                urls_pending.clear()
+                urls_txn = urls_env.begin(write=True)
 
             if (i + 1) % 1_000_000 == 0:
                 logger.debug(
@@ -209,11 +234,14 @@ def _build_graph_from_source(
                 )
 
         txn.commit()
+        urls_txn.commit()
     except BaseException:
         txn.abort()
+        urls_txn.abort()
         raise
     finally:
         temp_env.close()
+        urls_env.close()
 
     logger.debug("  Arrays and temp LMDB built")
 
@@ -261,8 +289,23 @@ def _build_graph_from_source(
         num_edges=edge_count,
     )
 
+    source_urls_store = None
+    if edges_with_urls:
+        logger.info(
+            "  %s edges carry source_record_urls; storing them off the hot path",
+            f"{edges_with_urls:,}",
+        )
+        source_urls_store = LMDBPropertyStore.build_sorted(
+            db_path=Path(temp_dir) / "edge_source_urls.lmdb",
+            temp_db_path=temp_urls_path,
+            sort_permutation=sort_order,
+            num_edges=edge_count,
+            sparse=True,
+        )
+
     # Clean up temp LMDB
     shutil.rmtree(temp_lmdb_path)
+    shutil.rmtree(temp_urls_path)
     # NOTE: sort_order is kept alive — needed for rev_to_fwd mapping below.
 
     # Build CSR offset arrays using searchsorted
@@ -329,6 +372,7 @@ def _build_graph_from_source(
     graph.edge_ids = edge_ids_sorted
     graph._edge_ids_env = None
     graph.lmdb_store = lmdb_store
+    graph.source_urls_store = source_urls_store
 
     # Print statistics
     degrees = [graph.degree(i) for i in range(min(1000, graph.num_nodes))]

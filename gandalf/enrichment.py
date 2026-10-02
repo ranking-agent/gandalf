@@ -12,6 +12,8 @@ LMDB cold-path store.
 
 from __future__ import annotations
 
+import orjson
+
 from translator_tom.model_dicts import EdgeDict, NodeDict, QueryDict, ResponseDict
 
 from gandalf.graph import NOT_PROVIDED, CSRGraph
@@ -20,6 +22,7 @@ from gandalf.trapi import (
     drop_null_properties,
     ensure_node_category,
     prune_edge,
+    with_source_record_urls,
 )
 
 
@@ -139,9 +142,14 @@ def _enrich_edges(edges: dict[str, EdgeDict], graph: CSRGraph) -> None:
 
     # Batch LMDB read for cold-path properties (attributes)
     lmdb_results: dict[int, dict] = {}
-    if graph.lmdb_store is not None and edge_idx_map:
+    urls_results: dict[int, bytes] = {}
+    if edge_idx_map:
         unique_indices = list(set(edge_idx_map.values()))
-        lmdb_results = graph.lmdb_store.get_batch(unique_indices)
+        if graph.lmdb_store is not None:
+            lmdb_results = graph.lmdb_store.get_batch(unique_indices)
+        urls_store = getattr(graph, "source_urls_store", None)
+        if urls_store is not None:
+            urls_results = urls_store.get_json_batch(unique_indices)
 
     # Now enrich each edge
     for edge_uuid, edge in edges.items():
@@ -163,7 +171,11 @@ def _enrich_edges(edges: dict[str, EdgeDict], graph: CSRGraph) -> None:
 
         # Hot-path properties (in-memory dedup store)
         if "sources" not in edge:
-            edge["sources"] = graph.edge_properties.get_sources(fwd_idx)
+            sources = graph.edge_properties.get_sources(fwd_idx)
+            record_urls = urls_results.get(fwd_idx)
+            if record_urls is not None:
+                sources = with_source_record_urls(sources, orjson.loads(record_urls))
+            edge["sources"] = sources
 
         if "qualifiers" not in edge:
             edge["qualifiers"] = graph.edge_properties.get_qualifiers(fwd_idx)

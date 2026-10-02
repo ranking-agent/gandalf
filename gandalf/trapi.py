@@ -508,6 +508,76 @@ def ensure_node_category(node: NodeDict) -> NodeDict:
     return node
 
 
+def split_source_record_urls(
+    sources: list[RetrievalSourceDict],
+) -> tuple[list[RetrievalSourceDict], list[tuple[int, list[str]]]]:
+    """Separate an edge's ``source_record_urls`` from the rest of its sources.
+
+    Resource ids, roles and upstream lists repeat across millions of edges
+    and are interned once each; a record URL names one edge's row at its
+    source, so it is unique per edge and would make every interned source
+    list unique too (2.8 GB of private memory on the Translator graph).  The
+    loader keeps the URLs in the cold store and :func:`with_source_record_urls`
+    puts them back when a full response is built.
+
+    Returns:
+        The sources without their URLs (new dicts where a key was dropped,
+        the same dicts otherwise), and ``(position, urls)`` pairs for the
+        sources that had any.
+
+    Examples:
+        >>> hot, urls = split_source_record_urls([
+        ...     {"resource_id": "infores:a", "resource_role": "primary_knowledge_source",
+        ...      "source_record_urls": ["https://a/1"]},
+        ...     {"resource_id": "infores:b", "resource_role": "aggregator_knowledge_source"},
+        ... ])
+        >>> hot
+        [{'resource_id': 'infores:a', 'resource_role': 'primary_knowledge_source'}, {'resource_id': 'infores:b', 'resource_role': 'aggregator_knowledge_source'}]
+        >>> urls
+        [(0, ['https://a/1'])]
+        >>> split_source_record_urls(hot)[1]
+        []
+    """
+    hot: list[RetrievalSourceDict] = []
+    urls: list[tuple[int, list[str]]] = []
+    for position, source in enumerate(sources):
+        record_urls = source.get("source_record_urls")
+        if record_urls:
+            urls.append((position, list(record_urls)))
+            stripped = cast(
+                RetrievalSourceDict,
+                {k: v for k, v in source.items() if k != "source_record_urls"},
+            )
+            hot.append(stripped)
+        else:
+            hot.append(source)
+    return hot, urls
+
+
+def with_source_record_urls(
+    sources: list[RetrievalSourceDict], urls: list
+) -> list[RetrievalSourceDict]:
+    """The interned sources with an edge's record URLs put back.
+
+    A new list: the interned dicts are shared by every edge with the same
+    sources and must never be changed in place.  The key goes last, where
+    the loader had it, so a response is byte-identical to one served from a
+    graph that kept the URLs in the pool.
+
+    Examples:
+        >>> with_source_record_urls(
+        ...     [{"resource_id": "infores:a", "resource_role": "primary_knowledge_source"}],
+        ...     [[0, ["https://a/1"]]])
+        [{'resource_id': 'infores:a', 'resource_role': 'primary_knowledge_source', 'source_record_urls': ['https://a/1']}]
+    """
+    merged = list(sources)
+    for position, record_urls in urls:
+        source = dict(merged[position])
+        source["source_record_urls"] = record_urls
+        merged[position] = cast(RetrievalSourceDict, source)
+    return merged
+
+
 def prune_retrieval_sources(
     sources: list[RetrievalSourceDict],
 ) -> list[RetrievalSourceDict]:

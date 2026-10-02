@@ -240,7 +240,12 @@ class LMDBPropertyStore:
 
     @staticmethod
     def build_sorted(
-        db_path, temp_db_path, sort_permutation, num_edges, commit_every=50_000
+        db_path,
+        temp_db_path,
+        sort_permutation,
+        num_edges,
+        commit_every=50_000,
+        sparse=False,
     ):
         """Rewrite a temp LMDB in CSR-sorted order to produce the final store.
 
@@ -256,6 +261,8 @@ class LMDBPropertyStore:
             sort_permutation: numpy array where sort_permutation[csr_pos] = original_line_idx.
             num_edges: Total number of edges.
             commit_every: Commit transaction every N edges.
+            sparse: The temp store holds only some edges; the others are
+                left out of the final store rather than being an error.
 
         Returns:
             LMDBPropertyStore opened in read-only mode.
@@ -293,6 +300,8 @@ class LMDBPropertyStore:
                 original_idx = int(sort_permutation[csr_pos])
                 temp_key = _encode_key(original_idx)
                 val = temp_txn.get(temp_key)
+                if val is None and sparse:
+                    continue
 
                 final_key = _encode_key(csr_pos)
                 final_txn = _put_with_resize(

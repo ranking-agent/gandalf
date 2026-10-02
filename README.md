@@ -96,6 +96,14 @@ graph.save_mmap("data/processed/gandalf_mmap")
 > timeout, the response envelope, and the remaining null / empty-container
 > rules.
 
+> **Rebuild to shrink memory if your edges carry `source_record_urls`.**
+> A record URL is unique to its edge, and a graph built before this release
+> kept it inside the interned source lists, making one list per edge: 2.8 GB
+> of private memory in every process on the Translator graph.  The loader
+> now stores the URLs per edge in `edge_source_urls.lmdb` and full
+> responses are unchanged.  An old graph still loads and serves correctly;
+> the load warns when its source pool is oversized.
+
 ### Annotating nodes at build time
 
 Passing `annotate_nodes=True` resolves every node through the Translator
@@ -523,7 +531,9 @@ behind, 200 MB after the trim, in 10 ms), and the API does the same before
 each query.  Size a worker for one query's peak, not for the graph.
 
 A worker that is large *before its first query* is loading something it
-should not.  Every load logs where its private memory went, stage by
+should not (the one case seen so far: a graph built before
+`source_record_urls` were stored off the hot path, 2.8 GB of interned
+source lists; a rebuild fixes it).  Every load logs where its private memory went, stage by
 stage (`Private memory taken by the load: +N MB (...)`), and the status
 page shows each worker's memory at start; the usual culprits are a graph
 in a legacy format (`edge_ids.pkl` instead of `edge_ids.lmdb`, node data

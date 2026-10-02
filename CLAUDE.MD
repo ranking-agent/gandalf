@@ -181,6 +181,17 @@ query with `_SINGLE_PATH_FAST` off and on and compares the serialized bytes.
 `scripts/benchmarks/fast_path_ab.py` does the same comparison, with timings,
 on any graph and query set.
 
+**Interned source lists hold nothing per-edge.**  `EdgePropertyStore`
+keeps one Python list per distinct `sources` value and relies on there
+being a few thousand of them.  `source_record_urls` are unique per edge,
+so the loader splits them out (`gandalf.trapi.split_source_record_urls`)
+into a sparse cold store, `edge_source_urls.lmdb` (`graph.source_urls_store`),
+and `_full_edge` / `enrich_knowledge_graph` put them back
+(`with_source_record_urls`) on a *copy* of the interned list, key last, so
+output is byte-identical to a graph that kept them in the pool.  Anything
+else per-edge that lands on a source must take the same route, never the
+pool; `load_mmap` warns when the pool exceeds `_POOL_SIZE_WARNING`.
+
 **Bindings are shared objects.**  A single-ID node binding, or a fast-path
 edge binding, is one `{"ids": [x]}` dict per ID, reused by every result that
 binds x: on a 2M-result query that is millions fewer objects to build,

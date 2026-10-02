@@ -35,6 +35,7 @@ from gandalf.trapi import (
     finalize_response,
     prune_edge,
     timeout_response,
+    with_source_record_urls,
 )
 from gandalf.search.edge_constraints import EdgeConstraints
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
@@ -624,6 +625,7 @@ def _single_path_json(
     idx_to_predicate,
     edge_id_map: dict,
     edge_detail_map: dict,
+    edge_urls_map: dict,
     edge_templates: dict,
     minimal_edges: dict,
     lightweight: bool,
@@ -718,6 +720,7 @@ def _single_path_json(
                         subj_id,
                         obj_id,
                         edge_detail_map.get(fwd_eidx, {}),
+                        edge_urls_map.get(fwd_eidx),
                     )
                 cache[fwd_eidx] = edge
             edge_values.append(edge)
@@ -897,6 +900,7 @@ def _full_edge(
     subj_id: str,
     obj_id: str,
     detail: Union[dict, bytes],
+    record_urls: Optional[bytes] = None,
 ) -> InFlightEdge:
     """A real edge's knowledge-graph Edge for a full response, pruned for 2.0.
 
@@ -906,6 +910,8 @@ def _full_edge(
         detail: The edge's prefetched cold-path detail: ``{"attributes":
             [...]}``, its attributes' stored JSON (``attributes_as_json``),
             or ``{}`` if it has none.
+        record_urls: The edge's prefetched ``source_record_urls`` as stored
+            (JSON ``[[position, urls], ...]``), or None if it has none.
     """
     edge_props: InFlightEdge
     if type(detail) is bytes:
@@ -917,6 +923,10 @@ def _full_edge(
         edge_props["attributes"] = detail
     else:
         edge_props = graph.get_edge_properties_by_index(fwd_eidx, lmdb_detail=detail)
+    if record_urls is not None:
+        edge_props["sources"] = with_source_record_urls(
+            edge_props["sources"], orjson.loads(record_urls)
+        )
     edge_props["predicate"] = predicate
     edge_props["subject"] = subj_id
     edge_props["object"] = obj_id
@@ -1157,6 +1167,7 @@ def _build_response(
     # the detail up in-memory inside the loop.  Edge attributes are only needed
     # when not in lightweight mode; edge IDs are needed in both.
     edge_detail_map: dict = {}
+    edge_urls_map: dict = {}
     edge_id_map: dict = {}
     if pa_num_edges > 0 and pa_fwd_eidx.size:
         unique_eidx = [int(e) for e in np.unique(pa_fwd_eidx) if e >= 0]
@@ -1166,6 +1177,9 @@ def _build_response(
                     edge_detail_map = graph.lmdb_store.get_json_batch(unique_eidx)
                 else:
                     edge_detail_map = graph.lmdb_store.get_batch(unique_eidx)
+            urls_store = getattr(graph, "source_urls_store", None)
+            if not lightweight and urls_store is not None:
+                edge_urls_map = urls_store.get_json_batch(unique_eidx)
             edge_id_map = graph.get_edge_ids_batch(unique_eidx)
 
     kg_nodes = response["message"]["knowledge_graph"]["nodes"]
@@ -1262,6 +1276,7 @@ def _build_response(
             idx_to_predicate=idx_to_predicate,
             edge_id_map=edge_id_map,
             edge_detail_map=edge_detail_map,
+            edge_urls_map=edge_urls_map,
             edge_templates=edge_templates,
             minimal_edges=minimal_edges,
             lightweight=lightweight,
@@ -1420,6 +1435,7 @@ def _build_response(
                             subj_id,
                             obj_id,
                             edge_detail_map.get(fwd_eidx, {}),
+                            edge_urls_map.get(fwd_eidx),
                         )
                         edge_templates[fwd_eidx] = edge
                 edge_kg_id = edge_id_map.get(fwd_eidx)
@@ -1498,6 +1514,7 @@ def _build_response(
                                 subj_id,
                                 obj_id,
                                 edge_detail_map.get(fwd_eidx, {}),
+                                edge_urls_map.get(fwd_eidx),
                             )
                             edge_templates[fwd_eidx] = template
                         edge_props = template.copy()

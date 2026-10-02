@@ -44,6 +44,10 @@ def _load_npy(path: Path, mmap_mode: Literal["r+", "r", "w+", "c"] = "r") -> np.
 # Edge, so a source that omits them still has to serve something valid.
 NOT_PROVIDED = "not_provided"
 
+# Distinct interned source lists above which a load warns: the pools are
+# meant to hold a few thousand entries, not one per edge.
+_POOL_SIZE_WARNING = 200_000
+
 # Index width for the (knowledge_level, agent_type) pool. Both are small
 # Biolink enums, so the pool holds a few dozen pairs at most and int16 keeps
 # the per-edge array a quarter the size of the int32 arrays used for the
@@ -492,6 +496,9 @@ class CSRGraph:
         self.sri_testing_data = None
         self.graph_metadata = None
         self.load_memory = MemoryLedger()
+        # Per-edge source_record_urls, kept out of the interned source lists;
+        # None for a graph that has none (or kept them in the pool).
+        self.source_urls_store = None
 
         # Build both forward and reverse CSR structures
         logger.debug("Building forward CSR...")
@@ -1501,10 +1508,15 @@ class CSRGraph:
             with open(directory / "sri_testing_data.json", "w", encoding="utf-8") as f:
                 json.dump(self.sri_testing_data, f, separators=(",", ":"))
 
-        # Copy LMDB store if present
-        if self.lmdb_store is not None:
-            lmdb_src = self.lmdb_store._path
-            lmdb_dst = directory / "edge_properties.lmdb"
+        # Copy LMDB stores if present
+        for store, name in (
+            (self.lmdb_store, "edge_properties.lmdb"),
+            (getattr(self, "source_urls_store", None), "edge_source_urls.lmdb"),
+        ):
+            if store is None:
+                continue
+            lmdb_src = store._path
+            lmdb_dst = directory / name
             if lmdb_src.resolve() != lmdb_dst.resolve():
                 if lmdb_dst.exists():
                     shutil.rmtree(lmdb_dst)
@@ -1687,6 +1699,13 @@ class CSRGraph:
         else:
             graph.lmdb_store = None
 
+        source_urls_path = directory / "edge_source_urls.lmdb"
+        graph.source_urls_store = (
+            LMDBPropertyStore(source_urls_path, readonly=True)
+            if source_urls_path.exists()
+            else None
+        )
+
         # Load edge IDs — prefer LMDB, fall back to pickle
         edge_ids_lmdb_path = directory / "edge_ids.lmdb"
         edge_ids_pkl_path = directory / "edge_ids.pkl"
@@ -1721,14 +1740,24 @@ class CSRGraph:
 
         if isinstance(graph.edge_properties, EdgePropertyStore):
             stats = graph.edge_properties.dedup_stats()
-            logger.debug(
+            logger.info(
                 "  Edge property dedup: %s edges -> "
                 "%s unique source configs, "
                 "%s unique qualifier combos",
-                stats["total_edges"],
-                stats["unique_sources"],
-                stats["unique_qualifiers"],
+                f"{stats['total_edges']:,}",
+                f"{stats['unique_sources']:,}",
+                f"{stats['unique_qualifiers']:,}",
             )
+            if stats["unique_sources"] > _POOL_SIZE_WARNING:
+                logger.warning(
+                    "%s interns %s distinct source lists, held as Python "
+                    "objects in every process. A graph built before "
+                    "source_record_urls were stored off the hot path keeps "
+                    "one list per edge that has them; rebuild the graph with "
+                    "gandalf-build to shrink it.",
+                    directory,
+                    f"{stats['unique_sources']:,}",
+                )
 
         if graph.lmdb_store is not None:
             logger.debug("  LMDB detail store: %s", lmdb_path)
