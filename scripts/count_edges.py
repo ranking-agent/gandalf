@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Throwaway: count (and optionally list) edges between two node categories.
+"""Throwaway: count (and optionally list) edges by infores, category and predicate.
+
+Every filter is optional and they combine with AND.  ``--infores`` matches an
+edge whose ``sources`` list carries that resource id (any role, unless
+``--role`` narrows it); a bare name gets the ``infores:`` prefix.
 
 A node matches a category if any entry of its ``categories`` list matches, so a
 node tagged ``[biolink:Gene, biolink:GeneOrGeneProduct]`` counts as a Gene.
@@ -8,6 +12,16 @@ descendants (``biolink:PhenotypicFeature`` also matches
 ``biolink:ClinicalFinding``); pass ``--exact`` to turn that off.
 
 Examples:
+    # Every edge from infores:gene2phenotype, by predicate and category pair
+    python scripts/count_edges.py --graph graph_mmap/ --infores gene2phenotype
+
+    # ... only where it is the primary knowledge source
+    python scripts/count_edges.py --graph graph_mmap/ \\
+        --infores gene2phenotype --role primary_knowledge_source
+
+    # Every infores in the graph with its edge count
+    python scripts/count_edges.py --graph graph_mmap/ --list-infores
+
     # All gene -> phenotype edges, broken down by predicate
     python scripts/count_edges.py --graph graph_mmap/ \\
         --subject biolink:Gene --object biolink:PhenotypicFeature
@@ -57,6 +71,36 @@ def expand(names, exact):
         return names
 
 
+def infores_name(name: str) -> str:
+    return name if name.startswith("infores:") else f"infores:{name}"
+
+
+def source_pool_mask(graph, infores, role):
+    """Boolean array over the interned source lists: does each list match."""
+    pool = graph.edge_properties._sources_pool
+    mask = np.zeros(len(pool), dtype=np.bool_)
+    for i, sources in enumerate(pool):
+        mask[i] = any(
+            s.get("resource_id") in infores
+            and (role is None or s.get("resource_role") == role)
+            for s in sources
+        )
+    return mask
+
+
+def infores_edge_counts(graph):
+    """Counter of (resource_id, resource_role) -> number of edges carrying it."""
+    pool = graph.edge_properties._sources_pool
+    per_list = np.bincount(
+        np.asarray(graph.edge_properties._sources_idx), minlength=len(pool)
+    )
+    counts = Counter()
+    for sources, n in zip(pool, per_list.tolist()):
+        for s in {(s.get("resource_id"), s.get("resource_role")) for s in sources}:
+            counts[s] += n
+    return counts
+
+
 def category_masks(graph, subject_cats, object_cats):
     """Boolean arrays over node indices: does the node match each category set."""
     subj = np.zeros(graph.num_nodes, dtype=np.bool_)
@@ -78,8 +122,19 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--graph", required=True, help="mmap graph directory")
-    p.add_argument("--subject", required=True, nargs="+", help="subject category(ies)")
-    p.add_argument("--object", required=True, nargs="+", help="object category(ies)")
+    p.add_argument("--infores", nargs="+", help="infores id(s), e.g. gene2phenotype")
+    p.add_argument(
+        "--role",
+        help="only match --infores in this resource_role "
+        "(e.g. primary_knowledge_source)",
+    )
+    p.add_argument(
+        "--list-infores",
+        action="store_true",
+        help="print every infores/role in the graph with its edge count, then exit",
+    )
+    p.add_argument("--subject", nargs="+", help="subject category(ies)")
+    p.add_argument("--object", nargs="+", help="object category(ies)")
     p.add_argument("--predicate", nargs="+", help="restrict to these predicate(s)")
     p.add_argument(
         "--exact",
@@ -99,28 +154,54 @@ def main():
 
     logging.basicConfig(level=logging.WARNING)
 
-    subject_cats = expand(args.subject, args.exact)
-    object_cats = expand(args.object, args.exact)
-    print(f"Subject categories: {sorted(subject_cats)}")
-    print(f"Object categories:  {sorted(object_cats)}")
-
     graph = CSRGraph.load_mmap(args.graph)
     print(f"Graph: {graph.num_nodes:,} nodes, {len(graph.fwd_targets):,} edges")
 
-    subj_mask, obj_mask = category_masks(graph, subject_cats, object_cats)
-    print(
-        f"Matching nodes: {int(subj_mask.sum()):,} subject, "
-        f"{int(obj_mask.sum()):,} object"
-    )
+    if args.list_infores:
+        counts = infores_edge_counts(graph)
+        width = max(len(str(r)) for r, _ in counts)
+        for (rid, role), n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            print(f"  {rid:<{width}}  {role:<30}  {n:>12,}")
+        return
 
     offsets = np.asarray(graph.fwd_offsets)
     targets = np.asarray(graph.fwd_targets)
     preds = np.asarray(graph.fwd_predicates)
     sources = np.repeat(np.arange(graph.num_nodes, dtype=np.int64), np.diff(offsets))
 
-    hit = subj_mask[sources] & obj_mask[targets]
-    if args.either_direction:
-        hit |= obj_mask[sources] & subj_mask[targets]
+    hit = np.ones(len(targets), dtype=np.bool_)
+    if args.infores:
+        infores = {infores_name(n) for n in args.infores}
+        print(f"Infores:            {sorted(infores)} (role: {args.role or 'any'})")
+        pool_mask = source_pool_mask(graph, infores, args.role)
+        hit &= pool_mask[np.asarray(graph.edge_properties._sources_idx)]
+        if not pool_mask.any():
+            # Probably a typo or a different id; suggest close matches.
+            needles = [n.split(":", 1)[-1].lower() for n in infores]
+            similar = sorted(
+                {
+                    rid
+                    for rid, _ in infores_edge_counts(graph)
+                    if rid and any(x in rid.lower() for x in needles)
+                }
+            )
+            print(
+                f"  no edge carries it{' in that role' if args.role else ''}; similar infores in graph: {similar or 'none'}"
+            )
+    if args.subject or args.object:
+        subject_cats = expand(args.subject or ["NamedThing"], args.exact)
+        object_cats = expand(args.object or ["NamedThing"], args.exact)
+        print(f"Subject categories: {sorted(subject_cats)}")
+        print(f"Object categories:  {sorted(object_cats)}")
+        subj_mask, obj_mask = category_masks(graph, subject_cats, object_cats)
+        print(
+            f"Matching nodes: {int(subj_mask.sum()):,} subject, "
+            f"{int(obj_mask.sum()):,} object"
+        )
+        cat_hit = subj_mask[sources] & obj_mask[targets]
+        if args.either_direction:
+            cat_hit |= obj_mask[sources] & subj_mask[targets]
+        hit &= cat_hit
     if args.predicate:
         wanted = expand(args.predicate, args.exact)
         present = wanted & set(graph.predicate_to_idx)
@@ -136,6 +217,23 @@ def main():
     width = max(len(graph.id_to_predicate[p]) for p in by_pred)
     for pred_id, n in by_pred.most_common():
         print(f"  {graph.id_to_predicate[pred_id]:<{width}}  {n:>12,}")
+
+    # Break down by (subject category, object category) using each node's
+    # first (most specific) category, read only for the nodes involved.
+    print()
+    first_cat = {}
+    involved = np.unique(np.concatenate([sources[positions], targets[positions]]))
+    for start in range(0, len(involved), CHUNK):
+        chunk = involved[start : start + CHUNK].tolist()
+        for idx, props in graph.get_all_node_properties_batch(chunk).items():
+            first_cat[idx] = (props.get("categories") or ["biolink:NamedThing"])[0]
+    by_cats = Counter(
+        (first_cat.get(int(a), "?"), first_cat.get(int(b), "?"))
+        for a, b in zip(sources[positions], targets[positions])
+    )
+    width = max(len(a) + len(b) + 4 for a, b in by_cats)
+    for (a, b), n in by_cats.most_common():
+        print(f"  {a + ' -> ' + b:<{width}}  {n:>12,}")
 
     def rows(pos_list):
         node_ids = graph.get_node_ids_batch(
