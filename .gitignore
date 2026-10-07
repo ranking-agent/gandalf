@@ -50,6 +50,7 @@ ENV/
 *.jsonl
 *.pkl
 *.tar.gz
+*.bin
 
 # OS
 .DS_Store

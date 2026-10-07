@@ -16,17 +16,17 @@ services:
       # Queue mode (`docker compose --profile queue up`): queries run in the
       # worker service below instead of in this process.  Leave empty to
       # run them in-process.
-      GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-}
+      GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://gandalf_queue:6379/0}
     volumes:
       # Host directory holding the built graph; override with GANDALF_GRAPH_DIR.
-      - ${GANDALF_GRAPH_DIR:-./graph}:/data/graph:ro
+      - ${GANDALF_GRAPH_DIR:-./translatorkg/gandalf_mmap}:/data/graph:ro
     networks:
       - shepherd
 
   # --- Queue mode -----------------------------------------------------------
   # docker compose --profile queue up --build
   # with GANDALF_QUEUE_URL=redis://redis:6379/0 in the environment or .env.
-  redis:
+  gandalf_queue:
     image: redis:7-alpine
     profiles: [queue]
     command: ["redis-server", "--save", "", "--appendonly", "no"]
@@ -38,13 +38,13 @@ services:
     profiles: [queue]
     command: ["python", "-m", "gandalf.worker"]
     restart: unless-stopped
-    depends_on: [redis]
+    depends_on: [gandalf_queue]
     environment:
       GANDALF_GRAPH_PATH: /data/graph
-      GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://redis:6379/0}
+      GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://gandalf_queue:6379/0}
       GANDALF_OTEL_ENABLED: "false"
     volumes:
-      - ${GANDALF_GRAPH_DIR:-./graph}:/data/graph:ro
+      - ${GANDALF_GRAPH_DIR:-./translatorkg/gandalf_mmap}:/data/graph:ro
     networks:
       - shepherd
 
