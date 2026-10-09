@@ -56,6 +56,14 @@ def test_health_is_always_ok(monkeypatch):
     assert resp.json() == {"status": "ok"}
 
 
+@pytest.mark.parametrize("path", ["/", "/health"])
+def test_bare_head_is_ok(path, monkeypatch):
+    monkeypatch.setattr(gandalf_server, "GRAPH", None)
+    resp = TestClient(gandalf_server.APP).head(path, follow_redirects=False)
+    assert resp.status_code == 200
+    assert resp.content == b""
+
+
 def test_ready_needs_the_graph(monkeypatch):
     monkeypatch.setattr(gandalf_server, "GRAPH", None)
     resp = TestClient(gandalf_server.APP).get("/ready")

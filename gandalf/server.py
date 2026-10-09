@@ -490,6 +490,13 @@ async def root():
     return RedirectResponse(url="/docs")
 
 
+@APP.head("/", include_in_schema=False)
+@APP.head("/health", include_in_schema=False)
+async def head_alive() -> Response:
+    """Liveness for checkers that send a bare ``HEAD``: 200, no body."""
+    return Response(status_code=200)
+
+
 # ---------------------------------------------------------------------------
 # Documentation
 # ---------------------------------------------------------------------------
