@@ -661,6 +661,7 @@ def test_status_shows_a_running_job_and_a_dead_letter(
 
 from gandalf.notify import (  # noqa: E402
     BACKLOG_FLAG,
+    BACKLOG_SINCE,
     KNOWN_WORKERS,
     LOG_STREAM,
     Event,
@@ -741,7 +742,8 @@ def monitor(client, queue, registry, notifier):
         registry,
         n,
         interval_seconds=0.2,
-        lag_threshold=2,
+        lag_per_worker=2,
+        backlog_seconds=0.3,
         stuck_seconds=0.3,
     )
 
@@ -782,9 +784,17 @@ def test_monitor_alerts_on_backlog_once_and_on_clearing(monitor, queue, registry
     registry.report("w1", state="idle", jobs_done=0)
     for _ in range(3):
         queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert monitor.tick() == []  # over, but not for long enough yet
+    time.sleep(0.35)
+    registry.report("w1", state="idle", jobs_done=0)  # outlive the 0.3s TTL
     events = monitor.tick()
     assert [e.kind for e in events] == ["queue_backlog"]
-    assert events[0].fields == {"waiting": 3, "running": 0, "workers": 1}
+    assert events[0].fields == {
+        "waiting": 3,
+        "running": 0,
+        "workers": 1,
+        "threshold": 2,
+    }
     assert monitor.tick() == []  # still over, already said
     for _ in range(3):
         d = queue.receive("w1", block_seconds=0.1)
@@ -792,6 +802,49 @@ def test_monitor_alerts_on_backlog_once_and_on_clearing(monitor, queue, registry
     events = monitor.tick()
     assert [e.kind for e in events] == ["queue_backlog_cleared"]
     assert monitor.tick() == []
+
+
+def test_monitor_backlog_must_stay_over_the_threshold(monitor, queue, registry, client):
+    registry.report("w1", state="idle", jobs_done=0)
+    for _ in range(3):
+        queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert monitor.tick() == []
+    time.sleep(0.2)
+    # dips under for one look: the spell starts over
+    for _ in range(2):
+        queue.ack(queue.receive("w1", block_seconds=0.1).entry_id)
+    registry.report("w1", state="idle", jobs_done=2)
+    assert monitor.tick() == []
+    assert not client.exists(BACKLOG_SINCE)
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert monitor.tick() == []
+    time.sleep(0.2)
+    registry.report("w1", state="idle", jobs_done=2)
+    assert monitor.tick() == []  # 0.2s into the new spell, not 0.4s since the first
+    time.sleep(0.15)
+    registry.report("w1", state="idle", jobs_done=2)
+    assert [e.kind for e in monitor.tick()] == ["queue_backlog"]
+
+
+def test_monitor_backlog_threshold_scales_with_workers(monitor, queue, registry):
+    registry.report("w1", state="idle", jobs_done=0)
+    registry.report("w2", state="idle", jobs_done=0)
+    for _ in range(3):
+        queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert monitor.tick() == []
+    time.sleep(0.35)
+    registry.report("w1", state="idle", jobs_done=0)  # keep both alive
+    registry.report("w2", state="idle", jobs_done=0)
+    assert monitor.tick() == []  # 3 waiting is under 2 x 2 workers
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert monitor.tick() == []
+    time.sleep(0.2)
+    registry.report("w1", state="idle", jobs_done=0)
+    registry.report("w2", state="idle", jobs_done=0)
+    time.sleep(0.15)
+    events = monitor.tick()
+    assert [e.kind for e in events] == ["queue_backlog"]
+    assert events[0].fields["threshold"] == 4
 
 
 def test_monitor_alerts_on_a_stuck_job(monitor, queue):
@@ -809,8 +862,24 @@ def test_monitor_alerts_on_a_stuck_job(monitor, queue):
 
 def test_only_one_monitor_is_active(client, queue, registry, notifier):
     n, _ = notifier
-    first = Monitor(client, queue, registry, n, interval_seconds=0.2, lag_threshold=1)
-    second = Monitor(client, queue, registry, n, interval_seconds=0.2, lag_threshold=1)
+    first = Monitor(
+        client,
+        queue,
+        registry,
+        n,
+        interval_seconds=0.2,
+        lag_per_worker=1,
+        backlog_seconds=0,
+    )
+    second = Monitor(
+        client,
+        queue,
+        registry,
+        n,
+        interval_seconds=0.2,
+        lag_per_worker=1,
+        backlog_seconds=0,
+    )
     queue.enqueue(Job.new(dict(ONE_HOP)))
     assert first.is_leader() is True
     assert second.is_leader() is False

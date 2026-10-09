@@ -440,7 +440,8 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_SLACK_STATUS_URL` | `<GANDALF_SERVER_URL>/status` | Linked from every Slack message |
 | `GANDALF_SLACK_THROTTLE_SECONDS` | `300` | Minimum gap between Slack messages of one noisy kind (`job_failed`, `job_retried`) |
 | `GANDALF_MONITOR_INTERVAL_SECONDS` | `15` | How often the (single, elected) monitor looks |
-| `GANDALF_ALERT_QUEUE_LAG_THRESHOLD` | `5` | Jobs waiting for a worker at which `queue_backlog` fires |
+| `GANDALF_ALERT_QUEUE_LAG_PER_WORKER` | `50` | Jobs waiting per live worker (at least one) at which the queue counts as backed up |
+| `GANDALF_ALERT_QUEUE_BACKLOG_SECONDS` | `60` | How long the backlog must stay over that threshold before `queue_backlog` fires |
 | `GANDALF_ALERT_STUCK_SECONDS` | `1800` | A job delivered and unfinished this long fires `queue_stuck` |
 | `GANDALF_ALERT_LOG_MAXLEN` | `500` | Alerts the status page keeps |
 | `GANDALF_WORKER_NAME` | `<hostname>-<pid>` | The worker's consumer name |
@@ -637,7 +638,7 @@ link back to the status page:
 | `job_retried` | warning | A job abandoned by a dead worker is being run again |
 | `job_dead_lettered` | critical | A job ended two workers and was answered with an error instead of a third try |
 | `job_failed` | warning | A query raised; the client got an Error response |
-| `queue_backlog` / `queue_backlog_cleared` | warning / info | Jobs waiting for a worker crossed `GANDALF_ALERT_QUEUE_LAG_THRESHOLD`, then dropped to zero |
+| `queue_backlog` / `queue_backlog_cleared` | warning / info | Jobs waiting for a worker stayed at or over `GANDALF_ALERT_QUEUE_LAG_PER_WORKER` × the live workers for `GANDALF_ALERT_QUEUE_BACKLOG_SECONDS`, then dropped to zero |
 | `queue_stuck` | warning | A job has been with one worker longer than `GANDALF_ALERT_STUCK_SECONDS` |
 
 A worker never dies of Redis trouble: a timeout, an outage or a restart

@@ -289,7 +289,8 @@ def open_queue() -> None:
         WORKERS,
         NOTIFIER,
         interval_seconds=settings.monitor_interval_seconds,
-        lag_threshold=settings.alert_queue_lag_threshold,
+        lag_per_worker=settings.alert_queue_lag_per_worker,
+        backlog_seconds=settings.alert_queue_backlog_seconds,
         stuck_seconds=settings.alert_stuck_seconds,
     )
     MONITOR.start()
