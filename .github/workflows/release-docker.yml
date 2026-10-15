@@ -29,6 +29,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          # TRAPI 1.6 branch: a release from here must not move `latest`,
+          # which belongs to the TRAPI 2.0 line (devel).
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

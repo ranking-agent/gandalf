@@ -328,6 +328,18 @@ it checks 1.6.  Tests read 1.6 shapes through `tests/trapi_1_6_helpers.py`
 (`binding_ids`, `knowledge_level`, `agent_type`): `r["node_bindings"]["n0"]
 ["ids"][0]` on `devel` is `r["node_bindings"]["n0"][0]["id"]` here.
 
+### Versioning and releases
+
+The package major version names the TRAPI line: **1.x is this branch (TRAPI
+1.6)**, 2.x is `devel` (TRAPI 2.0).  Both publish `gandalf-csr` to PyPI and
+images to GHCR, so versions must never collide: bump 1.x here (minor for
+merged features, patch for fixes) and keep this branch's version when a
+`devel` merge conflicts on `version` in `pyproject.toml` / `setup.py`.  The
+version is also in `gandalf/openapi-config.yaml`.  Release from a tag on this
+branch (e.g. `v1.1.0`, target `trapi-1.6`); `release-docker.yml` here sets
+`latest=false` so a 1.x release never moves the `latest` image tag, which
+stays with the 2.x line.
+
 ### Updating from `devel`
 
 ```bash
@@ -354,6 +366,7 @@ Where conflicts and breakage show up, and what to do:
 - **New request fields on `devel`** that 1.6 spells differently: translate in
   `trapi_1_6` and, if a 2.0 spelling would otherwise be silently ignored,
   reject it in `reject_retired_trapi_fields`.
+- **Versions**: keep this branch's 1.x version (see above).
 - **`pyproject.toml` / `requirements.txt`**: keep `translator_tom>=1.7.0,<2`
   when `devel` bumps TOM; new TOM 2.x imports may not exist in 1.x.
 - **Graph format changes** come across untouched -- the rebuild notes on
