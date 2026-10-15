@@ -37,27 +37,39 @@ def generate_query(curie: str) -> dict:
                         "subject": "i",
                         "object": "SN",
                         "predicates": ["biolink:affects"],
-                        "constraints": {
-                            "qualifiers": [
-                                {
-                                    "biolink:object_aspect_qualifier": "abundance",
-                                    "biolink:object_direction_qualifier": "increased",
-                                }
-                            ]
-                        },
+                        "qualifier_constraints": [
+                            {
+                                "qualifier_set": [
+                                    {
+                                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                        "qualifier_value": "abundance",
+                                    },
+                                    {
+                                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                                        "qualifier_value": "increased",
+                                    },
+                                ]
+                            }
+                        ],
                     },
                     "edge_2": {
                         "subject": "i",
                         "object": "e",
                         "predicates": ["biolink:affects"],
-                        "constraints": {
-                            "qualifiers": [
-                                {
-                                    "biolink:object_aspect_qualifier": "activity_or_abundance",
-                                    "biolink:object_direction_qualifier": "increased",
-                                }
-                            ]
-                        },
+                        "qualifier_constraints": [
+                            {
+                                "qualifier_set": [
+                                    {
+                                        "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                        "qualifier_value": "activity_or_abundance",
+                                    },
+                                    {
+                                        "qualifier_type_id": "biolink:object_direction_qualifier",
+                                        "qualifier_value": "increased",
+                                    },
+                                ]
+                            }
+                        ],
                     },
                 },
             }

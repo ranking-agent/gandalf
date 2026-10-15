@@ -7,10 +7,10 @@ spec so gandalf does not have to re-derive it.  What lives here is only the
 two things TOM cannot know about:
 
 * ``QueryParameters`` -- gandalf's own query-time settings (``subclass``,
-  ``dehydrated``, ...).  TRAPI 2.0 gives the ``parameters`` object
-  ``additionalProperties: true`` precisely so a server can carry its own, so
-  this subclasses TOM's ``QueryParameters`` rather than replacing it, and the
-  standard ``timeout`` / ``log_level`` / ``bypass_cache`` come from there.
+  ``dehydrated``, ``timeout``, ...).  TRAPI 1.6 has no ``parameters`` object;
+  it is a gandalf extension, carried under the additional properties a 1.6
+  ``Query`` admits.  ``log_level`` and ``bypass_cache`` are the Query's own
+  top-level properties in 1.6.
 * The Plater-compatible endpoints (``/node_degree``, ``/edges``, ``/metadata``,
   ...), which are gandalf extensions and not TRAPI at all.
 
@@ -32,8 +32,7 @@ no runtime cost instead -- see ``gandalf.trapi``.
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-from translator_tom import AsyncQuery, Query, Response
-from translator_tom import QueryParameters as TRAPIQueryParameters
+from translator_tom import AsyncQuery, LogLevel, Query, Response
 
 __all__ = [
     "QueryParameters",
@@ -109,17 +108,16 @@ _QUERY_EXAMPLE_QUALIFIERS: dict = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:affects"],
-                    "constraints": {
-                        "qualifiers": [{"biolink:object_aspect_qualifier": "activity"}],
-                        "knowledge_level": {
-                            "behavior": "ALLOW",
-                            "values": ["knowledge_assertion"],
-                        },
-                        "agent_type": {
-                            "behavior": "DENY",
-                            "values": ["text_mining_agent"],
-                        },
-                    },
+                    "qualifier_constraints": [
+                        {
+                            "qualifier_set": [
+                                {
+                                    "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                    "qualifier_value": "activity",
+                                }
+                            ]
+                        }
+                    ],
                 }
             },
         }
@@ -138,9 +136,7 @@ _QUERY_EXAMPLE_PATHFINDER: dict = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:related_to"],
-                    "constraints": [
-                        {"required_intermediate_categories": ["biolink:Gene"]}
-                    ],
+                    "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
                 }
             },
         }
@@ -163,8 +159,8 @@ _QUERY_EXAMPLE_WITH_PARAMS: dict = {
             },
         }
     },
+    "log_level": "DEBUG",
     "parameters": {
-        "log_level": "DEBUG",
         "timeout": 60,
         "subclass": True,
         "subclass_depth": 1,
@@ -175,14 +171,29 @@ _QUERY_EXAMPLE_WITH_PARAMS: dict = {
 }
 
 
-class QueryParameters(TRAPIQueryParameters):
-    """TRAPI ``parameters`` for ``/query`` and ``/asyncquery``.
+class QueryParameters(BaseModel):
+    """Gandalf's ``parameters`` for ``/query`` and ``/asyncquery``.
 
-    Inherits the standard TRAPI members (``timeout``, ``log_level``,
-    ``bypass_cache``) from ``translator_tom`` and adds gandalf's own under the
-    schema's ``additionalProperties``.  All are optional; absent fields fall
-    back to server defaults.
+    TRAPI 1.6 has no ``parameters`` object; gandalf carries its own settings
+    in one under the additional properties a 1.6 ``Query`` admits.  All are
+    optional; absent fields fall back to server defaults.  ``log_level`` and
+    ``bypass_cache`` are standard top-level Query properties in 1.6 and are
+    read from there; they are accepted here too, as on the TRAPI 2.0 line.
     """
+
+    model_config = ConfigDict(extra="allow")
+
+    timeout: Optional[float] = Field(
+        None,
+        description="Seconds the client is willing to wait. Absent: the "
+        "server default; negative: no timeout.",
+    )
+    log_level: Optional[LogLevel] = Field(
+        None, description="Use the Query's top-level log_level under TRAPI 1.6."
+    )
+    bypass_cache: Optional[bool] = Field(
+        None, description="Use the Query's top-level bypass_cache under TRAPI 1.6."
+    )
 
     subclass: Optional[bool] = Field(
         None, description="Enable biolink subclass inference (default True)"
@@ -261,7 +272,7 @@ class AsyncTRAPIQuery(AsyncQuery):
 
 
 class TRAPIResponse(Response):
-    """Response from ``POST /query``: TOM's TRAPI 2.0 ``Response``.
+    """Response from ``POST /query``: TOM's TRAPI 1.6 ``Response``.
 
     Declared as the route's ``response_model`` so the OpenAPI document shows
     the real TRAPI response shape.  It is only *constructed* when

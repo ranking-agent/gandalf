@@ -77,7 +77,7 @@ def _both_ways(monkeypatch, graph, query, bmt, **kwargs) -> dict:
 def _binding_sizes(response: dict) -> set[int]:
     """How many edge IDs each result's edge bindings hold."""
     return {
-        len(binding["ids"])
+        len(binding)
         for result in response["message"]["results"]
         for binding in result["analyses"][0]["edge_bindings"].values()
     }
@@ -255,8 +255,9 @@ def test_query_shapes(monkeypatch, graph, bmt, dehydrated, query, subclass):
 
 
 def test_single_id_bindings_are_shared(graph, bmt):
-    """A ``{"ids": [x]}`` binding is one object per ID, reused by every
-    result that binds x, so nothing may change a binding in place."""
+    """A single-ID binding (``[{"id": x, "attributes": []}]`` under TRAPI
+    1.6) is one object per ID, reused by every result that binds x, so
+    nothing may change a binding in place."""
     query = _query(
         {"n0": {"ids": [METFORMIN]}, "n1": {"categories": ["biolink:Gene"]}},
         {"e0": _edge("n0", "n1", "biolink:affects")},
@@ -264,5 +265,5 @@ def test_single_id_bindings_are_shared(graph, bmt):
     results = lookup(graph, query, bmt=bmt, subclass=False)["message"]["results"]
     assert len(results) > 1
     first = results[0]["node_bindings"]["n0"]
-    assert first == {"ids": [METFORMIN]}
+    assert first == [{"id": METFORMIN, "attributes": []}]
     assert all(r["node_bindings"]["n0"] is first for r in results)

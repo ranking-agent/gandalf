@@ -24,6 +24,7 @@ from gandalf.trapi import (
     prune_edge,
     with_source_record_urls,
 )
+from gandalf.trapi_1_6 import edge_to_1_6, lacks_stored_attributes, node_to_1_6
 
 
 def enrich_knowledge_graph(
@@ -110,6 +111,7 @@ def _enrich_nodes(nodes: dict[str, NodeDict], graph: CSRGraph) -> None:
         # categories is required with a minItems of 1, so it cannot be left
         # empty even when the graph had nothing more specific to offer.
         ensure_node_category(node)
+        node_to_1_6(node)
 
 
 def _enrich_edges(edges: dict[str, EdgeDict], graph: CSRGraph) -> None:
@@ -167,6 +169,7 @@ def _enrich_edges(edges: dict[str, EdgeDict], graph: CSRGraph) -> None:
             # No qualifiers default: the property is optional in TRAPI 2.0 and
             # an empty list is not a valid value for it.
             prune_edge(edge)
+            edge_to_1_6(edge)
             continue
 
         # Hot-path properties (in-memory dedup store)
@@ -188,10 +191,16 @@ def _enrich_edges(edges: dict[str, EdgeDict], graph: CSRGraph) -> None:
         # Cold-path properties (LMDB)
         detail = lmdb_results.get(fwd_idx, {})
 
-        if "attributes" not in edge:
-            edge["attributes"] = detail.get("attributes", [])
+        # A dehydrated TRAPI 1.6 edge carries knowledge_level and agent_type
+        # as its only attributes; the stored ones go in front of them, where
+        # a full response has them.
+        if lacks_stored_attributes(edge.get("attributes")):
+            edge["attributes"] = detail.get("attributes", []) + (
+                edge.get("attributes") or []
+            )
 
         prune_edge(edge)
+        edge_to_1_6(edge)
 
 
 def _find_fwd_edge_idx(

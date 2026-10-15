@@ -30,8 +30,10 @@ dependencies = [
     "orjson>=3.9.0",
     # The Translator-wide TRAPI object model: request models and the
     # OpenAPI schema come from here, and its TypedDicts type gandalf's
-    # internals.  Requires Python 3.10, hence the floor above.
-    "translator_tom>=2.1.0",
+    # internals.  Requires Python 3.10, hence the floor above.  This is the
+    # TRAPI 1.6 branch: the 1.x line of TOM models TRAPI 1.6, and 2.x models
+    # TRAPI 2.0 (see "TRAPI 1.6 branch" in CLAUDE.MD).
+    "translator_tom>=1.7.0,<2",
 ]
 
 [project.optional-dependencies]

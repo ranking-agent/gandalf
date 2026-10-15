@@ -19,6 +19,7 @@ from translator_tom.model_dicts import (
 
 from gandalf.biolink import make_toolkit
 from gandalf.graph import CSRGraph
+from gandalf.trapi_1_6 import bound_ids
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +271,7 @@ def validate_trapi_response(
         # Check node bindings
         node_bindings = result.get("node_bindings", {})
         for qnode_id, binding in node_bindings.items():
-            for node_id in binding.get("ids", []):
+            for node_id in bound_ids(binding):
                 if node_id and node_id not in kg_nodes:
                     errors.append(
                         ValidationError(
@@ -287,7 +288,7 @@ def validate_trapi_response(
         for analysis in analyses:
             edge_bindings = analysis.get("edge_bindings", {})
             for qedge_id, binding in edge_bindings.items():
-                for edge_id in binding.get("ids", []):
+                for edge_id in bound_ids(binding):
                     if edge_id and edge_id not in kg_edges:
                         errors.append(
                             ValidationError(
@@ -532,7 +533,7 @@ def _result_node_fingerprint(
     """Create a hashable fingerprint from a result's node bindings."""
     pairs: list[tuple[str, str]] = []
     for qnode_id, binding in result.get("node_bindings", {}).items():
-        for node_id in binding.get("ids", []):
+        for node_id in bound_ids(binding):
             pairs.append((qnode_id, node_id))
     return frozenset(pairs)
 
@@ -613,7 +614,7 @@ def _format_result_path(
     # Map qnode_id -> bound node ID.
     qnode_to_id: dict[str, str] = {}
     for qnode_id, binding in node_bindings.items():
-        ids = binding.get("ids") or []
+        ids = bound_ids(binding)
         if ids:
             qnode_to_id[qnode_id] = ids[0]
 
@@ -631,7 +632,7 @@ def _format_result_path(
 
 def _format_edge_bindings(
     qedge_id: str,
-    edge_bindings: dict[str, EdgeBindingDict],
+    edge_bindings: dict[str, list[EdgeBindingDict]],
     kg_edges: dict[str, EdgeDict],
 ) -> str:
     """Format all edge bindings for a single qedge as a compact label.
@@ -639,15 +640,14 @@ def _format_edge_bindings(
     Multiple distinct predicate/qualifier combinations are separated by
     ``" | "``.
     """
-    binding = edge_bindings.get(qedge_id)
-    bound_ids = binding.get("ids") if binding else None
-    if not bound_ids:
+    edge_ids = bound_ids(edge_bindings.get(qedge_id))
+    if not edge_ids:
         return "?"
 
     descriptions: list[str] = []
     seen: set[tuple[str, str]] = set()
 
-    for edge_id in bound_ids:
+    for edge_id in edge_ids:
         edge: EdgeDict | dict[str, Any] = kg_edges.get(edge_id) or {}
 
         predicate = edge.get("predicate", "?")

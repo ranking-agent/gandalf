@@ -128,24 +128,23 @@ def validate_set_interpretation(query_graph: QueryGraphDict) -> None:
             )
 
 
-# TRAPI 1.x request fields that 2.0 replaced.  Each maps to the 2.0 spelling
-# so the error can name the fix.
+# TRAPI 2.0 request fields this TRAPI 1.6 server does not read.  Each maps to
+# the 1.6 spelling so the error can name the fix.
 _RETIRED_QEDGE_FIELDS = {
-    "qualifier_constraints": "constraints.qualifiers",
-    "attribute_constraints": "constraints.attributes",
+    "constraints": "qualifier_constraints / attribute_constraints",
 }
 _RETIRED_QPATH_CONSTRAINT_FIELDS = {
-    "intermediate_categories": "required_intermediate_categories",
+    "required_intermediate_categories": "intermediate_categories",
 }
 
 
 def reject_retired_trapi_fields(query_graph: QueryGraphDict) -> None:
-    """Reject TRAPI 1.x query-graph fields that 2.0 renamed.
+    """Reject TRAPI 2.0 query-graph fields on this TRAPI 1.6 server.
 
-    The 2.0 schema sets ``additionalProperties: true`` on QEdge, so a stray
-    ``qualifier_constraints`` would simply be ignored -- and a client that
+    The 1.6 schema sets ``additionalProperties: true`` on QEdge, so a stray
+    2.0 ``constraints`` object would simply be ignored -- and a client that
     asked for filtering would silently get unfiltered results back, which is
-    worse than an error.  Name the 2.0 replacement instead.
+    worse than an error.  Name the 1.6 spelling instead.
 
     Raises ``HTTPException(400)`` for the first retired field found.
     """
@@ -156,8 +155,8 @@ def reject_retired_trapi_fields(query_graph: QueryGraphDict) -> None:
             if retired in qedge:
                 raise HTTPException(
                     400,
-                    f"edge '{qedge_id}' uses '{retired}', which TRAPI 2.0 "
-                    f"replaced with '{replacement}'",
+                    f"edge '{qedge_id}' uses '{retired}', which is TRAPI 2.0; "
+                    f"this server speaks TRAPI 1.6, which uses '{replacement}'",
                 )
 
     for qpath_id, qpath in (query_graph.get("paths") or {}).items():
@@ -170,8 +169,9 @@ def reject_retired_trapi_fields(query_graph: QueryGraphDict) -> None:
                 if retired in constraint:
                     raise HTTPException(
                         400,
-                        f"path '{qpath_id}' uses '{retired}', which TRAPI 2.0 "
-                        f"replaced with '{replacement}'",
+                        f"path '{qpath_id}' uses '{retired}', which is TRAPI "
+                        f"2.0; this server speaks TRAPI 1.6, which uses "
+                        f"'{replacement}'",
                     )
 
 

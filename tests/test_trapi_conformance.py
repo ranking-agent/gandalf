@@ -1,4 +1,7 @@
-"""Conformance: every response gandalf serves is valid TRAPI 2.0.
+"""Conformance: every response gandalf serves is valid TRAPI 1.6.
+
+(On the TRAPI 1.6 branch ``translator_tom`` is the 1.x line, which models
+TRAPI 1.6, so the checks below are against 1.6.)
 
 ``translator_tom`` is the Translator-wide TRAPI object model, so validating
 against it is the closest in-repo equivalent of the external validators: a
@@ -13,7 +16,7 @@ which is exactly the class of bug (``qualifiers: []``,
 ``upstream_resource_ids: []``, ``name: null``) that a shape-only check misses.
 
 Dehydrated responses are deliberately excluded.  That mode exists to make the
-payload as small as possible and omits ``Edge.sources``, which TRAPI 2.0
+payload as small as possible and omits ``Edge.sources``, which TRAPI
 requires, so such a response is knowingly not schema-valid: validating it
 would only assert a thing gandalf has chosen not to do.  What *is* pinned
 below is the shape of that choice, so the omission stays deliberate rather
@@ -34,9 +37,12 @@ DIABETES = "MONDO:0005148"
 DIABETES_MELLITUS = "MONDO:0005015"
 
 
-def one_hop(predicate="biolink:affects", object_node=None, constraints=None) -> dict:
+def one_hop(
+    predicate="biolink:affects", object_node=None, constraints=None, **qedge_fields
+) -> dict:
     """A one-hop query, optionally pinned at the object end or constrained."""
     qedge: dict = {"subject": "n0", "object": "n1", "predicates": [predicate]}
+    qedge.update(qedge_fields)
     if constraints is not None:
         qedge["constraints"] = constraints
     return {
@@ -57,11 +63,11 @@ def one_hop(predicate="biolink:affects", object_node=None, constraints=None) -> 
 
 
 def assert_valid_trapi(response: dict) -> None:
-    """Assert a response is valid TRAPI 2.0 and agrees with the model exactly."""
+    """Assert a response is valid TRAPI 1.6 and agrees with the model exactly."""
     model = Response.from_dict(response)
     assert orjson.loads(model.to_json()) == orjson.loads(orjson.dumps(response)), (
         "response differs from TOM's serialization of it, which means it "
-        "carries a property TRAPI 2.0 would leave absent"
+        "carries a property TRAPI would leave absent"
     )
 
 
@@ -77,9 +83,26 @@ class TestResponsesAreValidTRAPI:
             {},
             {"predicate": "biolink:treats", "object_node": DIABETES},
             {
-                "constraints": {
-                    "qualifiers": [{"biolink:object_aspect_qualifier": "activity"}]
-                }
+                "qualifier_constraints": [
+                    {
+                        "qualifier_set": [
+                            {
+                                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                "qualifier_value": "activity",
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "attribute_constraints": [
+                    {
+                        "id": "biolink:publications",
+                        "name": "publications",
+                        "operator": "matches",
+                        "value": ".",
+                    }
+                ]
             },
             {
                 "constraints": {
@@ -91,7 +114,9 @@ class TestResponsesAreValidTRAPI:
                 }
             },
         ],
-        ids=["unpinned", "pinned-both-ends", "qualified", "allow-deny"],
+        # allow-deny is the internal (2.0) constraints object, which lookup()
+        # still reads; 1.6 clients cannot send it.
+        ids=["unpinned", "pinned-both-ends", "qualified", "attribute", "allow-deny"],
     )
     def test_lookup_response(self, graph, bmt, query_kwargs):  # noqa: F811
         response = lookup(graph, one_hop(**query_kwargs), bmt=bmt, dehydrated=False)
@@ -111,7 +136,7 @@ class TestResponsesAreValidTRAPI:
         assert_valid_trapi(response)
 
     def test_empty_response(self, graph, bmt):  # noqa: F811
-        """No matches: results stays an empty list, which 2.0 asks for."""
+        """No matches: results stays an empty list."""
         response = lookup(
             graph,
             {
@@ -215,6 +240,8 @@ class TestDehydratedResponsesTradeConformanceForSize:
     """
 
     def test_edges_omit_sources_and_attributes(self, graph, bmt):  # noqa: F811
+        """Under 1.6 the only attributes left are knowledge_level and
+        agent_type, which 1.6 carries as attributes."""
         edges = lookup(graph, one_hop(), bmt=bmt, dehydrated=True)["message"][
             "knowledge_graph"
         ]["edges"]
@@ -224,9 +251,12 @@ class TestDehydratedResponsesTradeConformanceForSize:
                 "subject",
                 "object",
                 "predicate",
-                "knowledge_level",
-                "agent_type",
+                "attributes",
             }, edge_id
+            assert [a["attribute_type_id"] for a in edge["attributes"]] == [
+                "biolink:knowledge_level",
+                "biolink:agent_type",
+            ], edge_id
 
     def test_that_is_the_only_reason_they_are_invalid(self, graph, bmt):  # noqa: F811
         """Nothing else about a dehydrated response is non-conformant.

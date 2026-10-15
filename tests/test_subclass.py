@@ -9,6 +9,7 @@ from tests.search_fixtures import graph  # noqa: F401
 
 from gandalf.loader import build_graph_from_jsonl
 from gandalf.search import lookup
+from tests.trapi_1_6_helpers import agent_type, knowledge_level
 
 _FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -79,7 +80,7 @@ class TestSubclassHandling:
 
         # Only exact match: Metformin treats Diabetes Mellitus
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"]["ids"][0] == "MONDO:0005015"
+        assert results[0]["node_bindings"]["n1"][0]["id"] == "MONDO:0005015"
 
     def test_subclass_depth_one_expands_to_children(self, graph, bmt):
         """With subclass=True, querying for Diabetes Mellitus also finds Type 2 Diabetes results.
@@ -113,7 +114,7 @@ class TestSubclassHandling:
 
         # Node bindings should reference the originally queried ID (superclass)
         # for results that came via subclass expansion
-        bound_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        bound_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert "MONDO:0005015" in bound_ids
 
     def test_subclass_depth_zero_is_identity(self, graph, bmt):
@@ -173,8 +174,8 @@ class TestSubclassHandling:
         # Should find the explicit edge without creating synthetic superclass nodes
         assert len(results) == 1
         # Node bindings should use the exact queried IDs (no rewriting happened)
-        assert results[0]["node_bindings"]["n0"]["ids"][0] == "MONDO:0005148"
-        assert results[0]["node_bindings"]["n1"]["ids"][0] == "MONDO:0005015"
+        assert results[0]["node_bindings"]["n0"][0]["id"] == "MONDO:0005148"
+        assert results[0]["node_bindings"]["n1"][0]["id"] == "MONDO:0005015"
 
     def test_subclass_auxiliary_graphs_present(self, graph, bmt):
         """Results from subclass expansion should include auxiliary_graphs.
@@ -259,9 +260,9 @@ class TestSubclassHandling:
             "retriever#192)"
         )
         for edge in inferred_edges:
-            # TRAPI 2.0 carries these as Edge properties, not attributes.
-            assert edge["knowledge_level"] == "logical_entailment"
-            assert edge["agent_type"] == "automated_agent"
+            # TRAPI 1.6 carries these as Edge attributes.
+            assert knowledge_level(edge) == "logical_entailment"
+            assert agent_type(edge) == "automated_agent"
 
     def test_subclass_node_binding_uses_superclass_id(self, graph, bmt):
         """When a result comes via subclass, node binding should reference the queried (superclass) ID."""
@@ -288,11 +289,11 @@ class TestSubclassHandling:
 
         # All results should have n0 bound to Metformin
         for result in results:
-            assert result["node_bindings"]["n0"]["ids"][0] == "CHEBI:6801"
+            assert result["node_bindings"]["n0"][0]["id"] == "CHEBI:6801"
 
         # n1 bindings: direct match uses MONDO:0005015, subclass match also uses MONDO:0005015
         # (the superclass ID, since that's what was queried)
-        n1_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        n1_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert "MONDO:0005015" in n1_ids
 
     def test_subclass_superclass_nodes_hidden_from_bindings(self, graph, bmt):
@@ -504,7 +505,9 @@ class TestSubclassMultipleChildrenDistinctDerivations:
         assert child_subjects == {self.C1, self.C2}
 
         # The QEdge binding references two distinct inferred edges, no duplicates.
-        ids = results[0]["analyses"][0]["edge_bindings"][base_qedge_id]["ids"]
+        ids = [
+            b["id"] for b in results[0]["analyses"][0]["edge_bindings"][base_qedge_id]
+        ]
         assert len(ids) == 2
         assert len(set(ids)) == 2, f"duplicate edge binding ids: {ids}"
         assert set(ids) == set(inferred)

@@ -47,7 +47,7 @@ class TestMaxNodeDegree:
 
         # Only TNF (degree=1) should pass the filter
         assert len(results) == 1
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:7124"}
 
     def test_max_node_degree_allows_nodes_at_threshold(self, graph, bmt):
@@ -160,7 +160,7 @@ class TestMinInformationContent:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_min_ic_absent_means_no_filtering(self, graph, bmt):
@@ -257,7 +257,7 @@ class TestMinInformationContent:
             graph, query, bmt=bmt, filter_config={"min_information_content": 85}
         )
         gene_ids = {
-            r["node_bindings"]["n1"]["ids"][0]
+            r["node_bindings"]["n1"][0]["id"]
             for r in response_filtered["message"]["results"]
         }
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643"}
@@ -298,7 +298,7 @@ class TestMinInformationContent:
         results = response_filtered["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
 
 
 class TestCombinedFilters:
@@ -344,7 +344,7 @@ class TestCombinedFilters:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:7124"}
 
 
@@ -437,7 +437,7 @@ def test_pinned_nodes_are_never_filtered(
         filter_config={"max_node_degree": 3},
     )
     drugs = {
-        result["node_bindings"]["drug"]["ids"][0]
+        result["node_bindings"]["drug"][0]["id"]
         for result in response["message"]["results"]
     }
 
@@ -510,6 +510,6 @@ def test_an_unpinned_hub_between_two_pinned_nodes_is_filtered(
     )
 
     assert [
-        result["node_bindings"]["x"]["ids"][0]
+        result["node_bindings"]["x"][0]["id"]
         for result in response["message"]["results"]
     ] == ["TEST:plain"]

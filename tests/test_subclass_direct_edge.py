@@ -79,7 +79,7 @@ class TestDirectEdgeCoexistsWithSubclass:
         bound_ids = {
             eid
             for result in results
-            for eid in result["analyses"][0]["edge_bindings"]["e0"]["ids"]
+            for eid in [b["id"] for b in result["analyses"][0]["edge_bindings"]["e0"]]
         }
 
         direct_bound = [

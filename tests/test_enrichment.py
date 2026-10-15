@@ -7,6 +7,7 @@ import pytest
 from gandalf.enrichment import enrich_knowledge_graph
 from gandalf.loader import build_graph_from_jsonl
 from gandalf.search import lookup
+from tests.trapi_1_6_helpers import agent_type, knowledge_level
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 NODES_FILE = os.path.join(FIXTURES_DIR, "nodes.jsonl")
@@ -163,20 +164,20 @@ class TestEnrichEdges:
 
         # Drop them, as a client stripping a response down would.
         for edge in edges.values():
-            edge.pop("knowledge_level", None)
-            edge.pop("agent_type", None)
+            edge.pop("attributes", None)
 
         enrich_knowledge_graph(response, graph)
 
         assert edges
         for edge_id, edge in edges.items():
-            assert edge["knowledge_level"] == "knowledge_assertion", edge_id
-            assert edge["agent_type"] == "manual_agent", edge_id
+            assert knowledge_level(edge) == "knowledge_assertion", edge_id
+            assert agent_type(edge) == "manual_agent", edge_id
 
     def test_unresolvable_edge_still_gets_knowledge_level_and_agent_type(
         self, graph, bmt
     ):
-        """An edge the graph cannot resolve still reports valid 2.0 values."""
+        """An edge the graph cannot resolve still reports knowledge_level and
+        agent_type (as 1.6 attributes)."""
         msg = {
             "message": {
                 "knowledge_graph": {
@@ -193,8 +194,8 @@ class TestEnrichEdges:
         }
         enrich_knowledge_graph(msg, graph)
         edge = msg["message"]["knowledge_graph"]["edges"]["unknown"]
-        assert edge["knowledge_level"] == "not_provided"
-        assert edge["agent_type"] == "not_provided"
+        assert knowledge_level(edge) == "not_provided"
+        assert agent_type(edge) == "not_provided"
 
     def test_edges_have_publications_in_attributes(self, graph, bmt):
         """Edge publications should appear as TRAPI attributes after enrichment."""

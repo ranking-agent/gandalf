@@ -22,6 +22,13 @@ This replaces the 1.x ``qualifier_constraints`` / ``attribute_constraints``
 lists and adds the ``knowledge_level``, ``agent_type`` and ``sources``
 allow/deny constraints.
 
+On the TRAPI 1.6 branch that object is internal: :meth:`EdgeConstraints.parse`
+builds it from a 1.6 QEdge's two lists (``gandalf.trapi_1_6.qedge_constraints``).
+It still reads a ``constraints`` object handed to ``lookup()`` directly, so
+the allow/deny constraints stay usable from Python and the 2.0 line's tests
+run here unchanged, but the server refuses one from an HTTP client
+(``request_validation.reject_retired_trapi_fields``): 1.6 cannot express it.
+
 :class:`EdgeConstraints` parses that object once per QEdge and then answers a
 single question per candidate edge, so the traversal loops in
 ``gandalf.search.query_edge`` stay a flat sequence of checks no matter how many
@@ -35,6 +42,7 @@ from translator_tom.model_dicts import QEdgeDict
 
 from gandalf.search.attribute_constraints import matches_attribute_constraints
 from gandalf.search.qualifiers import edge_matches_qualifier_constraints
+from gandalf.trapi_1_6 import TRAPI16ConstraintError, qedge_constraints
 
 ALLOW = "ALLOW"
 DENY = "DENY"
@@ -153,10 +161,14 @@ class EdgeConstraints:
 
     @classmethod
     def parse(cls, qedge: QEdgeDict) -> "EdgeConstraints":
-        """Build the constraints for one QEdge from its ``constraints`` object.
+        """Build the constraints for one QEdge.
+
+        Reads a TRAPI 1.6 QEdge's ``qualifier_constraints`` /
+        ``attribute_constraints``, or the internal (TRAPI 2.0) ``constraints``
+        object -- not both.
 
         Args:
-            qedge: A TRAPI QEdge dict.
+            qedge: A QEdge dict.
 
         Returns:
             The parsed constraints; empty when the QEdge has none.
@@ -168,12 +180,27 @@ class EdgeConstraints:
         Examples:
             >>> EdgeConstraints.parse({"subject": "n0", "object": "n1"})
             EdgeConstraints(qualifiers=(), attributes=(), knowledge_level=None, agent_type=None, sources=None)
+            >>> EdgeConstraints.parse({"qualifier_constraints": [
+            ...     {"qualifier_set": [{"qualifier_type_id": "biolink:object_aspect_qualifier",
+            ...                         "qualifier_value": "activity"}]}]}).qualifiers
+            ({'biolink:object_aspect_qualifier': 'activity'},)
             >>> bool(EdgeConstraints.parse({"constraints": {
             ...     "agent_type": {"behavior": "DENY",
             ...                    "values": ["text_mining_agent"]}}}))
             True
         """
         raw = qedge.get("constraints")
+        try:
+            trapi_1_6 = qedge_constraints(qedge)
+        except TRAPI16ConstraintError as exc:
+            raise ConstraintError(str(exc)) from exc
+        if trapi_1_6 is not None:
+            if raw is not None:
+                raise ConstraintError(
+                    "give either the TRAPI 1.6 qualifier_constraints / "
+                    "attribute_constraints or a 'constraints' object, not both"
+                )
+            raw = trapi_1_6
         if raw is None:
             return cls()
         if not isinstance(raw, dict):

@@ -778,10 +778,12 @@ def _single_path_json(
 
     # The template's literal pieces, around k node IDs then m edge IDs; a
     # NUL never appears in orjson output, so it marks the gaps.  Each result
-    # ends with a comma, dropped from the last one of each entry.
+    # ends with a comma, dropped from the last one of each entry.  Written in
+    # the TRAPI 1.6 shape that gandalf.trapi_1_6.to_trapi_1_6 gives the
+    # results built as dicts.
     def binding(key: str) -> bytes:
         encoded: bytes = orjson.dumps(key)
-        return encoded + b':{"ids":[\x00]}'
+        return encoded + b':[{"id":\x00,"attributes":[]}]'
 
     template = (
         b'{"node_bindings":{' + b",".join(binding(q) for _c, q in node_cols) + b"}"
@@ -794,6 +796,9 @@ def _single_path_json(
             + b",".join(binding(q) for _c, q, _s, _o in plain_edge_cols)
             + b"}}]"
         )
+    else:
+        # TRAPI 1.6 requires Result.analyses.
+        template += b',"analyses":[]'
     literals = (template + b"},").split(b"\x00")
 
     lengths = np.full(n, sum(map(len, literals)), dtype=np.int64)

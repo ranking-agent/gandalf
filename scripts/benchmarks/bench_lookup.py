@@ -269,13 +269,13 @@ def fingerprint(response: dict) -> str:
     for result in response_results(response):
         nodes = tuple(
             sorted(
-                (qnode, tuple(sorted(binding["ids"])))
+                (qnode, tuple(sorted(b["id"] for b in binding)))
                 for qnode, binding in result["node_bindings"].items()
             )
         )
         edges = tuple(
             sorted(
-                (qedge, tuple(sorted(describe(e) for e in binding["ids"])))
+                (qedge, tuple(sorted(describe(b["id"]) for b in binding)))
                 for analysis in result.get("analyses") or []
                 for qedge, binding in analysis["edge_bindings"].items()
             )

@@ -102,18 +102,16 @@ class TestTRAPIQuery:
 
         Such a body is valid TRAPI that this server cannot answer, so it is
         rejected at the endpoint instead -- see
-        ``tests/test_trapi_2_0.py::TestNonExecutableQueryGraphRejected``.
+        ``tests/test_trapi_1_6.py::TestNonExecutableQueryGraphRejected``.
         """
         assert TRAPIQuery(message={}).message.query_graph is None
 
-    def test_query_graph_without_edges_is_valid_trapi(self):
-        """2.0 makes QueryGraph.edges optional (Pathfinder queries use paths).
-
-        Gandalf rejects an unexecutable one at the endpoint, not here.
-        """
-        query = TRAPIQuery(message={"query_graph": {"nodes": {"n0": {}}}})
-        assert query.message.query_graph is not None
-        assert query.message.query_graph.edges is None
+    def test_query_graph_without_edges_is_not_valid_trapi_1_6(self):
+        """1.6 requires QueryGraph.edges (a Pathfinder query graph is a
+        separate type, with paths).  The server's own check rejects one
+        without edges on the non-validating path too."""
+        with pytest.raises(ValidationError):
+            TRAPIQuery(message={"query_graph": {"nodes": {"n0": {}}}})
 
     def test_edge_missing_subject_raises(self):
         with pytest.raises(ValidationError, match="subject"):
@@ -149,17 +147,18 @@ class TestTRAPIQuery:
         assert q.parameters is None
 
     def test_log_level_valid_values(self):
-        """TRAPI 2.0 moved log_level into the parameters object."""
+        """TRAPI 1.6 keeps log_level at the top level of the Query."""
         for level in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            q = TRAPIQuery(**ONEHOP_QUERY, parameters={"log_level": level})
-            assert q.parameters.log_level == level
+            q = TRAPIQuery(**ONEHOP_QUERY, log_level=level)
+            assert q.log_level == level
 
     def test_log_level_invalid_value_raises(self):
         with pytest.raises(ValidationError, match="log_level"):
-            TRAPIQuery(**ONEHOP_QUERY, parameters={"log_level": "TRACE"})
+            TRAPIQuery(**ONEHOP_QUERY, log_level="TRACE")
 
     def test_log_level_defaults_none(self):
         q = TRAPIQuery(**ONEHOP_QUERY, parameters={})
+        assert q.log_level is None
         assert q.parameters.log_level is None
 
     def test_extra_fields_allowed(self):
@@ -179,21 +178,24 @@ class TestTRAPIQuery:
                         "e0": {
                             "subject": "n0",
                             "object": "n1",
-                            "constraints": {
-                                "qualifiers": [
-                                    {"biolink:object_aspect_qualifier": "activity"}
-                                ]
-                            },
+                            "qualifier_constraints": [
+                                {
+                                    "qualifier_set": [
+                                        {
+                                            "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                            "qualifier_value": "activity",
+                                        }
+                                    ]
+                                }
+                            ],
                         }
                     },
                 }
             }
         }
         q = TRAPIQuery(**data)
-        constraints = q.message.query_graph.edges["e0"].constraints
-        assert constraints.qualifiers == [
-            {"biolink:object_aspect_qualifier": "activity"}
-        ]
+        constraints = q.message.query_graph.edges["e0"].qualifier_constraints
+        assert constraints[0].qualifier_set[0].qualifier_value == "activity"
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +215,7 @@ PATHFINDER_QUERY = {
                     "subject": "n0",
                     "object": "n1",
                     "predicates": ["biolink:related_to"],
-                    "constraints": [
-                        {"required_intermediate_categories": ["biolink:Gene"]}
-                    ],
+                    "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
                 }
             },
         }
@@ -229,12 +229,12 @@ class TestPathfinderQuery:
     def test_valid_pathfinder_query(self):
         q = TRAPIQuery(**PATHFINDER_QUERY)
         assert q.message.query_graph.nodes["n0"].ids == ["CHEBI:6801"]
-        assert q.message.query_graph.edges is None
+        assert not hasattr(q.message.query_graph, "edges")
         path = q.message.query_graph.paths["p0"]
         assert path.subject == "n0"
         assert path.object == "n1"
         assert path.predicates == ["biolink:related_to"]
-        assert path.constraints[0].required_intermediate_categories == ["biolink:Gene"]
+        assert path.constraints[0].intermediate_categories == ["biolink:Gene"]
 
     def test_path_missing_subject_raises(self):
         with pytest.raises(ValidationError, match="subject"):
@@ -258,7 +258,9 @@ class TestPathfinderQuery:
                 }
             )
 
-    def test_hybrid_edges_and_paths_allowed(self):
+    def test_hybrid_edges_and_paths_read_as_a_lookup_query_graph(self):
+        """1.6 has no hybrid query graph: the extra ``paths`` rides along
+        under QueryGraph's additional properties."""
         data = {
             "message": {
                 "query_graph": {
@@ -277,7 +279,7 @@ class TestPathfinderQuery:
         }
         q = TRAPIQuery(**data)
         assert q.message.query_graph.edges["e0"].subject == "n0"
-        assert q.message.query_graph.paths["p0"].subject == "n0"
+        assert q.message.query_graph.paths["p0"]["subject"] == "n0"
 
     def test_pathfinder_roundtrip_excludes_none(self):
         q = TRAPIQuery(**PATHFINDER_QUERY)
@@ -285,25 +287,24 @@ class TestPathfinderQuery:
         qg = raw["message"]["query_graph"]
         assert "edges" not in qg
         assert qg["paths"]["p0"]["subject"] == "n0"
-        assert qg["paths"]["p0"]["constraints"][0][
-            "required_intermediate_categories"
-        ] == ["biolink:Gene"]
+        assert qg["paths"]["p0"]["constraints"][0]["intermediate_categories"] == [
+            "biolink:Gene"
+        ]
 
     def test_qpath_direct_construction(self):
         p = QPath(
             subject="n0",
             object="n1",
             predicates=["biolink:treats"],
-            constraints=[
-                PathConstraint(required_intermediate_categories=["biolink:Gene"])
-            ],
+            constraints=[PathConstraint(intermediate_categories=["biolink:Gene"])],
         )
         assert p.subject == "n0"
-        assert p.constraints[0].required_intermediate_categories == ["biolink:Gene"]
+        assert p.constraints[0].intermediate_categories == ["biolink:Gene"]
 
-    def test_query_graph_accepts_nodes_alone(self):
-        """Valid TRAPI 2.0; gandalf's executability check lives in the server."""
-        assert QueryGraph(nodes={"n0": QNode()}).edges is None
+    def test_query_graph_requires_edges(self):
+        """TRAPI 1.6 QueryGraph.edges is required."""
+        with pytest.raises(ValidationError, match="edges"):
+            QueryGraph(nodes={"n0": QNode()})
 
 
 # ---------------------------------------------------------------------------
@@ -408,9 +409,11 @@ class TestQNodeSetInterpretation:
         node = QNode(set_interpretation="MANY", member_ids=["A", "B"])
         assert node.set_interpretation == "MANY"
 
-    def test_valid_collate(self):
-        node = QNode(categories=["biolink:Gene"], set_interpretation="COLLATE")
-        assert node.set_interpretation == "COLLATE"
+    def test_collate_is_not_trapi_1_6(self):
+        """COLLATE is a gandalf extension under 1.6: the default
+        (non-validating) request path serves it, strict mode refuses it."""
+        with pytest.raises(ValidationError):
+            QNode(categories=["biolink:Gene"], set_interpretation="COLLATE")
 
     def test_invalid_value_raises(self):
         with pytest.raises(ValidationError):
@@ -519,7 +522,9 @@ class TestResponseModels:
         assert r.node_count == 1000
 
     def test_trapi_response(self):
-        r = TRAPIResponse(message={"query_graph": {"nodes": {"n0": {}}}, "results": []})
+        r = TRAPIResponse(
+            message={"query_graph": {"nodes": {"n0": {}}, "edges": {}}, "results": []}
+        )
         assert r.message.query_graph is not None
         assert r.message.results == []
 

@@ -29,6 +29,7 @@ from gandalf.config import settings
 from gandalf.memory import rss_anon_kb
 from gandalf.search.gc_utils import gc_disabled
 from gandalf.trapi import Deadline, finalize_response, query_parameters, to_fragments
+from gandalf.trapi_1_6 import to_trapi_1_6
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,9 @@ def run_query(
     )
     if annotator_config:
         annotate_response(response, graph, annotator_config)
+        # An annotator may add edges in the internal (2.0) shape, after
+        # finalize_response converted the rest to TRAPI 1.6.  Idempotent.
+        to_trapi_1_6(response)
     to_fragments(response)
     return response
 

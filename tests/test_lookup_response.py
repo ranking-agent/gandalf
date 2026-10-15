@@ -110,7 +110,9 @@ class TestLookupResponseStructure:
         # Results should be aggregated: 1 result with all 3 edges in bindings
         results = response["message"]["results"]
         assert len(results) == 1
-        edge_bindings = results[0]["analyses"][0]["edge_bindings"]["e0"]["ids"]
+        edge_bindings = [
+            b["id"] for b in results[0]["analyses"][0]["edge_bindings"]["e0"]
+        ]
         assert len(edge_bindings) == 4
 
     def test_results_have_node_and_edge_bindings(self, graph, bmt):
@@ -148,7 +150,7 @@ class TestLookupResponseStructure:
         assert "e0" in result["analyses"][0]["edge_bindings"]
 
         # A TRAPI 2.0 EdgeBinding lists every bound edge in its ids array
-        edge_bindings = result["analyses"][0]["edge_bindings"]["e0"]["ids"]
+        edge_bindings = [b["id"] for b in result["analyses"][0]["edge_bindings"]["e0"]]
         assert isinstance(edge_bindings, list)
         assert (
             len(edge_bindings) == 4
@@ -193,7 +195,9 @@ class TestMetforminType2DiabetesEdges:
         assert "biolink:treats" in predicates
 
         # Verify edge bindings contain all 4 edges
-        edge_bindings = results[0]["analyses"][0]["edge_bindings"]["e0"]["ids"]
+        edge_bindings = [
+            b["id"] for b in results[0]["analyses"][0]["edge_bindings"]["e0"]
+        ]
         assert len(edge_bindings) == 4
 
     def test_metformin_ameliorates_type2_diabetes(self, graph, bmt):
@@ -294,7 +298,9 @@ class TestMetforminType2DiabetesEdges:
         }
 
         # Verify edge bindings contain all 4 edges
-        edge_bindings = results[0]["analyses"][0]["edge_bindings"]["e0"]["ids"]
+        edge_bindings = [
+            b["id"] for b in results[0]["analyses"][0]["edge_bindings"]["e0"]
+        ]
         assert len(edge_bindings) == 4
 
 
@@ -302,7 +308,8 @@ class TestDehydratedNodeProperties:
     """Tests for simplified node properties in dehydrated/lightweight mode."""
 
     def test_dehydrated_nodes_only_have_name_and_categories(self, graph, bmt):
-        """In dehydrated mode, KG nodes should only contain name and categories."""
+        """In dehydrated mode, KG nodes should only contain name and categories
+        -- plus the (empty) attributes list TRAPI 1.6 requires."""
         query = {
             "message": {
                 "query_graph": {
@@ -329,7 +336,9 @@ class TestDehydratedNodeProperties:
             assert set(node.keys()) == {
                 "name",
                 "categories",
+                "attributes",
             }, f"Node {node_id} has unexpected keys: {set(node.keys())}"
+            assert node["attributes"] == []
 
     def test_dehydrated_categories_trimmed_to_most_specific(self, graph, bmt):
         """In dehydrated mode, categories should be trimmed to the most specific."""

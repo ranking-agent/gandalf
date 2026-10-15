@@ -1,9 +1,18 @@
-"""Tests for the TRAPI 2.0 protocol surface.
+"""Tests for the TRAPI 1.6 protocol surface (the TRAPI 1.6 branch).
 
-Covers what 2.0 changed rather than what the search engine does: the Response
-envelope, the ``parameters`` object (including the ``timeout`` budget and its
-409), the new QEdge allow/deny constraints, and the rejection of the 1.x
-request fields 2.0 renamed.
+This file is the 2.0 line's ``tests/test_trapi_2_0.py``, renamed so changes
+made there still merge into it.  It covers what differs between the versions
+rather than what the search engine does: the Response envelope, the binding
+and Edge shapes 1.6 serves, the 1.6 QEdge constraint lists, the ``parameters``
+object (gandalf's own under 1.6, including the ``timeout`` budget and its
+409), and the rejection of the 2.0 request fields 1.6 does not have.
+
+Internally a response is still built in the 2.0 shape and converted on the
+way out (``gandalf.trapi_1_6``), and ``lookup()`` still reads the internal
+(2.0) ``constraints`` object, so the 2.0 line's allow/deny constraint tests
+are kept below: they exercise code both lines share.  The null and
+empty-container rules further down are the 2.0 line's too; 1.6 is laxer on
+both, so holding to them keeps 1.6 responses valid as well.
 """
 
 import logging
@@ -24,18 +33,25 @@ from gandalf.trapi import (
     QueryTimeout,
     TimeoutNotSatisfiable,
     resolve_timeout,
+    response_results,
 )
 from tests.search_fixtures import graph  # noqa: F401
+from tests.trapi_1_6_helpers import agent_type, knowledge_level
 
 METFORMIN = "CHEBI:6801"
 
 
-def affects_query(constraints=None, **top_level) -> dict:
-    """A ``CHEBI:6801 --affects--> Gene`` query with optional QEdge constraints."""
+def affects_query(constraints=None, qedge_fields=None, **top_level) -> dict:
+    """A ``CHEBI:6801 --affects--> Gene`` query with optional QEdge constraints.
+
+    *constraints* is the internal (2.0) ``constraints`` object; *qedge_fields*
+    holds 1.6 properties such as ``qualifier_constraints``.
+    """
     qedge = {
         "subject": "n0",
         "object": "n1",
         "predicates": ["biolink:affects"],
+        **(qedge_fields or {}),
     }
     if constraints is not None:
         qedge["constraints"] = constraints
@@ -53,12 +69,22 @@ def affects_query(constraints=None, **top_level) -> dict:
     }
 
 
+def qualifier_set(**qualifiers) -> dict:
+    """A 1.6 QualifierConstraint from ``type=value`` pairs (types sans prefix)."""
+    return {
+        "qualifier_set": [
+            {"qualifier_type_id": f"biolink:{type_id}", "qualifier_value": value}
+            for type_id, value in qualifiers.items()
+        ]
+    }
+
+
 def bound_genes(response: dict) -> set:
     """The n1 CURIEs bound across a response's results."""
     return {
         node_id
         for result in response["message"]["results"]
-        for node_id in result["node_bindings"]["n1"]["ids"]
+        for node_id in [b["id"] for b in result["node_bindings"]["n1"]]
     }
 
 
@@ -80,7 +106,7 @@ def server(graph, bmt, monkeypatch):  # noqa: F811
 
 
 class TestResponseEnvelope:
-    """TRAPI 2.0 Response metadata."""
+    """TRAPI 1.6 Response metadata."""
 
     def test_response_reports_versions(self, graph, bmt):  # noqa: F811
         response = lookup(graph, affects_query(), bmt=bmt)
@@ -88,13 +114,16 @@ class TestResponseEnvelope:
         assert response["status"] == "Success"
         assert response["biolink_version"]
 
-    def test_response_repeats_parameters(self, graph, bmt):  # noqa: F811
-        """TRAPI 2.0: the server MUST repeat the parameters it is given."""
+    def test_schema_version_is_1_6(self, graph, bmt):  # noqa: F811
+        assert lookup(graph, affects_query(), bmt=bmt)["schema_version"] == "1.6.0"
+
+    def test_response_does_not_repeat_parameters(self, graph, bmt):  # noqa: F811
+        """Repeating ``parameters`` is a 2.0 rule; 1.6 has no such object."""
         parameters = {"subclass": False, "bypass_cache": True}
         response = lookup(
             graph, affects_query(parameters=parameters), bmt=bmt, subclass=False
         )
-        assert response["parameters"] == parameters
+        assert "parameters" not in response
 
     def test_response_omits_parameters_when_not_given(self, graph, bmt):  # noqa: F811
         assert "parameters" not in lookup(graph, affects_query(), bmt=bmt)
@@ -117,40 +146,280 @@ class TestResponseEnvelope:
 
 
 class TestBindingShape:
-    """2.0 folds each binding's ids into one object per QNode / QEdge."""
+    """1.6 binds a list of ``{"id", "attributes"}`` objects per QNode / QEdge."""
 
-    def test_node_binding_is_an_object_with_ids(self, graph, bmt):  # noqa: F811
-        result = lookup(graph, affects_query(), bmt=bmt)["message"]["results"][0]
-        assert result["node_bindings"]["n0"] == {"ids": [METFORMIN]}
+    @pytest.mark.parametrize("results_as_json", [False, True])
+    def test_node_binding_is_a_list_of_objects(
+        self, graph, bmt, results_as_json  # noqa: F811
+    ):
+        response = lookup(
+            graph, affects_query(), bmt=bmt, results_as_json=results_as_json
+        )
+        result = response_results(response)[0]
+        assert result["node_bindings"]["n0"] == [{"id": METFORMIN, "attributes": []}]
 
-    def test_edge_binding_is_an_object_with_ids(self, graph, bmt):  # noqa: F811
-        result = lookup(graph, affects_query(), bmt=bmt)["message"]["results"][0]
+    @pytest.mark.parametrize("results_as_json", [False, True])
+    def test_edge_binding_is_a_list_of_objects(
+        self, graph, bmt, results_as_json  # noqa: F811
+    ):
+        response = lookup(
+            graph, affects_query(), bmt=bmt, results_as_json=results_as_json
+        )
+        result = response_results(response)[0]
         binding = result["analyses"][0]["edge_bindings"]["e0"]
-        assert set(binding) == {"ids"}
-        assert len(binding["ids"]) >= 1
+        assert binding
+        for bound in binding:
+            assert set(bound) == {"id", "attributes"}
+            assert bound["id"] in response["message"]["knowledge_graph"]["edges"]
+
+    def test_every_result_carries_analyses(self, graph, bmt):  # noqa: F811
+        """Result.analyses is required in 1.6, even when it is empty."""
+        from gandalf.trapi_1_6 import to_trapi_1_6
+
+        response = to_trapi_1_6(
+            {"message": {"results": [{"node_bindings": {"n0": {"ids": ["A"]}}}]}}
+        )
+        assert response["message"]["results"][0]["analyses"] == []
+
+    def test_auxiliary_graphs_carry_attributes(self, graph, bmt):  # noqa: F811
+        """AuxiliaryGraph.attributes is required in 1.6."""
+        response = lookup(
+            graph,
+            {
+                "message": {
+                    "query_graph": {
+                        "nodes": {
+                            "n0": {"ids": [METFORMIN]},
+                            "n1": {"ids": ["MONDO:0005015"]},
+                        },
+                        "edges": {
+                            "e0": {
+                                "subject": "n0",
+                                "object": "n1",
+                                "predicates": ["biolink:treats"],
+                            }
+                        },
+                    }
+                }
+            },
+            bmt=bmt,
+        )
+        aux_graphs = response["message"]["auxiliary_graphs"]
+        assert aux_graphs
+        for aux_graph in aux_graphs.values():
+            assert aux_graph["attributes"] == []
 
 
 class TestEdgeProperties:
-    """2.0 promotes knowledge_level and agent_type to required Edge properties."""
+    """1.6 carries knowledge_level and agent_type as Edge attributes."""
 
     @pytest.mark.parametrize("dehydrated", [False, True])
+    @pytest.mark.parametrize("attributes_as_json", [False, True])
     def test_every_edge_carries_knowledge_level_and_agent_type(
-        self, graph, bmt, dehydrated  # noqa: F811
+        self, graph, bmt, dehydrated, attributes_as_json  # noqa: F811
     ):
-        response = lookup(graph, affects_query(), bmt=bmt, dehydrated=dehydrated)
+        response = lookup(
+            graph,
+            affects_query(),
+            bmt=bmt,
+            dehydrated=dehydrated,
+            attributes_as_json=attributes_as_json,
+        )
         edges = response["message"]["knowledge_graph"]["edges"]
         assert edges
         for edge in edges.values():
-            assert edge["knowledge_level"] == "knowledge_assertion"
-            assert edge["agent_type"] == "manual_agent"
+            assert knowledge_level(edge) == "knowledge_assertion"
+            assert agent_type(edge) == "manual_agent"
 
-    def test_knowledge_level_is_not_also_an_attribute(self, graph, bmt):  # noqa: F811
-        """They live in one place now, not duplicated into the attribute list."""
+    def test_they_are_not_also_edge_properties(self, graph, bmt):  # noqa: F811
+        """Each lives in one place: the attribute list, once."""
         response = lookup(graph, affects_query(), bmt=bmt)
         for edge in response["message"]["knowledge_graph"]["edges"].values():
-            type_ids = {a["attribute_type_id"] for a in edge.get("attributes", [])}
-            assert "biolink:knowledge_level" not in type_ids
-            assert "biolink:agent_type" not in type_ids
+            assert "knowledge_level" not in edge
+            assert "agent_type" not in edge
+            type_ids = [a["attribute_type_id"] for a in edge["attributes"]]
+            assert type_ids.count("biolink:knowledge_level") == 1
+            assert type_ids.count("biolink:agent_type") == 1
+
+    def test_stored_json_attributes_serialize_as_decoded(
+        self, graph, bmt
+    ):  # noqa: F811
+        """Moving them into attributes still held as the stored JSON gives
+        the same bytes as moving them into the decoded list."""
+        import orjson
+
+        from gandalf.trapi import to_fragments
+
+        decoded = lookup(graph, affects_query(), bmt=bmt)
+        stored = lookup(graph, affects_query(), bmt=bmt, attributes_as_json=True)
+        to_fragments(stored)
+        assert orjson.dumps(stored["message"]["knowledge_graph"]) == orjson.dumps(
+            decoded["message"]["knowledge_graph"]
+        )
+
+
+class TestLibraryHelpersRead16Bindings:
+    """``gandalf.validation`` reads results after they are converted."""
+
+    def test_validate_trapi_response(self, graph, bmt):  # noqa: F811
+        from gandalf.validation import validate_trapi_response
+
+        response = lookup(graph, affects_query(), bmt=bmt)
+        outcome = validate_trapi_response(graph, response)
+        assert outcome.total_paths == len(response["message"]["results"])
+        assert outcome.valid_paths == outcome.total_paths
+
+    def test_compare_trapi_messages(self, graph, bmt):  # noqa: F811
+        from gandalf.validation import compare_trapi_messages
+
+        everything = lookup(graph, affects_query(), bmt=bmt)["message"]
+        nothing = {**everything, "results": []}
+        missing = compare_trapi_messages(everything, nothing)
+        assert len(missing) == len(everything["results"])
+        assert all("?" not in path for path in missing)
+        assert compare_trapi_messages(everything, everything) == []
+
+
+class TestRehydratingA16DehydratedResponse:
+    """A dehydrated 1.6 edge's only attributes are knowledge_level and
+    agent_type, which must not read as "attributes already present"."""
+
+    def test_stored_attributes_are_filled_in(self, graph, bmt):  # noqa: F811
+        from gandalf.enrichment import enrich_knowledge_graph
+
+        full = lookup(graph, affects_query(), bmt=bmt)
+        response = lookup(graph, affects_query(), bmt=bmt, dehydrated=True)
+        enrich_knowledge_graph(response, graph)
+        edges = response["message"]["knowledge_graph"]["edges"]
+        assert edges
+        for edge_id, edge in edges.items():
+            assert (
+                edge["attributes"]
+                == full["message"]["knowledge_graph"]["edges"][edge_id]["attributes"]
+            ), edge_id
+            assert edge["sources"]
+
+
+class TestTRAPI16QEdgeConstraints:
+    """1.6 ``qualifier_constraints`` / ``attribute_constraints`` filter as the
+    internal ``constraints`` object does."""
+
+    def test_qualifier_constraints_filter(self, graph, bmt):  # noqa: F811
+        trapi_1_6 = lookup(
+            graph,
+            affects_query(
+                qedge_fields={
+                    "qualifier_constraints": [
+                        qualifier_set(
+                            object_aspect_qualifier="activity",
+                            object_direction_qualifier="increased",
+                        )
+                    ]
+                }
+            ),
+            bmt=bmt,
+        )
+        internal = lookup(
+            graph,
+            affects_query(
+                {
+                    "qualifiers": [
+                        {
+                            "biolink:object_aspect_qualifier": "activity",
+                            "biolink:object_direction_qualifier": "increased",
+                        }
+                    ]
+                }
+            ),
+            bmt=bmt,
+        )
+        assert bound_genes(trapi_1_6) == bound_genes(internal)
+        assert bound_genes(trapi_1_6) < bound_genes(
+            lookup(graph, affects_query(), bmt=bmt)
+        )
+
+    def test_qualifier_constraints_are_ored(self, graph, bmt):  # noqa: F811
+        one = lookup(
+            graph,
+            affects_query(
+                qedge_fields={
+                    "qualifier_constraints": [
+                        qualifier_set(object_direction_qualifier="increased")
+                    ]
+                }
+            ),
+            bmt=bmt,
+        )
+        both = lookup(
+            graph,
+            affects_query(
+                qedge_fields={
+                    "qualifier_constraints": [
+                        qualifier_set(object_direction_qualifier="increased"),
+                        qualifier_set(object_direction_qualifier="decreased"),
+                    ]
+                }
+            ),
+            bmt=bmt,
+        )
+        assert bound_genes(one) < bound_genes(both)
+
+    def test_attribute_constraints_filter(self, graph, bmt):  # noqa: F811
+        constraint = {
+            "id": "biolink:publications",
+            "name": "publications",
+            "operator": "==",
+            "value": "PMID:00000000",
+        }
+        response = lookup(
+            graph,
+            affects_query(qedge_fields={"attribute_constraints": [constraint]}),
+            bmt=bmt,
+        )
+        assert response["message"]["results"] == []
+
+    def test_query_graph_is_echoed_as_sent(self, graph, bmt):  # noqa: F811
+        constraints = [qualifier_set(object_aspect_qualifier="activity")]
+        response = lookup(
+            graph,
+            affects_query(qedge_fields={"qualifier_constraints": constraints}),
+            bmt=bmt,
+        )
+        qedge = response["message"]["query_graph"]["edges"]["e0"]
+        assert qedge["qualifier_constraints"] == constraints
+        assert "constraints" not in qedge
+
+    @pytest.mark.parametrize(
+        "qualifier_constraints",
+        [
+            "activity",
+            [{"biolink:object_aspect_qualifier": "activity"}],
+            [{"qualifier_set": [{"qualifier_type_id": "biolink:x"}]}],
+            [
+                {
+                    "qualifier_set": [
+                        {"qualifier_type_id": "biolink:x", "qualifier_value": "a"},
+                        {"qualifier_type_id": "biolink:x", "qualifier_value": "b"},
+                    ]
+                }
+            ],
+        ],
+        ids=["not-a-list", "2.0-mapping", "no-value", "type-twice"],
+    )
+    def test_malformed_qualifier_constraints_rejected(self, qualifier_constraints):
+        with pytest.raises(ConstraintError):
+            EdgeConstraints.parse({"qualifier_constraints": qualifier_constraints})
+
+    def test_both_spellings_at_once_rejected(self):
+        with pytest.raises(ConstraintError, match="not both"):
+            EdgeConstraints.parse(
+                {
+                    "qualifier_constraints": [
+                        qualifier_set(object_aspect_qualifier="a")
+                    ],
+                    "constraints": {"qualifiers": [{"biolink:x": "b"}]},
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +458,10 @@ class TestAllowDenyParsing:
 
 
 class TestKnowledgeLevelAndAgentTypeConstraints:
-    """The fixture's affects edges are all knowledge_assertion / manual_agent."""
+    """The fixture's affects edges are all knowledge_assertion / manual_agent.
+
+    Internal (2.0) constraints only: a 1.6 client cannot send these.
+    """
 
     @pytest.mark.parametrize(
         "constraints, expect_results",
@@ -248,6 +520,8 @@ class TestKnowledgeLevelAndAgentTypeConstraints:
 
 class TestSourcesConstraint:
     """The ``CHEBI:6801 --affects--> Gene`` fixture edges name two sources.
+
+    Internal (2.0) constraints only: a 1.6 client cannot send these.
 
     PPARG, INSR, GCK and TNF come from infores:ctd; INSR has a second edge from
     infores:hetio.  Gandalf adds itself as an aggregator on every edge.
@@ -392,48 +666,71 @@ class TestEndpoints:
         _, client = server
         resp = client.post("/query", json=affects_query(parameters={"timeout": 600}))
         assert resp.status_code == 200, resp.text
-        assert resp.json()["parameters"] == {"timeout": 600}
+        assert "parameters" not in resp.json()
+
+    def test_qualifier_constraints_served(self, server):
+        _, client = server
+        body = affects_query(
+            qedge_fields={
+                "qualifier_constraints": [
+                    qualifier_set(object_aspect_qualifier="activity")
+                ]
+            }
+        )
+        resp = client.post("/query", json=body)
+        assert resp.status_code == 200, resp.text
+        results = resp.json()["message"]["results"]
+        assert results
+        assert results[0]["node_bindings"]["n0"] == [
+            {"id": METFORMIN, "attributes": []}
+        ]
 
     def test_malformed_constraint_is_400(self, server):
         _, client = server
         resp = client.post(
             "/query",
-            json=affects_query({"knowledge_level": {"behavior": "SOMETIMES"}}),
+            json=affects_query(
+                qedge_fields={"qualifier_constraints": [{"qualifier_set": "x"}]}
+            ),
         )
         assert resp.status_code == 400
-        assert "behavior" in resp.json()["detail"]
+        assert "qualifier_set" in resp.json()["detail"]
 
-    @pytest.mark.parametrize(
-        "retired, replacement",
-        [
-            ("qualifier_constraints", "constraints.qualifiers"),
-            ("attribute_constraints", "constraints.attributes"),
-        ],
-    )
-    def test_retired_1x_edge_fields_are_rejected(self, server, retired, replacement):
+    def test_2_0_edge_constraints_are_rejected(self, server):
         """Silently ignoring a filter the client asked for is worse than a 400."""
         _, client = server
-        body = affects_query()
-        body["message"]["query_graph"]["edges"]["e0"][retired] = []
+        body = affects_query(
+            {"qualifiers": [{"biolink:object_aspect_qualifier": "activity"}]}
+        )
         resp = client.post("/query", json=body)
         assert resp.status_code == 400
-        assert replacement in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert "TRAPI 1.6" in detail
+        assert "qualifier_constraints" in detail
 
-    def test_retired_pathfinder_constraint_is_rejected(self, server):
+    def test_2_0_pathfinder_constraint_is_rejected(self, server):
         _, client = server
         body = affects_query()
         body["message"]["query_graph"]["paths"] = {
             "p0": {
                 "subject": "n0",
                 "object": "n1",
-                "constraints": [{"intermediate_categories": ["biolink:Gene"]}],
+                "constraints": [{"required_intermediate_categories": ["biolink:Gene"]}],
             }
         }
         resp = client.post("/query", json=body)
         assert resp.status_code == 400
-        assert "required_intermediate_categories" in resp.json()["detail"]
+        assert "intermediate_categories" in resp.json()["detail"]
+
+    def test_log_level_read_from_the_top_level(self, server):
+        """TRAPI 1.6 puts log_level on the Query itself."""
+        _, client = server
+        resp = client.post("/query", json=affects_query(log_level="DEBUG"))
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()["logs"]) > 0
 
     def test_log_level_read_from_parameters(self, server):
+        """Still honoured where the 2.0 line reads it."""
         _, client = server
         resp = client.post(
             "/query", json=affects_query(parameters={"log_level": "DEBUG"})
@@ -441,18 +738,18 @@ class TestEndpoints:
         assert resp.status_code == 200, resp.text
         assert len(resp.json()["logs"]) > 0
 
-    def test_openapi_declares_trapi_2_0(self, server):
+    def test_openapi_declares_trapi_1_6(self, server):
         gandalf_server, _ = server
         info = gandalf_server.APP.openapi()["info"]
-        assert info["x-trapi"]["version"] == "2.0.0"
+        assert info["x-trapi"]["version"] == "1.6.0"
 
 
 class TestStrictValidationMode:
     """``validate_responses`` routes requests and responses through Pydantic.
 
-    2.0 dropped ``nullable`` everywhere, so this path must not turn unset
-    optional properties into nulls, and must hand ``log_level`` on as the plain
-    string that ``logging.setLevel`` and the JSON encoder both require.
+    This path must not turn unset optional properties into nulls, and must
+    hand ``log_level`` on as the plain string that ``logging.setLevel`` and
+    the JSON encoder both require.
     """
 
     @pytest.fixture
@@ -475,11 +772,11 @@ class TestStrictValidationMode:
     def test_validated_request_round_trips(self, strict_server):
         resp = strict_server.post(
             "/query",
-            json=affects_query(parameters={"log_level": "ERROR", "timeout": 60}),
+            json=affects_query(log_level="ERROR", parameters={"timeout": 60}),
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["parameters"]["log_level"] == "ERROR"
+        assert "parameters" not in body
         assert body["message"]["results"]
 
     def test_validated_log_level_is_a_plain_string(self):
@@ -489,9 +786,9 @@ class TestStrictValidationMode:
         from gandalf.models import TRAPIQuery
 
         validated = TRAPIQuery.model_validate(
-            affects_query(parameters={"log_level": "ERROR"})
+            affects_query(log_level="ERROR")
         ).model_dump(exclude_none=True)
-        log_level = validated["parameters"]["log_level"]
+        log_level = validated["log_level"]
         assert type(log_level) is str
         logging.Logger("test").setLevel(log_level)
 
@@ -499,12 +796,12 @@ class TestStrictValidationMode:
         from gandalf.models import TRAPIResponse
 
         dumped = TRAPIResponse(
-            message={}, status="Success", schema_version="2.0.0"
+            message={}, status="Success", schema_version="1.6.0"
         ).model_dump(exclude_none=True)
         assert dumped == {
             "message": {},
             "status": "Success",
-            "schema_version": "2.0.0",
+            "schema_version": "1.6.0",
         }
 
 

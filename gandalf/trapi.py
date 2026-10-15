@@ -1,4 +1,10 @@
-"""TRAPI 2.0 protocol constants, query parameters, and Response assembly.
+"""TRAPI protocol constants, query parameters, and Response assembly.
+
+**This is the TRAPI 1.6 branch.**  Internally a response is built in the TRAPI
+2.0 shape, exactly as on the 2.0 line, and :func:`finalize_response` turns it
+into TRAPI 1.6 on the way out (``gandalf.trapi_1_6``).  The notes below
+describe that internal shape; 1.6 itself admits nulls and empty containers
+almost everywhere, so keeping to the stricter 2.0 rules costs nothing there.
 
 TRAPI 2.0 moved the query-time knobs that do not change a query's meaning
 (``log_level``, ``bypass_cache`` and the new ``timeout``) out of the request
@@ -55,7 +61,7 @@ import time
 from typing import Any, Optional, Union, cast
 
 import orjson
-from translator_tom import CURIE
+from translator_tom import CURIE, LogLevel
 from translator_tom.model_dicts import (
     AttributeDict,
     EdgeDict,
@@ -65,7 +71,6 @@ from translator_tom.model_dicts import (
     NodeDict,
     QualifierDict,
     QueryDict,
-    QueryParametersDict,
     ResponseDict,
     RetrievalSourceDict,
 )
@@ -74,11 +79,12 @@ from typing_extensions import NotRequired, TypedDict
 from gandalf.biolink import NAMED_THING
 from gandalf.config import settings
 from gandalf.logging_config import log_timestamp
+from gandalf.trapi_1_6 import fold_top_level_parameters, to_trapi_1_6
 
 logger = logging.getLogger(__name__)
 
 #: Version of the TRAPI schema this server implements.
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "1.6.0"
 
 
 class QueryTimeout(Exception):
@@ -94,7 +100,7 @@ class TimeoutNotSatisfiable(ValueError):
     """
 
 
-def resolve_timeout(parameters: Optional[QueryParametersDict]) -> Optional[float]:
+def resolve_timeout(parameters: Optional["GandalfParametersDict"]) -> Optional[float]:
     """Return the wall-clock budget in seconds for a query, or None for unlimited.
 
     Reads TRAPI 2.0's ``parameters.timeout``:
@@ -247,16 +253,20 @@ def data_release_versions() -> dict:
     return {str(name): str(version) for name, version in parsed.items()}
 
 
-class GandalfParametersDict(QueryParametersDict):
-    """TRAPI ``parameters`` plus gandalf's own, as a TypedDict.
+class GandalfParametersDict(TypedDict, total=False):
+    """Gandalf's ``parameters`` object, as a TypedDict.
 
     The TypedDict counterpart of :class:`gandalf.models.QueryParameters`, for
-    the fast request path where the body stays a plain dict.  TRAPI 2.0 gives
-    the ``parameters`` object ``additionalProperties: true`` so a server can
-    carry its own settings there; typing them means a misspelled key or a
-    wrong value type is a type error rather than a silently ignored setting.
+    the fast request path where the body stays a plain dict.  TRAPI 1.6 has
+    no ``parameters`` object: it is a gandalf extension (``Query`` admits
+    additional properties).  ``timeout`` is gandalf's too under 1.6;
+    ``log_level`` and ``bypass_cache`` are the Query's own top-level
+    properties, folded in by :func:`query_parameters`.
     """
 
+    timeout: float
+    log_level: Optional[LogLevel]
+    bypass_cache: bool
     subclass: NotRequired[bool]
     subclass_depth: NotRequired[int]
     dehydrated: NotRequired[bool]
@@ -267,6 +277,9 @@ class GandalfParametersDict(QueryParametersDict):
 
 def query_parameters(query: QueryDict) -> GandalfParametersDict:
     """Return a request's ``parameters``, or an empty object when absent.
+
+    A TRAPI 1.6 Query's top-level ``log_level`` and ``bypass_cache`` are
+    folded in (on a copy), so callers read them where the 2.0 line does.
 
     Args:
         query: A ``/query`` or ``/asyncquery`` body.
@@ -280,7 +293,8 @@ def query_parameters(query: QueryDict) -> GandalfParametersDict:
         >>> query_parameters({"message": {}, "parameters": {"subclass": False}})
         {'subclass': False}
     """
-    return cast("GandalfParametersDict", query.get("parameters") or {})
+    parameters = query.get("parameters") or {}  # type: ignore[typeddict-item]
+    return cast("GandalfParametersDict", fold_top_level_parameters(query, parameters))
 
 
 def edge_attributes(edge: Any) -> list:
@@ -623,16 +637,18 @@ def finalize_response(
     status: str = "Success",
     description: Optional[str] = None,
 ) -> ResponseDict:
-    """Stamp the TRAPI 2.0 Response envelope onto a response dict, in place.
+    """Stamp the TRAPI 1.6 Response envelope onto a response dict, in place.
 
-    Adds the version metadata every TRAPI Response should carry and echoes the
-    request's ``parameters`` back, which TRAPI 2.0 requires of the server.
-    Empty ``logs`` are dropped rather than sent as ``[]``, since 2.0 gives the
-    property a ``minItems`` of 1.
+    Adds the version metadata every TRAPI Response should carry, and turns
+    the message from the internal (2.0) shape into TRAPI 1.6
+    (:func:`gandalf.trapi_1_6.to_trapi_1_6`).  Unlike 2.0, 1.6 does not ask
+    the server to repeat the request's ``parameters``, so they are not echoed.
+    Empty ``logs`` are dropped rather than sent as ``[]``.
 
     Args:
         response: The response dict, already carrying its ``message``.
-        request: The originating request, read for its ``parameters``.
+        request: The originating request.  Unused under 1.6; kept so the
+            signature matches the 2.0 line's.
         status: A short status code for the outcome.
         description: A brief human-readable description of the outcome.
 
@@ -641,11 +657,11 @@ def finalize_response(
 
     Examples:
         >>> finalize_response({"message": {}})["schema_version"]
-        '2.0.0'
+        '1.6.0'
         >>> finalize_response({"message": {}, "logs": []}).get("logs") is None
         True
-        >>> finalize_response({"message": {}}, {"parameters": {"timeout": 30}})["parameters"]
-        {'timeout': 30}
+        >>> "parameters" in finalize_response({"message": {}}, {"parameters": {"timeout": 30}})
+        False
     """
     response["status"] = status
     if description is not None:
@@ -658,12 +674,6 @@ def finalize_response(
     if releases:
         response["data_release_versions"] = releases
 
-    # TRAPI 2.0: "The server MUST repeat the parameters it is given in its
-    # Response."
-    parameters = request.get("parameters") if request else None
-    if parameters:
-        response["parameters"] = parameters
-
     if not response.get("logs"):
         response.pop("logs", None)
 
@@ -673,7 +683,7 @@ def finalize_response(
     if isinstance(message, dict) and not message.get("auxiliary_graphs", True):
         del message["auxiliary_graphs"]
 
-    return response
+    return to_trapi_1_6(response)
 
 
 def timeout_response(

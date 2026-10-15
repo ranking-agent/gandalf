@@ -261,7 +261,7 @@ class TestLookupWithQualifierConstraints:
         response = lookup(graph, affects_genes_query(qualifier_constraints), bmt=bmt)
         results = response["message"]["results"]
 
-        assert {r["node_bindings"]["n1"]["ids"][0] for r in results} == expected_genes
+        assert {r["node_bindings"]["n1"][0]["id"] for r in results} == expected_genes
         assert len(results) == len(expected_genes)
 
     def test_no_qualifier_constraints_returns_all(self, graph, bmt):

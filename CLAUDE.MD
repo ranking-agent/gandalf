@@ -60,7 +60,8 @@ gandalf/
 ├── loader.py         # JSONL to graph conversion
 ├── edge_id_store.py  # Original edge IDs (memory-mapped JSON blob)
 ├── node_annotations.py  # Build-time node annotation (biothings_annotator)
-├── trapi.py          # TRAPI 2.0 envelope, query parameters, timeouts
+├── trapi.py          # TRAPI envelope, query parameters, timeouts
+├── trapi_1_6.py      # TRAPI 1.6 branch only: 1.6 <-> internal (2.0) shapes
 ├── search/           # Search & path finding (package)
 │   ├── __init__.py       # Re-exports public API
 │   ├── lookup.py         # Main TRAPI lookup entry point
@@ -270,10 +271,99 @@ first query to finish turns GC back on under the others.
 
 TOM requires Python >= 3.10, which is why gandalf's floor is 3.10.
 
+## TRAPI 1.6 branch
+
+**This branch serves TRAPI 1.6; `devel` serves TRAPI 2.0.**  It exists to
+release current gandalf to Translator deployments still on 1.6, and is kept
+up to date by merging `devel` into it.  Everything else in this file describes
+the code both lines share; where it says "2.0", read it as the *internal*
+shape this branch converts from.
+
+### Design: 2.0 inside, 1.6 at the edges
+
+The branch changes as little as possible so merges stay cheap:
+
+- **The graph format is identical.**  A graph built by either line is served
+  by both; nothing here touches the loader, `graph.py` or the stores.
+- **Responses are built in the 2.0 shape and converted on the way out**, by
+  `gandalf.trapi_1_6.to_trapi_1_6`, called from `trapi.finalize_response`
+  (so lookup, rehydrate, timeout and error responses are all covered) and
+  again in `execute.run_query` after response annotators, which may add
+  2.0-shaped edges.  It is idempotent.  It converts bindings
+  (`{"ids": [x]}` -> `[{"id": x, "attributes": []}]`, keeping shared
+  bindings shared), adds `Result.analyses: []`, `AuxiliaryGraph.attributes`
+  and `Node.attributes`, and moves `knowledge_level` / `agent_type` into the
+  edge's attributes -- splicing them into attributes still held as stored
+  JSON bytes, byte-identical to appending to the decoded list.
+- **Results written straight to JSON** (`_single_path_json`) are written in
+  the 1.6 shape directly: its template in `search/lookup.py` is one of the
+  few lines of the search code this branch changes.  It must stay
+  byte-identical to the converted dict results
+  (`tests/test_results_as_json.py`, `tests/test_single_path_fast_path.py`).
+- **Requests**: a QEdge's 1.6 `qualifier_constraints` /
+  `attribute_constraints` are read into the internal `constraints` object by
+  `trapi_1_6.qedge_constraints`, called from `EdgeConstraints.parse`.
+  `lookup()` still accepts a `constraints` object directly (so `devel`'s
+  constraint tests run here unchanged), but the server rejects one from an
+  HTTP client with a 400 naming the 1.6 fields
+  (`request_validation.reject_retired_trapi_fields`, inverted here).
+  `trapi.query_parameters` folds the 1.6 top-level `log_level` /
+  `bypass_cache` into the `parameters` it returns.
+- `finalize_response` stamps `schema_version` 1.6.0 and does **not** echo
+  `parameters` (a 2.0 rule).  `x-trapi.version` is 1.6.0.
+- **TOM is pinned to the 1.x line** (`translator_tom>=1.7.0,<2`), which models
+  TRAPI 1.6.  It has no `QueryParameters`, so `models.QueryParameters` and
+  `trapi.GandalfParametersDict` are standalone here.  COLLATE is not a 1.6
+  `set_interpretation`: the default request path still serves it, strict
+  (`validate_responses`) mode rejects it.
+- Code that reads results after conversion (`gandalf/validation.py`, the
+  benchmark scripts) reads bindings through `trapi_1_6.bound_ids`, which
+  takes either shape.
+
+### Tests
+
+`tests/test_trapi_2_0.py` is renamed `tests/test_trapi_1_6.py` and holds the
+1.6 contract; `tests/test_trapi_conformance.py` validates against TOM 1.x, so
+it checks 1.6.  Tests read 1.6 shapes through `tests/trapi_1_6_helpers.py`
+(`binding_ids`, `knowledge_level`, `agent_type`): `r["node_bindings"]["n0"]
+["ids"][0]` on `devel` is `r["node_bindings"]["n0"][0]["id"]` here.
+
+### Updating from `devel`
+
+```bash
+git fetch origin devel
+git merge origin/devel          # never rebase: this branch is long-lived
+pip install -e ".[dev]"         # keeps translator_tom on 1.x
+python -m pytest
+black --check gandalf/ tests/ scripts/
+mypy gandalf/ --ignore-missing-imports
+```
+
+Where conflicts and breakage show up, and what to do:
+
+- **New or changed tests** that read 2.0 shapes (`["ids"]`,
+  `edge["knowledge_level"]`, `response["parameters"]`, `schema_version
+  "2.0.0"`) fail here: convert them with the helpers above.  Tests that
+  *send* a `constraints` object through `lookup()` need nothing; ones that
+  send it to the HTTP server must use the 1.6 fields.
+- **`_single_path_json` / the Result shape in `_build_response`**: a change
+  to the result shape on `devel` must be mirrored in the 1.6 template here.
+- **New response properties or shapes on `devel`** (a new binding field, a
+  new required 2.0 property): decide whether 1.6 has it, and extend
+  `to_trapi_1_6` rather than the builders.
+- **New request fields on `devel`** that 1.6 spells differently: translate in
+  `trapi_1_6` and, if a 2.0 spelling would otherwise be silently ignored,
+  reject it in `reject_retired_trapi_fields`.
+- **`pyproject.toml` / `requirements.txt`**: keep `translator_tom>=1.7.0,<2`
+  when `devel` bumps TOM; new TOM 2.x imports may not exist in 1.x.
+- **Graph format changes** come across untouched -- the rebuild notes on
+  `devel` apply here too.
+
 ## TRAPI version
 
-The server implements **TRAPI 2.0** (`x-trapi.version` in
-`gandalf/openapi-config.yaml`). Things 2.0 changed that the code depends on:
+On `devel` the server implements **TRAPI 2.0**; on this branch it converts
+that to **TRAPI 1.6** at the boundaries (see "TRAPI 1.6 branch" above).
+Things 2.0 changed that the shared code depends on:
 
 - A NodeBinding / EdgeBinding / PathBinding is one object with an `ids` array,
   not a list of objects each with an `id`.

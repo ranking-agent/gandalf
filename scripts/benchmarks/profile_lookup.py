@@ -59,8 +59,8 @@ def shape_stats(response: dict) -> list[str]:
         n = 0
         for analysis in result.get("analyses") or []:
             for binding in analysis["edge_bindings"].values():
-                n += len(binding["ids"])
-                bound_by.update(binding["ids"])
+                n += len(binding)
+                bound_by.update(b["id"] for b in binding)
         bindings += n
         edges_per_result.append(n)
 

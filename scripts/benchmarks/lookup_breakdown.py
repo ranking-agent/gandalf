@@ -882,7 +882,8 @@ def _result_count(results: list) -> int:
 def _binding_stats(results: list) -> dict:
     """Binding objects in the results against the distinct IDs they bind.
 
-    A binding of exactly ``{"ids": [x]}`` could be one object per ID shared
+    A binding of exactly ``[{"id": x, "attributes": []}]`` (TRAPI 1.6) could
+    be one object per ID shared
     by every result that binds ``x``; this counts how many separate objects
     there are now and what sharing them would save.  Results written as JSON
     hold no binding objects, so only the dict results count.
@@ -898,8 +899,8 @@ def _binding_stats(results: list) -> dict:
         for bindings in groups:
             for binding in bindings:
                 total += 1
-                ids = binding.get("ids")
-                if len(binding) == 1 and ids is not None and len(ids) == 1:
+                ids = [b.get("id") for b in binding]
+                if len(ids) == 1:
                     single += 1
                     seen = first.get(ids[0])
                     if seen is None:
@@ -1084,16 +1085,16 @@ def breakdown(
         aux = message.get("auxiliary_graphs") or {}
         dict_results = [r for r in results if type(r) is not bytes]
         node_bindings = sum(
-            len(b["ids"]) for r in dict_results for b in r["node_bindings"].values()
+            len(b) for r in dict_results for b in r["node_bindings"].values()
         )
         edge_bindings = sum(
-            len(b["ids"])
+            len(b)
             for r in dict_results
             for a in r.get("analyses") or ()
             for b in a["edge_bindings"].values()
         )
         # Every binding a written result holds binds one ID.
-        written_bindings = _count_written(results, b'"ids":[')
+        written_bindings = _count_written(results, b'"id":')
         rec["kg"] = {
             "nodes": len(kg["nodes"]),
             "edges": len(kg["edges"]),

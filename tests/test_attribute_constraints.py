@@ -491,7 +491,7 @@ class TestNodeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_node_constraint_less_than_ic(self, graph, bmt):
@@ -532,7 +532,7 @@ class TestNodeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:2645"
+        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:2645"
 
     def test_node_constraint_not_negation(self, graph, bmt):
         """Negated node constraint should exclude matching nodes.
@@ -573,7 +573,7 @@ class TestNodeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n0"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n0"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:3643", "NCBIGene:2645"}
 
     def test_empty_constraints_no_filtering(self, graph, bmt):
@@ -649,7 +649,7 @@ class TestNodeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643"}
 
     def test_node_constraint_filters_all_returns_empty(self, graph, bmt):
@@ -731,9 +731,7 @@ class TestEdgeAttributeConstraintsIntegration:
 
         response = lookup(graph, query, bmt=bmt)
         results = response["message"]["results"]
-        assert {r["node_bindings"]["n1"]["ids"][0] for r in results} == {
-            "NCBIGene:5468"
-        }
+        assert {r["node_bindings"]["n1"][0]["id"] for r in results} == {"NCBIGene:5468"}
 
     def test_edge_constraint_knowledge_level_no_match(self, graph, bmt):
         """No edges have knowledge_level=prediction, so all should be filtered out."""
@@ -811,7 +809,7 @@ class TestEdgeAttributeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468"}
 
     def test_edge_constraint_not_negation(self, graph, bmt):
@@ -833,7 +831,7 @@ class TestEdgeAttributeConstraintsIntegration:
 
         response = lookup(graph, query, bmt=bmt)
         gene_ids = {
-            r["node_bindings"]["n1"]["ids"][0] for r in response["message"]["results"]
+            r["node_bindings"]["n1"][0]["id"] for r in response["message"]["results"]
         }
         assert gene_ids == {"NCBIGene:3643", "NCBIGene:2645", "NCBIGene:7124"}
 
@@ -947,7 +945,7 @@ class TestEdgeAttributeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468"}
 
     def test_edge_constraint_backward_search(self, graph, bmt):
@@ -992,7 +990,7 @@ class TestEdgeAttributeConstraintsIntegration:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
 
     def test_edge_constraint_both_pinned(self, graph, bmt):
         """Edge constraints.attributes work when both ends are pinned.
@@ -1101,7 +1099,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_evidence_count_greater_than(self, graph, bmt):
@@ -1138,7 +1136,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 2
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_p_value_and_evidence_count_combined(self, graph, bmt):
@@ -1188,7 +1186,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 3
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:3643", "NCBIGene:7124"}
 
     def test_very_strict_p_value_filters_all(self, graph, bmt):
@@ -1259,7 +1257,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:7124"
+        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:7124"
 
     def test_p_value_backward_search(self, graph, bmt):
         """Numeric edge constraints work in backward search.
@@ -1303,7 +1301,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
 
     def test_evidence_count_two_hop_with_edge_constraint(self, graph, bmt):
         """Edge constraints on a two-hop query filter the constrained hop only.
@@ -1350,7 +1348,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
 
     def test_node_and_numeric_edge_constraints_combined(self, graph, bmt):
         """Combine node IC constraint with numeric edge constraint.
@@ -1402,7 +1400,7 @@ class TestNumericEdgeConstraints:
         results = response["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:7124"
+        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:7124"
 
 
 # ---------------------------------------------------------------------------
@@ -1652,7 +1650,7 @@ class TestPubMedEdgeFiltering:
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
 
     def test_several_pmids_keep_every_cited_edge(self, graph, bmt):
         query = _pmid_query(
@@ -1663,7 +1661,7 @@ class TestPubMedEdgeFiltering:
         )
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert gene_ids == {"NCBIGene:5468", "NCBIGene:7124"}
 
     def test_bare_accession_is_accepted(self, graph, bmt):
@@ -1676,7 +1674,7 @@ class TestPubMedEdgeFiltering:
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
 
     def test_unknown_pmid_yields_no_results(self, graph, bmt):
         query = _pmid_query(
@@ -1697,7 +1695,7 @@ class TestPubMedEdgeFiltering:
         )
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
-        gene_ids = {r["node_bindings"]["n1"]["ids"][0] for r in results}
+        gene_ids = {r["node_bindings"]["n1"][0]["id"] for r in results}
         assert "NCBIGene:5468" not in gene_ids
         assert gene_ids == {"NCBIGene:3643", "NCBIGene:2645", "NCBIGene:7124"}
 
@@ -1712,7 +1710,7 @@ class TestPubMedEdgeFiltering:
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n0"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n0"][0]["id"] == "NCBIGene:5468"
 
     def test_both_pinned_selects_one_of_two_parallel_edges(self, graph, bmt):
         """Metformin --treats--> T2D has a drugcentral edge (PMID:12345678)
@@ -1773,7 +1771,7 @@ class TestPubMedEdgeFiltering:
         results = lookup(graph, query, bmt=bmt)["message"]["results"]
 
         assert len(results) == 1
-        assert results[0]["node_bindings"]["n1"]["ids"][0] == "NCBIGene:5468"
+        assert results[0]["node_bindings"]["n1"][0]["id"] == "NCBIGene:5468"
 
     def test_two_hop_query_with_conflicting_pmids_yields_nothing(self, graph, bmt):
         """The second hop's PMID belongs to a different gene's edge."""
