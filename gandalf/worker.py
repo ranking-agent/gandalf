@@ -100,7 +100,7 @@ class Worker:
         consumer: str,
         max_jobs: int = 0,
         block_seconds: float = 5.0,
-        keepalive_seconds: float = 30.0,
+        keepalive_seconds: float = 15.0,
         heartbeat_file: str = "",
         registry: Optional[WorkerRegistry] = None,
         history: Optional[JobHistory] = None,

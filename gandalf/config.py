@@ -105,11 +105,19 @@ class Settings(BaseSettings):
     # is dead-lettered instead of run again.
     queue_max_deliveries: int = 2
     # A running job idle in the consumer group for longer than this is taken
-    # over by another worker; workers refresh their job every
-    # queue_keepalive_seconds while it runs, so only a dead worker's job
-    # goes idle.
-    queue_claim_idle_seconds: float = 120.0
-    queue_keepalive_seconds: float = 30.0
+    # over by another worker.  Idle time counts from the worker's last
+    # keepalive, not from delivery: a worker refreshes its job every
+    # queue_keepalive_seconds while it runs, however long the query takes,
+    # so only a dead worker's job goes idle.  Keep the claim threshold
+    # several keepalives long (three, by default) or a stalled Redis round
+    # trip hands a live worker's job to a second worker.
+    queue_claim_idle_seconds: float = 45.0
+    queue_keepalive_seconds: float = 15.0
+    # Delivering an /asyncquery result: a connection failure, timeout or 5xx
+    # from the callback is retried this many times in all, waiting
+    # callback_backoff_seconds then double that between tries.
+    callback_attempts: int = 3
+    callback_backoff_seconds: float = 2.0
     # How long a worker blocks waiting for a job before checking for
     # shutdown and refreshing its liveness heartbeat.
     queue_block_seconds: float = 5.0

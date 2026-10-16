@@ -39,9 +39,11 @@ Both tiers run the same image; the worker overrides the command with
   SIGTERM makes the worker finish its current job before exiting, and a
   KEDA scale-down or a rollout sends SIGTERM.
 - **`queue_claim_idle_seconds` vs. `queue_keepalive_seconds`.** A running
-  worker refreshes its job every `keepalive` seconds; a job idle for longer
-  than `claim_idle` is taken over by another worker as abandoned.  Keep
-  `claim_idle` several keepalives long.
+  worker refreshes its job every `keepalive` seconds (15); a job idle for
+  longer than `claim_idle` (45) is taken over by another worker as
+  abandoned, so a killed worker's job restarts elsewhere within a minute.
+  Idle counts from the last keepalive, not from delivery, so a long query is
+  safe.  Keep `claim_idle` at least three keepalives long.
 - **Result sizes in Redis.** `/query` results are stored zstd-compressed
   until the API collects them (seconds, normally; `result_ttl_seconds` at
   most).  Size Redis for a few in-flight results, compressed.  Async
