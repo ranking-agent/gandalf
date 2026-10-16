@@ -289,7 +289,8 @@ def open_queue() -> None:
         WORKERS,
         NOTIFIER,
         interval_seconds=settings.monitor_interval_seconds,
-        lag_threshold=settings.alert_queue_lag_threshold,
+        lag_per_worker=settings.alert_queue_lag_per_worker,
+        backlog_seconds=settings.alert_queue_backlog_seconds,
         stuck_seconds=settings.alert_stuck_seconds,
     )
     MONITOR.start()
@@ -487,6 +488,13 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def root():
     """Redirect to API documentation."""
     return RedirectResponse(url="/docs")
+
+
+@APP.head("/", include_in_schema=False)
+@APP.head("/health", include_in_schema=False)
+async def head_alive() -> Response:
+    """Liveness for checkers that send a bare ``HEAD``: 200, no body."""
+    return Response(status_code=200)
 
 
 # ---------------------------------------------------------------------------

@@ -146,7 +146,11 @@ class Settings(BaseSettings):
     slack_throttle_seconds: float = 300.0
     # Monitor (runs in the API; one active instance across all pods).
     monitor_interval_seconds: float = 15.0
-    alert_queue_lag_threshold: int = 5
+    # queue_backlog fires when the jobs waiting for a worker have stayed at
+    # or over alert_queue_lag_per_worker x the live workers (at least one)
+    # for alert_queue_backlog_seconds, on every look the monitor took.
+    alert_queue_lag_per_worker: int = 50
+    alert_queue_backlog_seconds: float = 60.0
     alert_stuck_seconds: float = 1800.0
     alert_log_maxlen: int = 500
 
