@@ -99,20 +99,25 @@ class TestResponseEnvelope:
     def test_response_omits_parameters_when_not_given(self, graph, bmt):  # noqa: F811
         assert "parameters" not in lookup(graph, affects_query(), bmt=bmt)
 
-    def test_data_release_versions_reported_when_configured(
+    def test_data_release_versions_from_graph_metadata(
         self, graph, bmt, monkeypatch  # noqa: F811
     ):
         from gandalf import trapi
 
         monkeypatch.setattr(
-            trapi.settings, "data_release_versions", '{"translator_kg": "2026_06_21"}'
+            graph, "graph_metadata", {"version": "2026_06_21"}, raising=False
         )
         response = lookup(graph, affects_query(), bmt=bmt)
-        assert response["data_release_versions"] == {"translator_kg": "2026_06_21"}
+        assert response["data_release_versions"] == {
+            trapi.settings.infores: "2026_06_21"
+        }
 
-    def test_data_release_versions_omitted_when_unconfigured(
-        self, graph, bmt  # noqa: F811
+    def test_data_release_versions_omitted_without_metadata_version(
+        self, graph, bmt, monkeypatch  # noqa: F811
     ):
+        monkeypatch.setattr(graph, "graph_metadata", None, raising=False)
+        assert "data_release_versions" not in lookup(graph, affects_query(), bmt=bmt)
+        monkeypatch.setattr(graph, "graph_metadata", {"name": "kg"})
         assert "data_release_versions" not in lookup(graph, affects_query(), bmt=bmt)
 
 

@@ -186,13 +186,13 @@ def lookup(
                 logs = log_collector.get_logs()
                 if profile:
                     logs.extend(prof.to_log_entries())
-                return timeout_response(query, deadline, logs)
+                return timeout_response(query, deadline, logs, graph=graph)
 
             logs = log_collector.get_logs()
             if profile:
                 logs.extend(prof.to_log_entries())
             response["logs"] = logs
-        return finalize_response(response, query)
+        return finalize_response(response, query, graph=graph)
     finally:
         if lmdb_originals is not None:
             restore_lmdb_hook(getattr(graph, "lmdb_store", None), lmdb_originals)
