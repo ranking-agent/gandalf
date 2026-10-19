@@ -743,7 +743,7 @@ def _single_path_json(
         len_edges = id_lengths(u_edges)
         with_ids = (len_edges[e_inv] > 0).reshape(-1, m).all(axis=1)
         if not with_ids.all():
-            # An edge without an ID gets a fresh one per result: the loop's.
+            # An edge without an ID is left to the loop, for its stand-in id.
             fast_groups = fast_groups[with_ids]
             fast_rows = fast_rows[with_ids]
             u_edges, e_first, e_inv = unique_edges(fast_rows)
@@ -1470,8 +1470,8 @@ def _build_response(
         # The edge dict itself goes into kg_edges rather than a copy: it sits
         # under one KG ID only (its edge's), the general loop only ever
         # changes copies of it, and the cache holding it is dropped when this
-        # function returns.  An edge with no ID gets a fresh uuid per result,
-        # as in the general loop, and so a copy of its own.
+        # function returns.  An edge with no ID goes under its stand-in id,
+        # as in the general loop.
         if (
             single_path_fast
             and len(rows_nodes) == 1
@@ -1514,10 +1514,7 @@ def _build_response(
                             edge_urls_map.get(fwd_eidx),
                         )
                         edge_templates[fwd_eidx] = edge
-                edge_kg_id = edge_id_map.get(fwd_eidx)
-                if not edge_kg_id:
-                    edge_kg_id = str(uuid.uuid4())[:8]
-                    edge = edge.copy()
+                edge_kg_id = edge_id_map.get(fwd_eidx) or _stand_in_id(fwd_eidx)
                 kg_edges[edge_kg_id] = edge
                 shared = shared_bindings.get(edge_kg_id)
                 if shared is None:
