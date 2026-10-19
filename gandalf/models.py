@@ -196,6 +196,18 @@ class QueryParameters(TRAPIQueryParameters):
         "enrichment). Automatically enabled when path count exceeds the large "
         "result threshold.",
     )
+    pairs: Optional[List[List[str]]] = Field(
+        None,
+        description="[subject_id, object_id] pairs restricting a one-hop "
+        "query with both ends pinned: edges are returned only between a listed "
+        "pair, not between every pinned subject and object. Requires a single "
+        "query edge and subclass false.",
+    )
+    kg_only: Optional[bool] = Field(
+        None,
+        description="When true, return the knowledge graph and auxiliary "
+        "graphs with no results.",
+    )
     rehydrate: Optional[bool] = Field(
         None,
         description="When true, skip lookup entirely and only enrich the "

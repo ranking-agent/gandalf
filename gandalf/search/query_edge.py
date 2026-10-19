@@ -2,6 +2,7 @@
 
 import logging
 import time
+from collections import defaultdict
 from typing import Optional
 
 from gandalf.profiler import current_profiler
@@ -103,6 +104,7 @@ def query_edge(
     node_filters: Optional[list[NodeFilter]] = None,
     start_node_constraints: Optional[list] = None,
     end_node_constraints: Optional[list] = None,
+    pair_targets: Optional[dict[int, set[int]]] = None,
     logger: Optional[logging.Logger] = None,
 ):
     """Query for a single edge with given constraints.
@@ -131,6 +133,9 @@ def query_edge(
             filtering the start (subject) node by its attributes.
         end_node_constraints: List of TRAPI AttributeConstraint dicts for
             filtering the end (object) node by its attributes.
+        pair_targets: Each start node's allowed end nodes, when both ends are
+            pinned: an edge then matches only between a listed pair, not
+            between any start and any end.  None allows every pair.
         logger: Logger to emit this query's records to.  ``lookup`` passes the
             query's own logger so that entries reach that query's TRAPI logs
             and no other's.  Defaults to the module logger.
@@ -254,6 +259,7 @@ def query_edge(
                 add_match,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
+                pair_targets=pair_targets,
                 logger=logger,
             )
 
@@ -539,11 +545,14 @@ def _query_both_pinned(
     add_match,
     start_node_constraints=None,
     end_node_constraints=None,
+    pair_targets=None,
     logger: Optional[logging.Logger] = None,
 ):
     """Case 3: Both ends pinned - intersection search.
 
-    Predicate masks are as for :func:`_query_forward`.
+    Predicate masks are as for :func:`_query_forward`.  With
+    ``pair_targets``, each start node is searched for its own allowed ends
+    only, and each end node, in the inverse pass, for the starts that list it.
     """
     logger = logger if logger is not None else logging.getLogger(__name__)
     logger.debug(
@@ -557,6 +566,17 @@ def _query_both_pinned(
     # This avoids property-dict allocations for edges whose target is not
     # in end_set (the vast majority in typical queries).
     end_set = set(end_idxes)
+    start_set = set(start_idxes)
+    targets_by_start = None
+    sources_by_end: dict[int, set[int]] = defaultdict(set)
+    if pair_targets is not None:
+        targets_by_start = {
+            start_idx: pair_targets.get(start_idx, set()) & end_set
+            for start_idx in start_set
+        }
+        for start_idx, targets in targets_by_start.items():
+            for end_idx in targets:
+                sources_by_end[end_idx].add(start_idx)
 
     # Both ends are pinned, so categories and node filters are not rechecked:
     # only each end's attribute constraints apply.  An end is pinned either by
@@ -570,6 +590,9 @@ def _query_both_pinned(
     slow_nodes = []
 
     for start_idx in start_idxes:
+        targets = end_set if targets_by_start is None else targets_by_start[start_idx]
+        if not targets:
+            continue
         # Check node filters and attribute constraints on the start node
         if start_ok is not None and not start_ok(start_idx):
             continue
@@ -589,7 +612,7 @@ def _query_both_pinned(
             props,
             fwd_edge_idx,
         ) in graph.neighbors_filtered_by_targets(
-            start_idx, end_set, predicate_mask=forward_mask
+            start_idx, targets, predicate_mask=forward_mask
         ):
             # Check node filters and attribute constraints on the end node
             if end_ok is not None and not end_ok(obj_idx):
@@ -612,8 +635,10 @@ def _query_both_pinned(
     # Also check reverse direction for symmetric/inverse predicates
     # Look for edges: end_node --inverse(P)--> start_node
     if check_inverse:
-        start_set = set(start_idxes)
         for end_idx in end_idxes:
+            sources = start_set if targets_by_start is None else sources_by_end[end_idx]
+            if not sources:
+                continue
             # Check node filters and attribute constraints on the end node
             if end_ok is not None and not end_ok(end_idx):
                 continue
@@ -624,7 +649,7 @@ def _query_both_pinned(
                 props,
                 fwd_edge_idx,
             ) in graph.neighbors_filtered_by_targets(
-                end_idx, start_set, predicate_mask=inverse_mask
+                end_idx, sources, predicate_mask=inverse_mask
             ):
                 total_neighbors += 1
 

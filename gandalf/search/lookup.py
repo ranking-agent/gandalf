@@ -58,6 +58,8 @@ def lookup(
     deadline=None,
     attributes_as_json: bool = False,
     results_as_json: bool = False,
+    pairs: Optional[list] = None,
+    kg_only: bool = False,
 ):
     """Take an arbitrary Translator query graph and return all matching paths.
 
@@ -96,6 +98,17 @@ def lookup(
             Read them through :func:`~gandalf.trapi.response_results`.  The
             serialized response is byte-identical either way.  If False
             (default), every result is a dict.
+        pairs: Optional ``[subject_id, object_id]`` pairs restricting a
+            one-hop query whose ends are both pinned: an edge matches only
+            between the two ids of a listed pair, rather than between any
+            pinned subject and any pinned object.  Pinning n subjects and m
+            objects to get k specific pairs otherwise returns the edges of
+            all n * m pairs.  The pair is in query direction, so an edge
+            matched through its inverse counts for the pair it answers.
+            ``request_validation.validate_pairs`` holds the request shape it
+            needs (one edge, both ends pinned, no subclass expansion).
+        kg_only: If True, return the knowledge graph (and auxiliary graphs)
+            with no results, for a caller that only wants the edges.
         profile: If True, capture per-stage timings (BMT init, per-qedge
             query, path reconstruction, response building, LMDB enrichment,
             annotators) and append them to ``response["logs"]`` as TRAPI
@@ -177,6 +190,8 @@ def lookup(
                     deadline=deadline,
                     attributes_as_json=attributes_as_json,
                     results_as_json=results_as_json,
+                    pairs=pairs,
+                    kg_only=kg_only,
                 )
             except QueryTimeout as exc:
                 # Report the overrun as a TRAPI outcome rather than an error:
@@ -216,6 +231,8 @@ def _lookup_inner(
     deadline=None,
     attributes_as_json: bool = False,
     results_as_json: bool = False,
+    pairs: Optional[list] = None,
+    kg_only: bool = False,
 ):
     """Inner implementation of lookup with all the core logic.
 
@@ -294,6 +311,8 @@ def _lookup_inner(
         for qnode_id, qnode in subqgraph["nodes"].items()
         if len(qnode.get("ids", [])) > 0
     }
+    # The pairs, as each subject's allowed objects by graph index.
+    pair_targets = _resolve_pairs(graph, pairs) if pairs is not None else None
     # Binding counts that replace a qnode's own ids for the query planner:
     # set once an edge query has discovered the qnode's nodes.
     discovered_counts: dict[str, int] = {}
@@ -399,6 +418,7 @@ def _lookup_inner(
                 node_filters=edge_node_filters,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
+                pair_targets=pair_targets,
                 logger=logger,
             )
 
@@ -512,6 +532,11 @@ def _lookup_inner(
                 attributes_as_json=attributes_as_json,
                 results_as_json=results_as_json,
             )
+
+    if kg_only:
+        # The knowledge graph is filled while the results are built, so they
+        # are built all the same and only left out of the response.
+        response["message"]["results"] = []
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
     # The monitor is still accumulating events until stop() is called there.
@@ -1812,6 +1837,18 @@ def _resolve_node_idxes(graph, node_ids) -> list[int]:
     """Map node IDs to graph indices, dropping IDs the graph does not contain."""
     idxes = (graph.get_node_idx(node_id) for node_id in node_ids)
     return [idx for idx in idxes if idx is not None]
+
+
+def _resolve_pairs(graph, pairs) -> dict[int, set[int]]:
+    """Map ``[subject_id, object_id]`` pairs to each subject's allowed
+    objects by graph index, dropping pairs with an ID the graph lacks."""
+    targets: dict[int, set[int]] = defaultdict(set)
+    for subject_id, object_id in pairs:
+        subject_idx = graph.get_node_idx(subject_id)
+        object_idx = graph.get_node_idx(object_id)
+        if subject_idx is not None and object_idx is not None:
+            targets[subject_idx].add(object_idx)
+    return dict(targets)
 
 
 def _rewrite_for_subclass(query_graph, subclass_depth=1):

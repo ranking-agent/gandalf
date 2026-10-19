@@ -188,6 +188,8 @@ def run_query(
         deadline=deadline,
         attributes_as_json=as_json,
         results_as_json=as_json,
+        pairs=params.get("pairs"),
+        kg_only=params.get("kg_only", False),
     )
     if annotator_config:
         annotate_response(response, graph, annotator_config)

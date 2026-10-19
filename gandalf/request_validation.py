@@ -240,3 +240,44 @@ def validate_edge_node_references(query_graph: QueryGraphDict) -> None:
                     f"edge '{qedge_id}' references missing {endpoint} node "
                     f"'{node_ref}'",
                 )
+
+
+def validate_pairs(query_graph: QueryGraphDict, parameters: Optional[dict]) -> None:
+    """Validate ``parameters.pairs`` against the query graph it restricts.
+
+    ``pairs`` restricts a one-hop lookup between pinned ends to listed
+    ``[subject_id, object_id]`` pairs (see ``lookup``).  It is defined for a
+    query graph of one edge with both ends pinned, and only without subclass
+    expansion, which unpins the ends and binds their subclass children
+    instead, so a pair would no longer name the nodes an edge joins.  Any
+    other shape would silently ignore the pairs, so it is a 400 instead.
+
+    Raises ``HTTPException(400)`` for malformed pairs or a query graph they
+    cannot restrict.
+    """
+    parameters = parameters or {}
+    pairs = parameters.get("pairs")
+    if pairs is None:
+        return
+    if not isinstance(pairs, list) or not all(
+        isinstance(pair, list)
+        and len(pair) == 2
+        and all(isinstance(node_id, str) for node_id in pair)
+        for pair in pairs
+    ):
+        raise HTTPException(
+            400, "parameters.pairs must be a list of [subject_id, object_id] pairs"
+        )
+    edges = query_graph.get("edges") or {}
+    if len(edges) != 1:
+        raise HTTPException(
+            400, "parameters.pairs requires a query graph with exactly one edge"
+        )
+    qedge = next(iter(edges.values()))
+    nodes = query_graph.get("nodes") or {}
+    if not all(nodes[qedge[end]].get("ids") for end in ("subject", "object")):
+        raise HTTPException(
+            400, "parameters.pairs requires both ends of the edge to be pinned"
+        )
+    if parameters.get("subclass", True):
+        raise HTTPException(400, "parameters.pairs requires 'subclass': false")

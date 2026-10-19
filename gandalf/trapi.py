@@ -260,6 +260,8 @@ class GandalfParametersDict(QueryParametersDict):
     subclass: NotRequired[bool]
     subclass_depth: NotRequired[int]
     dehydrated: NotRequired[bool]
+    pairs: NotRequired[list[list[str]]]
+    kg_only: NotRequired[bool]
     rehydrate: NotRequired[bool]
     filter_config: NotRequired[dict[str, Any]]
     annotator_config: NotRequired[dict[str, Any]]
