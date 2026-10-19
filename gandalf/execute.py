@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import gc
 import logging
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 import orjson
@@ -231,6 +232,9 @@ def post_callback(
     body: bytes,
     trace_headers: Optional[dict[str, str]] = None,
     timeout_seconds: float = 600.0,
+    attempts: Optional[int] = None,
+    backoff_seconds: Optional[float] = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
     """POST a serialized Response to an ``/asyncquery`` client's callback.
 
@@ -240,18 +244,61 @@ def post_callback(
     auto-instrumented and neither a background thread nor a worker process
     inherits the request's context.
 
+    The result took a worker seconds to minutes to compute, so a receiver
+    that is briefly unavailable gets more than one chance: a connection
+    failure, a timeout or a 5xx is retried up to *attempts* times
+    (``settings.callback_attempts``), waiting *backoff_seconds* and then
+    double that between tries.  A 4xx is the receiver's answer and is not
+    retried.
+
     Returns:
         Whether the callback accepted the result.  A failure is logged, not
         raised: there is nobody left to raise it to.
     """
+    attempts = settings.callback_attempts if attempts is None else attempts
+    backoff = (
+        settings.callback_backoff_seconds
+        if backoff_seconds is None
+        else backoff_seconds
+    )
     headers = dict(trace_headers or {})
     headers["Content-Type"] = "application/json"
-    try:
-        with httpx.Client(timeout=httpx.Timeout(timeout=timeout_seconds)) as client:
-            res = client.post(callback_url, content=body, headers=headers)
-            res.raise_for_status()
-    except Exception:
-        logger.exception("Callback to %s failed", callback_url)
-        return False
-    logger.info("Posted to %s with code %s", callback_url, res.status_code)
-    return True
+    with httpx.Client(timeout=httpx.Timeout(timeout=timeout_seconds)) as client:
+        for attempt in range(1, max(attempts, 1) + 1):
+            try:
+                res = client.post(callback_url, content=body, headers=headers)
+            except httpx.HTTPError as exc:
+                failure = f"{type(exc).__name__}: {exc}"
+            else:
+                if res.status_code < 400:
+                    logger.info(
+                        "Posted to %s with code %s", callback_url, res.status_code
+                    )
+                    return True
+                failure = f"HTTP {res.status_code}"
+                if res.status_code < 500:
+                    logger.error(
+                        "Callback to %s refused the result (%s); not retrying",
+                        callback_url,
+                        failure,
+                    )
+                    return False
+            if attempt == attempts:
+                break
+            delay = backoff * 2 ** (attempt - 1)
+            logger.warning(
+                "Callback to %s failed (%s); retry %d/%d in %.0fs",
+                callback_url,
+                failure,
+                attempt + 1,
+                attempts,
+                delay,
+            )
+            sleep(delay)
+    logger.error(
+        "Callback to %s failed after %d attempts (%s); the result is lost",
+        callback_url,
+        attempts,
+        failure,
+    )
+    return False

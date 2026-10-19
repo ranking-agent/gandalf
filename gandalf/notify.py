@@ -15,8 +15,8 @@ Who emits what, so each event fires once however many processes run:
   process of which exactly one is active at a time (a Redis lock elects it;
   if that process dies the lock expires and another takes over).  It notices
   workers that disappeared without a clean exit (an OOM kill), a backlog
-  over the threshold (and its clearing), and a job stuck longer than a
-  query should take.
+  over the threshold for longer than a moment (and its clearing), and a
+  job stuck longer than a query should take.
 
 Noisy kinds (``job_failed``, ``job_retried``) are throttled per kind through
 Redis; a message after a quiet period says how many were suppressed.
@@ -82,6 +82,7 @@ KNOWN_WORKERS = "gandalf:notify:known_workers"
 LEAVING_PREFIX = "gandalf:notify:leaving"
 MONITOR_LOCK = "gandalf:notify:monitor"
 BACKLOG_FLAG = "gandalf:notify:backlog"
+BACKLOG_SINCE = "gandalf:notify:backlog_since"
 STUCK_FLAG = "gandalf:notify:stuck"
 THROTTLE_PREFIX = "gandalf:notify:throttle"
 
@@ -392,7 +393,11 @@ class Monitor:
         registry: The worker registry.
         notifier: Where events go.
         interval_seconds: How often the active monitor looks.
-        lag_threshold: Backlog (stream lag) at or above which to alert.
+        lag_per_worker: Backlog (stream lag) per live worker at or above
+            which the queue counts as backed up; with no live worker the
+            threshold is this, as for one.
+        backlog_seconds: How long the backlog must stay at or above the
+            threshold, on every look, before ``queue_backlog`` fires.
         stuck_seconds: A job delivered and unacknowledged this long is stuck.
     """
 
@@ -404,7 +409,8 @@ class Monitor:
         notifier: Notifier,
         *,
         interval_seconds: float = 15.0,
-        lag_threshold: int = 5,
+        lag_per_worker: int = 50,
+        backlog_seconds: float = 60.0,
         stuck_seconds: float = 1800.0,
     ):
         self._r = client
@@ -412,7 +418,8 @@ class Monitor:
         self.registry = registry
         self.notifier = notifier
         self.interval = interval_seconds
-        self.lag_threshold = lag_threshold
+        self.lag_per_worker = lag_per_worker
+        self.backlog_seconds = backlog_seconds
         self.stuck_seconds = stuck_seconds
         self.identity = uuid.uuid4().hex
         self._stop = threading.Event()
@@ -454,7 +461,7 @@ class Monitor:
             return []
         now = time.time()
         events = self._check_workers(now)
-        events += self._check_backlog()
+        events += self._check_backlog(now)
         events += self._check_stuck()
         for event in events:
             self.notifier.emit(event)
@@ -516,21 +523,50 @@ class Monitor:
             )
         return events
 
-    def _check_backlog(self) -> list[Event]:
+    def lag_threshold(self, workers: int) -> int:
+        """The backlog that counts as backed up with *workers* live workers.
+
+        Examples:
+            >>> m = Monitor.__new__(Monitor); m.lag_per_worker = 50
+            >>> m.lag_threshold(3), m.lag_threshold(0)
+            (150, 50)
+        """
+        return self.lag_per_worker * max(workers, 1)
+
+    def _check_backlog(self, now: float) -> list[Event]:
+        """``queue_backlog`` once the lag has stayed over the threshold long enough.
+
+        The start of the current over-threshold spell is kept in Redis, so a
+        new leader carries it on; one look under the threshold resets it.
+        """
         stats = self.queue.stats()
         alerting = bool(self._r.exists(BACKLOG_FLAG))
         alive = self._r.zcard(f"{self.registry.prefix}:index")
-        if stats.lag >= self.lag_threshold and not alerting:
-            self._r.set(BACKLOG_FLAG, "1")
-            return [
-                Event(
-                    "queue_backlog",
-                    "Queue backlog",
-                    f"{stats.lag} jobs are waiting for a worker (threshold "
-                    f"{self.lag_threshold}); {stats.pending} running on {alive} workers.",
-                    {"waiting": stats.lag, "running": stats.pending, "workers": alive},
-                )
-            ]
+        threshold = self.lag_threshold(alive)
+        if stats.lag < threshold:
+            self._r.delete(BACKLOG_SINCE)
+        elif not alerting:
+            self._r.set(BACKLOG_SINCE, repr(now), nx=True)
+            since = float(self._r.get(BACKLOG_SINCE) or now)
+            if now - since >= self.backlog_seconds:
+                self._r.set(BACKLOG_FLAG, "1")
+                self._r.delete(BACKLOG_SINCE)
+                return [
+                    Event(
+                        "queue_backlog",
+                        "Queue backlog",
+                        f"{stats.lag} jobs are waiting for a worker, at or over the "
+                        f"threshold ({threshold}: {self.lag_per_worker} per worker) "
+                        f"for {now - since:.0f}s; {stats.pending} running on "
+                        f"{alive} workers.",
+                        {
+                            "waiting": stats.lag,
+                            "running": stats.pending,
+                            "workers": alive,
+                            "threshold": threshold,
+                        },
+                    )
+                ]
         if stats.lag == 0 and alerting:
             self._r.delete(BACKLOG_FLAG)
             return [

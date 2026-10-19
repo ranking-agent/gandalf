@@ -2,7 +2,14 @@
 Gandalf - Fast 3-hop path finding in large knowledge graphs
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version as _dist_version
+
+# Read from the installed distribution, so it is the version in
+# pyproject.toml rather than a second copy that can go stale.
+try:
+    __version__ = _dist_version("gandalf-csr")
+except PackageNotFoundError:  # running from a source tree that is not installed
+    __version__ = "0.0.0+unknown"
 
 from gandalf import plugins  # noqa: F401  registers built-in node filters & enrichers
 from gandalf.annotate import annotate_response

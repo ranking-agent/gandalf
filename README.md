@@ -478,8 +478,10 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_QUEUE_GROUP` | `gandalf-workers` | Consumer group the workers read through |
 | `GANDALF_QUEUE_DEAD_STREAM` | `gandalf:jobs:dead` | Where jobs over the delivery limit are moved |
 | `GANDALF_QUEUE_MAX_DELIVERIES` | `2` | Attempts a job gets before it is dead-lettered |
-| `GANDALF_QUEUE_CLAIM_IDLE_SECONDS` | `120` | A job idle this long is taken over as abandoned |
-| `GANDALF_QUEUE_KEEPALIVE_SECONDS` | `30` | How often a running worker refreshes its job |
+| `GANDALF_QUEUE_CLAIM_IDLE_SECONDS` | `45` | A job whose worker has not refreshed it for this long is taken over as abandoned (idle counts from the last keepalive, not from delivery) |
+| `GANDALF_QUEUE_KEEPALIVE_SECONDS` | `15` | How often a running worker refreshes its job; keep the claim threshold several of these |
+| `GANDALF_CALLBACK_ATTEMPTS` | `3` | Tries to deliver an `/asyncquery` result to its callback on a connection failure, timeout or 5xx |
+| `GANDALF_CALLBACK_BACKOFF_SECONDS` | `2` | Wait before the second try, doubling after |
 | `GANDALF_QUEUE_SYNC_MAX_WAIT_SECONDS` | `1800` | How long `/query` waits for a worker when the query has no timeout |
 | `GANDALF_QUEUE_SYNC_GRACE_SECONDS` | `30` | Added to the query's timeout for the worker's own Timeout response to arrive |
 | `GANDALF_RESULT_TTL_SECONDS` | `900` | How long an uncollected `/query` result lives in Redis |
@@ -492,7 +494,8 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_SLACK_STATUS_URL` | `<GANDALF_SERVER_URL>/status` | Linked from every Slack message |
 | `GANDALF_SLACK_THROTTLE_SECONDS` | `300` | Minimum gap between Slack messages of one noisy kind (`job_failed`, `job_retried`) |
 | `GANDALF_MONITOR_INTERVAL_SECONDS` | `15` | How often the (single, elected) monitor looks |
-| `GANDALF_ALERT_QUEUE_LAG_THRESHOLD` | `5` | Jobs waiting for a worker at which `queue_backlog` fires |
+| `GANDALF_ALERT_QUEUE_LAG_PER_WORKER` | `50` | Jobs waiting per live worker (at least one) at which the queue counts as backed up |
+| `GANDALF_ALERT_QUEUE_BACKLOG_SECONDS` | `60` | How long the backlog must stay over that threshold before `queue_backlog` fires |
 | `GANDALF_ALERT_STUCK_SECONDS` | `1800` | A job delivered and unfinished this long fires `queue_stuck` |
 | `GANDALF_ALERT_LOG_MAXLEN` | `500` | Alerts the status page keeps |
 | `GANDALF_WORKER_NAME` | `<hostname>-<pid>` | The worker's consumer name |
@@ -634,9 +637,14 @@ What the queue gives, beyond "more workers":
   running all at once and getting the process OOM-killed.
 - **A dead worker's job is not lost.**  Jobs are acknowledged only after
   their result is delivered.  One whose worker died is taken over by another
-  worker (`GANDALF_QUEUE_CLAIM_IDLE_SECONDS`); one that has killed a worker
+  worker once it has gone 45 seconds without a keepalive
+  (`GANDALF_QUEUE_CLAIM_IDLE_SECONDS`; a live worker refreshes its job every
+  15 seconds however long the query runs); one that has killed a worker
   twice (`GANDALF_QUEUE_MAX_DELIVERIES`) is moved to the dead-letter stream
-  and answered with an `Error` response rather than run again.
+  and answered with an `Error` response rather than run again.  A query that
+  raises is answered with an `Error` at once, not retried.  An `/asyncquery`
+  result whose callback fails with a connection error, a timeout or a 5xx is
+  posted again (`GANDALF_CALLBACK_ATTEMPTS`); a 4xx is final.
 - **The query's timeout covers the wait.**  `parameters.timeout` runs from
   when the API accepted the request; a job whose budget is spent in the
   queue is answered with a `Timeout` response without being run.
@@ -689,7 +697,7 @@ link back to the status page:
 | `job_retried` | warning | A job abandoned by a dead worker is being run again |
 | `job_dead_lettered` | critical | A job ended two workers and was answered with an error instead of a third try |
 | `job_failed` | warning | A query raised; the client got an Error response |
-| `queue_backlog` / `queue_backlog_cleared` | warning / info | Jobs waiting for a worker crossed `GANDALF_ALERT_QUEUE_LAG_THRESHOLD`, then dropped to zero |
+| `queue_backlog` / `queue_backlog_cleared` | warning / info | Jobs waiting for a worker stayed at or over `GANDALF_ALERT_QUEUE_LAG_PER_WORKER` × the live workers for `GANDALF_ALERT_QUEUE_BACKLOG_SECONDS`, then dropped to zero |
 | `queue_stuck` | warning | A job has been with one worker longer than `GANDALF_ALERT_STUCK_SECONDS` |
 
 A worker never dies of Redis trouble: a timeout, an outage or a restart
