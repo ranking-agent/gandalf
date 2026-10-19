@@ -64,6 +64,13 @@ class Settings(BaseSettings):
 
     # Gunicorn worker count
     workers: int = 2
+    # Seconds an idle keep-alive connection stays open (gunicorn's
+    # keepalive).  It must outlast the idle timeout of every client's
+    # connection pool (and any proxy in front): when the server closes an
+    # idle connection, a client sending its next request on it at the same
+    # moment gets a connection error, and a POST is not retried.  gunicorn's
+    # own default of 2s loses that race under load.
+    keepalive_seconds: int = 75
 
     # TRAPI query-time budget (parameters.timeout, gandalf/trapi.py).
     # query_timeout is the server's own default in seconds; 0 disables it, and

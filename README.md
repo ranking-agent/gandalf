@@ -419,6 +419,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_RATE_LIMIT` | `0` | Max requests per minute per client IP (0 = disabled) |
 | `GANDALF_SKIP_PRELOAD` | `false` | Skip module-level graph loading |
 | `GANDALF_WORKERS` | `2` | Gunicorn worker count |
+| `GANDALF_KEEPALIVE_SECONDS` | `75` | Seconds an idle keep-alive connection stays open. Keep it longer than the idle timeout of the clients' connection pools and of any proxy in front, or a client reusing a connection as the server closes it gets a connection error |
 | `GANDALF_QUEUE_URL` | _(empty)_ | Redis URL; set it to run queries in worker processes (see [Queue mode](#queue-mode-workers-and-autoscaling)) |
 | `GANDALF_QUEUE_SOCKET_TIMEOUT_SECONDS` | `30` | Redis socket timeout; a `?socket_timeout=` on the URL overrides it. Blocking waits are sliced to stay under it |
 | `GANDALF_QUEUE_CONNECT_TIMEOUT_SECONDS` | `5` | Redis connect timeout |
