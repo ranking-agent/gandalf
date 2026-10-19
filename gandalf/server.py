@@ -90,6 +90,7 @@ from gandalf.request_validation import (
     validate_pairs,
     validate_query_graph_is_executable,
     validate_set_interpretation,
+    validate_subclass_qnodes,
 )
 from gandalf.search.edge_constraints import ConstraintError, EdgeConstraints
 from gandalf.search.gc_utils import gc_disabled
@@ -195,6 +196,7 @@ def _prepare_query(raw: QueryDict) -> Deadline:
     validate_set_interpretation(query_graph)
     validate_edge_node_references(query_graph)
     validate_pairs(query_graph, raw.get("parameters"))
+    validate_subclass_qnodes(query_graph, raw.get("parameters"))
 
     # Parse each QEdge's constraints up front so a malformed constraint is a
     # 400 here rather than an opaque 500 from deep inside the search.

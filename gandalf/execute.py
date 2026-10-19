@@ -190,6 +190,7 @@ def run_query(
         results_as_json=as_json,
         pairs=params.get("pairs"),
         kg_only=params.get("kg_only", False),
+        subclass_qnodes=params.get("subclass_qnodes"),
     )
     if annotator_config:
         annotate_response(response, graph, annotator_config)

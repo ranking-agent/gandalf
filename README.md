@@ -374,6 +374,9 @@ Gandalf's own parameters:
 
 - `subclass` (bool): Enable biolink subclass inference (default `true`)
 - `subclass_depth` (int): Maximum `subclass_of` hops (default `1`)
+- `subclass_qnodes` (list of qnode ids): With `subclass`, expand only these
+  pinned qnodes to their subclass descendants; the other pinned qnodes match
+  their own ids only (default: every pinned qnode)
 - `dehydrated` (bool): Return the smallest useful response — edges carry only
   subject, object, predicate, `knowledge_level` and `agent_type`, with no
   attributes and no `sources` (auto-enabled for very large result sets).

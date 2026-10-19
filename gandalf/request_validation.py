@@ -281,3 +281,25 @@ def validate_pairs(query_graph: QueryGraphDict, parameters: Optional[dict]) -> N
         )
     if parameters.get("subclass", True):
         raise HTTPException(400, "parameters.pairs requires 'subclass': false")
+
+
+def validate_subclass_qnodes(
+    query_graph: QueryGraphDict, parameters: Optional[dict]
+) -> None:
+    """Require ``parameters.subclass_qnodes`` to name qnodes of the query graph.
+
+    A misspelled qnode would otherwise silently turn subclass expansion off
+    for the node it meant.
+
+    Raises ``HTTPException(400)`` for anything but a list of qnode ids.
+    """
+    qnodes = (parameters or {}).get("subclass_qnodes")
+    if qnodes is None:
+        return
+    nodes = query_graph.get("nodes") or {}
+    if not isinstance(qnodes, list) or not all(
+        isinstance(qnode_id, str) and qnode_id in nodes for qnode_id in qnodes
+    ):
+        raise HTTPException(
+            400, "parameters.subclass_qnodes must be a list of query graph node ids"
+        )

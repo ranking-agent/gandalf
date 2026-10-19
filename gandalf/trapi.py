@@ -259,6 +259,7 @@ class GandalfParametersDict(QueryParametersDict):
 
     subclass: NotRequired[bool]
     subclass_depth: NotRequired[int]
+    subclass_qnodes: NotRequired[list[str]]
     dehydrated: NotRequired[bool]
     pairs: NotRequired[list[list[str]]]
     kg_only: NotRequired[bool]

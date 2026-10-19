@@ -60,6 +60,7 @@ def lookup(
     results_as_json: bool = False,
     pairs: Optional[list] = None,
     kg_only: bool = False,
+    subclass_qnodes: Optional[list] = None,
 ):
     """Take an arbitrary Translator query graph and return all matching paths.
 
@@ -69,6 +70,8 @@ def lookup(
         bmt: Biolink Model Toolkit instance (optional, will create if not provided)
         subclass: If True, expand pinned nodes to include subclass descendants
         subclass_depth: Maximum number of subclass_of hops to traverse (default 1)
+        subclass_qnodes: With ``subclass``, the pinned qnodes to expand; the
+            others match their own ids only.  None expands every pinned qnode.
         filter_config: Optional dict of plugin-defined node filter settings
             (e.g. ``{"max_node_degree": 50, "min_information_content": 0.8}``).
             Each registered NodeFilter plugin reads its own key. Unknown keys
@@ -192,6 +195,7 @@ def lookup(
                     results_as_json=results_as_json,
                     pairs=pairs,
                     kg_only=kg_only,
+                    subclass_qnodes=subclass_qnodes,
                 )
             except QueryTimeout as exc:
                 # Report the overrun as a TRAPI outcome rather than an error:
@@ -233,6 +237,7 @@ def _lookup_inner(
     results_as_json: bool = False,
     pairs: Optional[list] = None,
     kg_only: bool = False,
+    subclass_qnodes: Optional[list] = None,
 ):
     """Inner implementation of lookup with all the core logic.
 
@@ -280,7 +285,9 @@ def _lookup_inner(
                 "Rewriting query graph for subclass expansion (depth=%s)",
                 subclass_depth,
             )
-            _rewrite_for_subclass(subqgraph, subclass_depth=subclass_depth)
+            _rewrite_for_subclass(
+                subqgraph, subclass_depth=subclass_depth, qnodes=subclass_qnodes
+            )
             # Use the rewritten graph as the query graph for the rest of the pipeline
             query_graph = copy.deepcopy(subqgraph)
 
@@ -1594,8 +1601,9 @@ def _build_response(
 
                     if fwd_eidx >= 0:
                         orig_id = edge_id_map.get(fwd_eidx)
-                        if orig_id is not None:
-                            edge_props["_edge_id"] = orig_id
+                        edge_props["_edge_id"] = (
+                            orig_id if orig_id is not None else _stand_in_id(fwd_eidx)
+                        )
 
                     # Store query-aligned subject/object for building
                     # inferred composite edges.  edge["subject"]/["object"]
@@ -1833,6 +1841,19 @@ def _expanders_for(bmt) -> tuple[PredicateExpander, QualifierExpander]:
     return expanders
 
 
+def _stand_in_id(fwd_eidx: int) -> str:
+    """The KG id of a graph edge the build gave no ID.
+
+    One per physical edge, so the edge has one KG entry however many results
+    and derivations bind it.  A fresh id per binding filed a subclass_of edge
+    once for every edge inferred through it -- with each inferred edge and
+    support graph, keyed by it, distinct as well -- multiplying a response
+    on a pinned node with many subclass children.  Rehydration locates edges
+    by their endpoints and content, not by id.
+    """
+    return f"gandalf:edge:{fwd_eidx}"
+
+
 def _resolve_node_idxes(graph, node_ids) -> list[int]:
     """Map node IDs to graph indices, dropping IDs the graph does not contain."""
     idxes = (graph.get_node_idx(node_id) for node_id in node_ids)
@@ -1851,7 +1872,7 @@ def _resolve_pairs(graph, pairs) -> dict[int, set[int]]:
     return dict(targets)
 
 
-def _rewrite_for_subclass(query_graph, subclass_depth=1):
+def _rewrite_for_subclass(query_graph, subclass_depth=1, qnodes=None):
     """Rewrite query graph to add subclass expansion for pinned nodes.
 
     For each pinned node (one with ``ids``), creates a synthetic superclass
@@ -1864,6 +1885,7 @@ def _rewrite_for_subclass(query_graph, subclass_depth=1):
     Args:
         query_graph: The query graph dict (mutated in-place).
         subclass_depth: Maximum number of ``subclass_of`` hops to traverse.
+        qnodes: The pinned qnodes to expand, or None for every one.
     """
     nodes = query_graph["nodes"]
     edges = query_graph["edges"]
@@ -1880,7 +1902,9 @@ def _rewrite_for_subclass(query_graph, subclass_depth=1):
     pinned_qnodes = [
         qnode_id
         for qnode_id, qnode in list(nodes.items())
-        if qnode.get("ids") and qnode_id not in excluded
+        if qnode.get("ids")
+        and qnode_id not in excluded
+        and (qnodes is None or qnode_id in qnodes)
     ]
 
     for qnode_id in pinned_qnodes:

@@ -1,14 +1,17 @@
-"""Tests for ``parameters.pairs`` and ``parameters.kg_only``.
+"""Tests for ``parameters.pairs``, ``kg_only`` and ``subclass_qnodes``.
 
 ``pairs`` restricts a one-hop lookup between pinned ends to listed
 ``[subject_id, object_id]`` pairs, so a caller filling in the edges of many
 specific pairs gets those edges rather than the edges of every combination of
-pinned subject and object.  ``kg_only`` leaves the results out.
+pinned subject and object.  ``kg_only`` leaves the results out, and
+``subclass_qnodes`` expands only the pinned qnodes it lists.
 """
 
+import orjson
 import pytest
 from fastapi.testclient import TestClient
 
+from gandalf.loader import build_graph_from_jsonl
 from gandalf.search import lookup
 from tests.search_fixtures import graph  # noqa: F401
 
@@ -193,3 +196,90 @@ class TestPairsOverHttp:
         response = client.post("/query", json=query)
         assert response.status_code == 400, response.text
         assert "pairs" in response.text
+
+
+class TestSubclassQnodes:
+    def _query(self, **parameters):
+        return _query(["CHEBI:6801"], ["MONDO:0005015"], subclass=True, **parameters)
+
+    def test_every_pinned_qnode_is_expanded_by_default(self, graph, bmt):
+        """MONDO:0005148 subclass_of MONDO:0005015, so CHEBI:6801 treats
+        MONDO:0005148 is inferred for MONDO:0005015."""
+        response = lookup(graph, self._query(), bmt=bmt)
+        assert response["message"]["auxiliary_graphs"]
+
+    def test_unlisted_qnode_matches_its_own_ids_only(self, graph, bmt):
+        response = lookup(graph, self._query(), bmt=bmt, subclass_qnodes=["n0"])
+        assert not response["message"].get("auxiliary_graphs")
+        assert _node_pairs(response) == {frozenset(("CHEBI:6801", "MONDO:0005015"))}
+
+    def test_listed_qnode_is_expanded(self, graph, bmt):
+        response = lookup(graph, self._query(), bmt=bmt, subclass_qnodes=["n1"])
+        assert response["message"]["auxiliary_graphs"]
+
+    def test_over_http(self, client):
+        response = client.post("/query", json=self._query(subclass_qnodes=["n0"]))
+        assert response.status_code == 200, response.text
+        assert not response.json()["message"].get("auxiliary_graphs")
+
+    def test_unknown_qnode_is_a_400(self, client):
+        response = client.post("/query", json=self._query(subclass_qnodes=["n9"]))
+        assert response.status_code == 400, response.text
+        assert "subclass_qnodes" in response.text
+
+
+def test_edges_without_ids_are_filed_once(tmp_path, bmt):
+    """A graph edge with no ID gets one stand-in id, however many inferred
+    edges it supports: each subclass_of edge is one KG entry."""
+    nodes = ["MONDO:HUB", "MONDO:C0", "MONDO:C1", "NCBIGene:1", "NCBIGene:2"]
+    edges = [
+        {
+            "subject": f"MONDO:C{c}",
+            "predicate": "biolink:subclass_of",
+            "object": "MONDO:HUB",
+        }
+        for c in range(2)
+    ] + [
+        {"subject": gene, "predicate": predicate, "object": f"MONDO:C{c}"}
+        for c in range(2)
+        for gene in ("NCBIGene:1", "NCBIGene:2")
+        for predicate in ("biolink:affects", "biolink:associated_with")
+    ]
+    nodes_file, edges_file = tmp_path / "nodes.jsonl", tmp_path / "edges.jsonl"
+    nodes_file.write_text(
+        "".join(
+            orjson.dumps({"id": node, "category": ["biolink:NamedThing"]}).decode()
+            + "\n"
+            for node in nodes
+        )
+    )
+    edges_file.write_text(
+        "".join(
+            orjson.dumps({**edge, "primary_knowledge_source": "infores:x"}).decode()
+            + "\n"
+            for edge in edges
+        )
+    )
+    id_less = build_graph_from_jsonl(str(edges_file), str(nodes_file))
+
+    response = lookup(
+        id_less,
+        _query(["MONDO:HUB"], ["NCBIGene:1", "NCBIGene:2"], subclass=True),
+        bmt=bmt,
+        subclass_qnodes=["n0"],
+        dehydrated=True,
+    )
+
+    kg_edges = response["message"]["knowledge_graph"]["edges"]
+    subclass_entries = [
+        edge_id
+        for edge_id, edge in kg_edges.items()
+        if edge["predicate"] == "biolink:subclass_of"
+    ]
+    assert len(subclass_entries) == 2
+    aux_graphs = response["message"]["auxiliary_graphs"]
+    # one inferred edge, with its support graph, per child edge
+    assert len(aux_graphs) == 8
+    for aux in aux_graphs.values():
+        assert all(edge_id in kg_edges for edge_id in aux["edges"])
+        assert set(aux["edges"]) & set(subclass_entries)

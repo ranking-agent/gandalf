@@ -190,6 +190,12 @@ class QueryParameters(TRAPIQueryParameters):
     subclass_depth: Optional[int] = Field(
         None, description="Maximum subclass_of hops to traverse (default 1)"
     )
+    subclass_qnodes: Optional[List[str]] = Field(
+        None,
+        description="With subclass, the pinned qnodes to expand to their "
+        "subclass descendants; the others match their own ids only (default "
+        "every pinned qnode)",
+    )
     dehydrated: Optional[bool] = Field(
         None,
         description="Return a dehydrated response (skip edge attribute "
