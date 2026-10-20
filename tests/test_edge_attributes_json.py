@@ -4,6 +4,7 @@ A full response can then pass the stored bytes to the serializer as they are,
 instead of decoding them into Python objects only to encode them again.
 """
 
+import asyncio
 import pickle
 
 import orjson
@@ -192,7 +193,9 @@ def server(graph, bmt, monkeypatch):  # noqa: F811
 
 def test_server_serves_the_same_message(server, graph, bmt):  # noqa: F811
     query = QUERIES["two_hop"]
-    rendered = server.sync_lookup(bare_request(), body=dict(query), profile=None)
+    rendered = asyncio.run(
+        server.sync_lookup(bare_request(), body=dict(query), profile=None)
+    )
     served = orjson.loads(rendered.body)["message"]
     assert served == lookup(graph, query, bmt=bmt)["message"]
 
@@ -209,7 +212,7 @@ def test_server_annotators_read_edge_attributes(server, monkeypatch):
 
     monkeypatch.setattr(gandalf_execute, "annotate_response", annotate)
     query = dict(QUERIES["two_hop"], parameters={"annotator_config": {"any": {}}})
-    rendered = server.sync_lookup(bare_request(), body=query, profile=None)
+    rendered = asyncio.run(server.sync_lookup(bare_request(), body=query, profile=None))
     assert seen and set(seen) == {list}
     edges = orjson.loads(rendered.body)["message"]["knowledge_graph"]["edges"]
     assert all(edge["attributes"][-1] == added for edge in edges.values())
@@ -217,8 +220,8 @@ def test_server_annotators_read_edge_attributes(server, monkeypatch):
 
 def test_validating_server_gets_attributes_as_lists(server, monkeypatch):
     monkeypatch.setattr(server, "_validate", True)
-    response = server.sync_lookup(
-        bare_request(), body=dict(QUERIES["two_hop"]), profile=None
+    response = asyncio.run(
+        server.sync_lookup(bare_request(), body=dict(QUERIES["two_hop"]), profile=None)
     )
     edges = response["message"]["knowledge_graph"]["edges"]
     assert all(isinstance(e.get("attributes", []), list) for e in edges.values())

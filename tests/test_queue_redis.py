@@ -10,6 +10,7 @@ on a free port for the session.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -23,18 +24,22 @@ from typing import Any, Callable
 import orjson
 import pytest
 import redis
+import redis.asyncio
 import zstandard
 from fastapi.testclient import TestClient
 
 import gandalf.server as gandalf_server
 from gandalf.config import settings
 from gandalf.jobs import (
+    AsyncJobQueue,
     Delivery,
     Job,
     JobHistory,
     JobQueue,
+    ResultReader,
     ResultStore,
     WorkerRegistry,
+    async_redis_client,
 )
 from gandalf.worker import Worker
 
@@ -216,27 +221,47 @@ def test_touch_keeps_a_running_job_from_being_claimed(queue):
 # ---------------------------------------------------------------------------
 
 
-def test_result_store_round_trip_in_chunks(store, client):
+def _read(url: str, use: Callable[[ResultReader], Any]) -> Any:
+    """Run ``use(reader)`` on a fresh event loop with its own async client.
+
+    An asyncio Redis client belongs to the loop that first uses it, so each
+    ``asyncio.run`` gets a client of its own.
+    """
+
+    async def _run():
+        reader = ResultReader(redis.asyncio.Redis.from_url(url), prefix="t:result")
+        try:
+            return await use(reader)
+        finally:
+            await reader.client.aclose()
+
+    return asyncio.run(_run())
+
+
+def test_result_store_round_trip_in_chunks(store, client, redis_url):
     body = orjson.dumps({"message": {"results": list(range(200))}})
     compressed_size = store.put("job-1", body, http_status=200)
     assert int(client.hget("t:result:job-1:meta", "chunks")) == -(
         -compressed_size // 16
     )
 
-    result = store.wait("job-1", timeout=1.0)
+    async def collect(reader):
+        result = await reader.wait("job-1", timeout=1.0)
+        await reader.delete("job-1")
+        return result, await reader.get("job-1")
+
+    result, after_delete = _read(redis_url, collect)
     assert result is not None
     assert result.http_status == 200
     assert result.size == len(body)
     assert len(result.compressed) == compressed_size
     assert result.decompress() == body
-
-    store.delete("job-1")
-    assert store.get("job-1") is None
+    assert after_delete is None
     assert not client.keys("t:result:job-1:*")
 
 
-def test_result_store_wait_gives_up(store):
-    assert store.wait("never", timeout=0.05) is None
+def test_result_store_wait_gives_up(redis_url):
+    assert _read(redis_url, lambda r: r.wait("never", timeout=0.05)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -270,14 +295,35 @@ def worker(graph, bmt, queue, store, tmp_path):  # noqa: F811
 
 
 @pytest.fixture
-def api(graph, bmt, queue, store, monkeypatch):  # noqa: F811
-    """The server in queue mode, on the test queue."""
+def api(graph, bmt, queue, redis_url, monkeypatch):  # noqa: F811
+    """The server in queue mode, on the test queue.
+
+    Entered as a context manager so every request runs on one event loop,
+    as in a server process: the asyncio Redis client belongs to the loop
+    that first uses it.  The lifespan finds the queue already open and
+    closes the async client on the way out.
+    """
+    async_client = async_redis_client(redis_url)
     monkeypatch.setattr(gandalf_server, "GRAPH", graph)
     monkeypatch.setattr(gandalf_server, "BMT", bmt)
     monkeypatch.setattr(gandalf_server, "QUEUE", queue)
-    monkeypatch.setattr(gandalf_server, "RESULTS", store)
+    monkeypatch.setattr(
+        gandalf_server,
+        "AQUEUE",
+        AsyncJobQueue(async_client, stream=queue.stream, group=queue.group),
+    )
+    # The waits get a pool of their own, sized as the server sizes it.
+    wait_client = async_redis_client(
+        redis_url, max_connections=settings.queue_max_waiting
+    )
+    monkeypatch.setattr(
+        gandalf_server,
+        "RESULTS",
+        ResultReader(async_client, wait_client=wait_client, prefix="t:result"),
+    )
     monkeypatch.setattr(settings, "queue_url", "redis://configured.invalid/0")
-    return TestClient(gandalf_server.APP)
+    with TestClient(gandalf_server.APP) as client:
+        yield client
 
 
 def _in_process_response(graph, bmt, body):  # noqa: F811
@@ -344,6 +390,67 @@ def test_ready_reports_the_queue(api, queue):
     assert api.get("/ready").json() == {"status": "ready"}
 
 
+def test_waiting_queries_hold_no_thread(api, queue, monkeypatch):
+    """More queries wait than there are threads or default connections.
+
+    The thread pool has 40 threads.  When each waiting /query held one, the
+    41st waited for a thread before it was even enqueued, and so did the
+    readiness probe, which took the pod out of the Service under load.  A
+    redis-py pool holds 100 connections by default, and each wait holds one,
+    so the waits have a pool of their own.
+    """
+    monkeypatch.setattr(settings, "queue_sync_grace_seconds", 0.1)
+    n_queries = 150
+    body = dict(ONE_HOP)
+    body["parameters"] = {"timeout": 5.0}
+    statuses: list[int] = []
+
+    def _query():
+        statuses.append(api.post("/query", json=body).status_code)
+
+    threads = [threading.Thread(target=_query) for _ in range(n_queries)]
+    for thread in threads:
+        thread.start()
+    # All of them are enqueued long before the first one gives up.
+    assert _wait_for(lambda: queue.stats().lag == n_queries, 3.0)
+    t0 = time.monotonic()
+    assert api.get("/ready").status_code == 200
+    assert api.get("/metrics").status_code == 200
+    assert time.monotonic() - t0 < 1.0
+    for thread in threads:
+        thread.join(timeout=30)
+    assert statuses == [504] * n_queries  # nobody ran them
+
+
+def test_a_query_over_the_waiting_cap_is_not_enqueued(api, queue, monkeypatch):
+    """At queue_max_waiting, the next /query is a 503 and never reaches a worker."""
+    monkeypatch.setattr(settings, "queue_max_waiting", 3)
+    monkeypatch.setattr(settings, "queue_sync_grace_seconds", 0.1)
+    body = dict(ONE_HOP)
+    body["parameters"] = {"timeout": 3.0}
+    statuses: list[int] = []
+    threads = [
+        threading.Thread(
+            target=lambda: statuses.append(api.post("/query", json=body).status_code)
+        )
+        for _ in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    assert _wait_for(lambda: queue.stats().lag == 3, 2.0)
+
+    over = api.post("/query", json=body)
+    assert over.status_code == 503
+    assert over.headers["retry-after"] == "1"
+    assert queue.stats().lag == 3
+    assert api.get("/ready").status_code == 200
+
+    for thread in threads:
+        thread.join(timeout=30)
+    assert statuses == [504] * 3
+    assert api.post("/query", json=body).status_code == 504  # room again
+
+
 def test_metrics_report_queue_lag_and_pending(api, queue):
     queue.enqueue(Job.new(dict(ONE_HOP)))
     queue.enqueue(Job.new(dict(ONE_HOP)))
@@ -404,12 +511,14 @@ def test_async_query_through_the_queue_posts_the_callback(
     )
 
 
-def test_budget_spent_in_the_queue_is_a_timeout_response(queue, store, worker):
+def test_budget_spent_in_the_queue_is_a_timeout_response(
+    queue, store, worker, redis_url
+):
     job = Job(
         job_id="late", query=dict(ONE_HOP), budget=1.0, accepted_at=time.time() - 5
     )
     queue.enqueue(job)
-    result = store.wait("late", timeout=10.0)
+    result = _read(redis_url, lambda r: r.wait("late", timeout=10.0))
     assert result is not None
     assert result.http_status == 200
     answered = orjson.loads(result.decompress())
@@ -418,7 +527,9 @@ def test_budget_spent_in_the_queue_is_a_timeout_response(queue, store, worker):
     assert answered["message"]["query_graph"] == ONE_HOP["message"]["query_graph"]
 
 
-def test_poisoned_job_is_answered_with_an_error(graph, bmt, queue, store):  # noqa: F811
+def test_poisoned_job_is_answered_with_an_error(
+    graph, bmt, queue, store, redis_url  # noqa: F811
+):
     """What the worker does with a delivery the queue already dead-lettered."""
     job = Job.new(dict(ONE_HOP))
     queue.enqueue(job)
@@ -428,7 +539,7 @@ def test_poisoned_job_is_answered_with_an_error(graph, bmt, queue, store):  # no
     outcome = w.handle(Delivery(delivery.entry_id, job, deliveries=3, poisoned=True))
     assert outcome == "poisoned"
     assert queue.stats().pending == 0
-    result = store.get(job.job_id)
+    result = _read(redis_url, lambda r: r.get(job.job_id))
     assert result is not None and result.http_status == 500
     answered = orjson.loads(result.decompress())
     assert answered["status"] == "Error"
@@ -437,7 +548,7 @@ def test_poisoned_job_is_answered_with_an_error(graph, bmt, queue, store):  # no
 
 
 def test_a_failing_job_is_answered_and_the_worker_lives_on(
-    graph, bmt, queue, store
+    graph, bmt, queue, store, redis_url
 ):  # noqa: F811
     w = Worker(graph, bmt, queue, store, consumer="w", max_jobs=2, block_seconds=0.05)
     broken = Job.new(
@@ -456,10 +567,10 @@ def test_a_failing_job_is_answered_and_the_worker_lives_on(
 
     assert w.run() == 2  # stopped by max_jobs after both
 
-    failed = store.get(broken.job_id)
+    failed = _read(redis_url, lambda r: r.get(broken.job_id))
     assert failed is not None and failed.http_status == 500
     assert orjson.loads(failed.decompress())["status"] == "Error"
-    ok = store.get(good.job_id)
+    ok = _read(redis_url, lambda r: r.get(good.job_id))
     assert ok is not None and ok.http_status == 200
     assert orjson.loads(ok.decompress())["message"]["results"]
     assert queue.stats().pending == 0
@@ -1000,8 +1111,14 @@ def test_blocking_reads_stay_under_a_short_socket_timeout(redis_url):
     store = ResultStore(
         short, prefix="t:result", ttl_seconds=60, chunk_bytes=1024, zstd_level=1
     )
+    short_url = redis_url + "?socket_timeout=1"
+
+    async def _nobody(reader):
+        assert blocking_slice(reader.client, 5.0) == 0.5
+        return await reader.wait("nobody", timeout=2.2)
+
     t0 = time.monotonic()
-    assert store.wait("nobody", timeout=2.2) is None  # several slices, no exception
+    assert _read(short_url, _nobody) is None  # several slices, no exception
     assert 2.0 <= time.monotonic() - t0 < 3.5
 
     def _later():
@@ -1009,7 +1126,7 @@ def test_blocking_reads_stay_under_a_short_socket_timeout(redis_url):
         store.put("late", b'{"ok":1}')
 
     threading.Thread(target=_later, daemon=True).start()
-    result = store.wait("late", timeout=5.0)
+    result = _read(short_url, lambda r: r.wait("late", timeout=5.0))
     assert result is not None and result.decompress() == b'{"ok":1}'
 
 
@@ -1196,11 +1313,13 @@ def test_api_answers_503_when_redis_is_gone(api, graph, bmt, monkeypatch):  # no
             claim_idle_seconds=1,
         ),
     )
-    monkeypatch.setattr(
-        gandalf_server,
-        "RESULTS",
-        ResultStore(dead, ttl_seconds=1, chunk_bytes=1, zstd_level=1),
+    dead_async = redis.asyncio.Redis(
+        host="127.0.0.1", port=1, socket_connect_timeout=0.1
     )
+    monkeypatch.setattr(
+        gandalf_server, "AQUEUE", AsyncJobQueue(dead_async, stream="x", group="x")
+    )
+    monkeypatch.setattr(gandalf_server, "RESULTS", ResultReader(dead_async))
     resp = api.post("/query", json=ONE_HOP)
     assert resp.status_code == 503 and "Queue unavailable" in resp.json()["detail"]
     body = dict(ONE_HOP)

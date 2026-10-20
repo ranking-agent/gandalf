@@ -8,6 +8,8 @@ knowledge graph's key order -- whatever the block size.
 
 import importlib
 
+import asyncio
+
 import orjson
 import pytest
 
@@ -294,8 +296,8 @@ def server(graph, bmt, monkeypatch):  # noqa: F811
 
 
 def test_server_serves_the_same_bytes(server, graph, bmt):  # noqa: F811
-    rendered = server.sync_lookup(
-        bare_request(), body=dict(TWO_HOP_MIXED), profile=None
+    rendered = asyncio.run(
+        server.sync_lookup(bare_request(), body=dict(TWO_HOP_MIXED), profile=None)
     )
     served = orjson.dumps(orjson.loads(rendered.body)["message"])
     reference = lookup(graph, TWO_HOP_MIXED, bmt=bmt)
@@ -312,7 +314,7 @@ def test_server_annotators_read_results(server, monkeypatch):
 
     monkeypatch.setattr(gandalf_execute, "annotate_response", annotate)
     query = dict(TWO_HOP_MIXED, parameters={"annotator_config": {"any": {}}})
-    rendered = server.sync_lookup(bare_request(), body=query, profile=None)
+    rendered = asyncio.run(server.sync_lookup(bare_request(), body=query, profile=None))
     assert seen and set(seen) == {dict}
     results = orjson.loads(rendered.body)["message"]["results"]
     assert len(results) == len(seen)
@@ -321,8 +323,8 @@ def test_server_annotators_read_results(server, monkeypatch):
 
 def test_validating_server_gets_result_dicts(server, monkeypatch):
     monkeypatch.setattr(server, "_validate", True)
-    response = server.sync_lookup(
-        bare_request(), body=dict(TWO_HOP_MIXED), profile=None
+    response = asyncio.run(
+        server.sync_lookup(bare_request(), body=dict(TWO_HOP_MIXED), profile=None)
     )
     assert all(type(r) is dict for r in response["message"]["results"])
 

@@ -432,6 +432,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_CALLBACK_ATTEMPTS` | `3` | Tries to deliver an `/asyncquery` result to its callback on a connection failure, timeout or 5xx |
 | `GANDALF_CALLBACK_BACKOFF_SECONDS` | `2` | Wait before the second try, doubling after |
 | `GANDALF_QUEUE_SYNC_MAX_WAIT_SECONDS` | `1800` | How long `/query` waits for a worker when the query has no timeout |
+| `GANDALF_QUEUE_MAX_WAITING` | `1000` | Most `/query` results one API process waits on at once; one more is answered 503 without being enqueued. Each wait holds a Redis connection, so keep API processes × this under Redis's `maxclients` |
 | `GANDALF_QUEUE_SYNC_GRACE_SECONDS` | `30` | Added to the query's timeout for the worker's own Timeout response to arrive |
 | `GANDALF_RESULT_TTL_SECONDS` | `900` | How long an uncollected `/query` result lives in Redis |
 | `GANDALF_RESULT_CHUNK_BYTES` | `67108864` | Largest value written to one Redis key |

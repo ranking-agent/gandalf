@@ -134,6 +134,13 @@ class Settings(BaseSettings):
     # the query has no timeout.
     queue_sync_max_wait_seconds: float = 1800.0
     queue_sync_grace_seconds: float = 30.0
+    # Most /query results one API process waits on at once.  A waiting
+    # query holds no thread but does hold a Redis connection (its BLPOP),
+    # from a pool of this size kept apart from the connections that enqueue
+    # and answer /ready.  A /query over it is answered 503 without being
+    # enqueued.  Each API process may open this many connections, so keep
+    # processes x this under Redis's maxclients (10000 by default).
+    queue_max_waiting: int = 1000
     # Results of /query jobs are stored zstd-compressed in Redis, in chunks
     # (Redis caps a value at 512 MB), until the API collects them.
     result_ttl_seconds: int = 900
