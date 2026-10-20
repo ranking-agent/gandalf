@@ -297,7 +297,9 @@ def reconstruct_paths(
                     specific_categories[categories] = specific
                 # A list of its own per node, so no response code that
                 # edits one node's categories can reach another's.
-                node_props = {"categories": list(specific)}
+                # No attributes, which TRAPI 1.6 requires: to_trapi_1_6 adds
+                # them (node_to_1_6) when the response is finalized.
+                node_props = {"categories": list(specific)}  # type: ignore[typeddict-item]
                 name = all_props.get("name")
                 if name is not None:
                     node_props["name"] = name

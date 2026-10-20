@@ -5,7 +5,7 @@ kept separate from ``gandalf.server`` so they can be imported without
 triggering module-level graph loading.
 """
 
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, cast
 
 from fastapi import HTTPException
 from translator_tom.model_dicts import MessageDict, QueryGraphDict
@@ -159,7 +159,8 @@ def reject_retired_trapi_fields(query_graph: QueryGraphDict) -> None:
                     f"this server speaks TRAPI 1.6, which uses '{replacement}'",
                 )
 
-    for qpath_id, qpath in (query_graph.get("paths") or {}).items():
+    paths = cast("dict[str, Any]", query_graph.get("paths") or {})
+    for qpath_id, qpath in paths.items():
         if not isinstance(qpath, dict):
             continue
         for constraint in qpath.get("constraints") or []:
@@ -193,7 +194,7 @@ def require_query_graph(message: Optional[MessageDict]) -> QueryGraphDict:
         raise HTTPException(
             400, "message must include a 'query_graph' with nodes and edges"
         )
-    return query_graph
+    return cast(QueryGraphDict, query_graph)
 
 
 def validate_query_graph_is_executable(query_graph: QueryGraphDict) -> None:
