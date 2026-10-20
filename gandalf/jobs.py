@@ -23,6 +23,11 @@ group, which gives the properties the design needs:
 Results of ``/query`` jobs go through the :class:`ResultStore` rather than
 the stream: zstd-compressed, split into chunks below Redis's 512 MB value
 cap, with a TTL, and a per-job list the waiting API process blocks on.
+
+The API's ``/query`` path is asyncio end to end (:class:`AsyncJobQueue`,
+:class:`ResultReader`), so a query waiting for a worker holds no thread:
+the number of queries an API process can have waiting is not bounded by
+its thread pool, and the pool stays free for the probes.
 ``/asyncquery`` results never touch Redis: the worker POSTs them to the
 client's callback itself.
 
@@ -34,6 +39,7 @@ any API pod can show the whole deployment.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import socket
@@ -42,10 +48,11 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, cast
 
 import orjson
 import redis
+import redis.asyncio
 import zstandard
 from translator_tom.model_dicts import QueryDict
 
@@ -184,6 +191,15 @@ def default_consumer_name() -> str:
     return f"{socket.gethostname()}-{os.getpid()}"
 
 
+def _client_options() -> dict:
+    """Timeouts for a queue client, so nothing hangs forever."""
+    return {
+        "socket_timeout": settings.queue_socket_timeout_seconds,
+        "socket_connect_timeout": settings.queue_connect_timeout_seconds,
+        "health_check_interval": 30,
+    }
+
+
 def redis_client(url: Optional[str] = None) -> redis.Redis:
     """A Redis client for the queue, with timeouts so nothing hangs forever.
 
@@ -191,14 +207,37 @@ def redis_client(url: Optional[str] = None) -> redis.Redis:
     the configured defaults, as redis-py has it.
     """
     return redis.Redis.from_url(
-        url if url is not None else settings.queue_url,
-        socket_timeout=settings.queue_socket_timeout_seconds,
-        socket_connect_timeout=settings.queue_connect_timeout_seconds,
-        health_check_interval=30,
+        url if url is not None else settings.queue_url, **_client_options()
     )
 
 
-def blocking_slice(client: redis.Redis, wanted: float) -> float:
+def async_redis_client(
+    url: Optional[str] = None, *, max_connections: int = 100
+) -> redis.asyncio.Redis:
+    """The asyncio twin of :func:`redis_client`, for the API's event loop.
+
+    Its connections belong to the event loop that first uses them, so it is
+    made per process (after gunicorn's fork) and used on one loop only.
+
+    The pool *blocks*: a command finding all *max_connections* busy waits
+    for one to come free (for up to the socket timeout) rather than failing.
+    redis-py's own pool raises ``Too many connections`` instead, which a
+    burst of concurrent requests on one event loop reaches at once.
+
+    Args:
+        url: The Redis URL; the configured queue URL by default.
+        max_connections: Most connections the client opens.
+    """
+    pool = redis.asyncio.BlockingConnectionPool.from_url(
+        url if url is not None else settings.queue_url,
+        max_connections=max_connections,
+        timeout=settings.queue_socket_timeout_seconds,
+        **_client_options(),
+    )
+    return redis.asyncio.Redis.from_pool(pool)
+
+
+def blocking_slice(client: redis.Redis | redis.asyncio.Redis, wanted: float) -> float:
     """How long one blocking read may last on *client*.
 
     redis-py applies the socket timeout to blocking commands too, so a
@@ -212,10 +251,32 @@ def blocking_slice(client: redis.Redis, wanted: float) -> float:
         >>> blocking_slice(redis.Redis(socket_timeout=4), 5.0)
         2.0
     """
-    socket_timeout = client.connection_pool.connection_kwargs.get("socket_timeout")
+    socket_timeout = _socket_timeout(client)
     if socket_timeout is None:
         return wanted
     return min(wanted, max(float(socket_timeout) / 2, 0.05))
+
+
+def _socket_timeout(client: redis.Redis | redis.asyncio.Redis) -> Optional[float]:
+    """The read timeout *client*'s connections get.
+
+    A client made without one (``Redis.from_url(url)``) gets its connection
+    class's default, which is 5s since redis-py 8 and none before it.
+    """
+    pool = client.connection_pool
+    timeout: Optional[float]
+    if "socket_timeout" in pool.connection_kwargs:
+        timeout = pool.connection_kwargs["socket_timeout"]
+        return timeout
+    for cls in pool.connection_class.__mro__:
+        init = vars(cls).get("__init__")
+        param = (
+            inspect.signature(init).parameters.get("socket_timeout") if init else None
+        )
+        if param is not None:
+            timeout = param.default
+            return timeout
+    return None
 
 
 def summarize_query(query: QueryDict) -> dict:
@@ -433,6 +494,27 @@ class JobQueue:
         """Entries on the stream, delivered or not (acknowledged ones are kept)."""
         return int(self._r.xlen(self.stream))
 
+    def oldest_waiting_s(self) -> float:
+        """How long the oldest job no worker has taken yet has been waiting.
+
+        A stream entry's id is the Redis server's clock, in milliseconds,
+        when it was added, so the age is measured on that clock too: no
+        skew between hosts.  Zero when every job has been taken.
+        """
+        last_delivered = b"0-0"
+        for group in self._r.xinfo_groups(self.stream):
+            if group["name"] == self.group.encode():
+                last_delivered = group["last-delivered-id"]
+        entries = self._r.xrange(
+            self.stream, min=b"(" + last_delivered, max="+", count=1
+        )
+        if not entries:
+            return 0.0
+        entry_id = cast(bytes, entries[0][0])  # decode_responses off
+        added_ms = int(entry_id.split(b"-")[0])
+        seconds, microseconds = self._r.time()
+        return max(0.0, seconds + microseconds / 1e6 - added_ms / 1000.0)
+
     def pending_entries(self, count: int = 100) -> list[dict]:
         """The jobs delivered and not yet acknowledged, oldest first.
 
@@ -476,12 +558,68 @@ class JobQueue:
 
     def stats(self) -> QueueStats:
         """Lag and pending counts of the consumer group (zero before it exists)."""
-        for group in self._r.xinfo_groups(self.stream):
-            if group["name"] == self.group.encode():
-                return QueueStats(
-                    lag=int(group.get("lag") or 0), pending=int(group["pending"])
-                )
-        return QueueStats(lag=0, pending=0)
+        return _group_stats(self._r.xinfo_groups(self.stream), self.group)
+
+
+def _group_stats(groups: list[dict], group: str) -> QueueStats:
+    """*group*'s lag and pending counts out of an ``XINFO GROUPS`` reply."""
+    for info in groups:
+        if info["name"] == group.encode():
+            return QueueStats(
+                lag=int(info.get("lag") or 0), pending=int(info["pending"])
+            )
+    return QueueStats(lag=0, pending=0)
+
+
+class AsyncJobQueue:
+    """The API's side of the job stream, on asyncio.
+
+    What an API request needs from the stream -- put a job on it, check that
+    Redis answers, read the group's counts -- without holding a thread while
+    Redis answers.  The workers and the status page use :class:`JobQueue`.
+
+    Args:
+        client: A ``redis.asyncio.Redis`` returning bytes.
+        stream: Stream key the jobs go on.
+        group: Consumer group the workers read through.
+    """
+
+    def __init__(self, client: redis.asyncio.Redis, *, stream: str, group: str):
+        self._r = client
+        self.stream = stream
+        self.group = group
+
+    @classmethod
+    def from_settings(
+        cls, client: Optional[redis.asyncio.Redis] = None
+    ) -> "AsyncJobQueue":
+        """A queue on the configured stream and group."""
+        return cls(
+            client if client is not None else async_redis_client(),
+            stream=settings.queue_stream,
+            group=settings.queue_group,
+        )
+
+    @property
+    def client(self) -> redis.asyncio.Redis:
+        """The underlying Redis client."""
+        return self._r
+
+    async def ping(self) -> bool:
+        """Whether Redis answers; the API's readiness check."""
+        return bool(await self._r.ping())
+
+    async def enqueue(self, job: Job) -> str:
+        """Put *job* on the stream and return its entry id."""
+        # A client returning bytes (decode_responses off), as everywhere here.
+        entry_id = cast(
+            bytes, await self._r.xadd(self.stream, {b"job": job.to_bytes()})
+        )
+        return entry_id.decode()
+
+    async def stats(self) -> QueueStats:
+        """Lag and pending counts of the consumer group (zero before it exists)."""
+        return _group_stats(await self._r.xinfo_groups(self.stream), self.group)
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +649,21 @@ class StoredResult:
         return body
 
 
-class ResultStore:
+class _ResultKeys:
+    """The keys a job's result lives under, shared by writer and reader."""
+
+    prefix: str
+
+    def _key(self, job_id: str, suffix: str) -> str:
+        return f"{self.prefix}:{job_id}:{suffix}"
+
+    def _chunk_keys(self, job_id: str, meta: dict) -> list[str]:
+        """The chunk keys a result's ``meta`` hash describes (none without it)."""
+        n_chunks = int(meta[b"chunks"]) if meta else 0
+        return [self._key(job_id, f"chunk:{n}") for n in range(n_chunks)]
+
+
+class ResultStore(_ResultKeys):
     """Results of ``/query`` jobs, kept in Redis until the API collects them.
 
     A result is one zstd frame stored in ``chunk_bytes`` pieces under
@@ -519,6 +671,9 @@ class ResultStore:
     hash, and announced by a push onto ``<prefix>:<job_id>:done`` that the
     waiting API process blocks on.  Every key carries the TTL, so a result
     nobody collects (the client gave up) expires on its own.
+
+    This is the side the worker writes with; the API collects results with
+    a :class:`ResultReader` on the same keys.
 
     Args:
         client: A ``redis.Redis`` returning bytes.
@@ -553,9 +708,6 @@ class ResultStore:
             zstd_level=settings.compress_zstd_level,
         )
 
-    def _key(self, job_id: str, suffix: str) -> str:
-        return f"{self.prefix}:{job_id}:{suffix}"
-
     def put(self, job_id: str, body: bytes, *, http_status: int = 200) -> int:
         """Store a serialized response and wake the waiter.
 
@@ -588,8 +740,60 @@ class ResultStore:
         pipe.execute()
         return len(compressed)
 
-    def wait(self, job_id: str, timeout: float) -> Optional[StoredResult]:
-        """Block until the job's result is stored, or *timeout* seconds pass.
+
+class ResultReader(_ResultKeys):
+    """The API's side of the :class:`ResultStore`, on asyncio.
+
+    Waits for a job's result, collects it and drops it, without holding a
+    thread while it waits: a ``/query`` can wait for as long as its budget
+    allows.  Each wait does hold a connection for its ``BLPOP``, so waits
+    can have a client of their own, its pool sized for them, and never take
+    the connections that enqueue jobs and answer ``/ready``.
+
+    Args:
+        client: A ``redis.asyncio.Redis`` returning bytes, for collecting
+            and dropping results.
+        wait_client: The client the waits block on; *client* by default.
+        prefix: Key prefix, as the writing :class:`ResultStore` has it.
+    """
+
+    def __init__(
+        self,
+        client: redis.asyncio.Redis,
+        *,
+        wait_client: Optional[redis.asyncio.Redis] = None,
+        prefix: str = "gandalf:result",
+    ):
+        self._r = client
+        self._waits = wait_client if wait_client is not None else client
+        self.prefix = prefix
+
+    @classmethod
+    def from_settings(
+        cls, client: Optional[redis.asyncio.Redis] = None
+    ) -> "ResultReader":
+        """A reader of the configured result store.
+
+        Its waits get a client of their own, with a pool of
+        ``queue_max_waiting`` connections.
+        """
+        return cls(
+            client if client is not None else async_redis_client(),
+            wait_client=async_redis_client(max_connections=settings.queue_max_waiting),
+        )
+
+    @property
+    def client(self) -> redis.asyncio.Redis:
+        """The client results are collected and dropped with."""
+        return self._r
+
+    @property
+    def wait_client(self) -> redis.asyncio.Redis:
+        """The client the waits block on."""
+        return self._waits
+
+    async def wait(self, job_id: str, timeout: float) -> Optional[StoredResult]:
+        """Wait until the job's result is stored, or *timeout* seconds pass.
 
         Returns:
             The result, or None if it did not arrive in time.
@@ -602,21 +806,18 @@ class ResultStore:
                 return None
             # BLPOP's zero means "forever", so the shortest wait is one tick;
             # each wait stays under the socket timeout (blocking_slice).
-            popped = self._r.blpop(
-                [key], timeout=max(blocking_slice(self._r, remaining), 0.01)
+            popped = await self._waits.blpop(
+                [key], timeout=max(blocking_slice(self._waits, remaining), 0.01)
             )
             if popped is not None:
-                return self.get(job_id)
+                return await self.get(job_id)
 
-    def get(self, job_id: str) -> Optional[StoredResult]:
+    async def get(self, job_id: str) -> Optional[StoredResult]:
         """The stored result, or None if there is none (or it expired)."""
-        meta = self._r.hgetall(self._key(job_id, "meta"))
+        meta = await self._r.hgetall(self._key(job_id, "meta"))
         if not meta:
             return None
-        n_chunks = int(meta[b"chunks"])
-        chunks = self._r.mget(
-            [self._key(job_id, f"chunk:{n}") for n in range(n_chunks)]
-        )
+        chunks = await self._r.mget(self._chunk_keys(job_id, meta))
         if any(chunk is None for chunk in chunks):
             return None
         return StoredResult(
@@ -625,14 +826,13 @@ class ResultStore:
             http_status=int(meta[b"http_status"]),
         )
 
-    def delete(self, job_id: str) -> None:
+    async def delete(self, job_id: str) -> None:
         """Drop a collected result rather than wait for its TTL."""
-        meta = self._r.hgetall(self._key(job_id, "meta"))
-        n_chunks = int(meta[b"chunks"]) if meta else 0
-        self._r.delete(
+        meta = await self._r.hgetall(self._key(job_id, "meta"))
+        await self._r.delete(
             self._key(job_id, "meta"),
             self._key(job_id, "done"),
-            *[self._key(job_id, f"chunk:{n}") for n in range(n_chunks)],
+            *self._chunk_keys(job_id, meta),
         )
 
 

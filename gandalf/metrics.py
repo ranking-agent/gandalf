@@ -87,6 +87,12 @@ SYNC_WAIT = Histogram(
     "How long a /query waited for its job's result, queue time included.",
     buckets=_DURATION_BUCKETS,
 )
+SYNC_WAITING = Gauge(
+    "gandalf_sync_waiting",
+    "/query requests waiting for their job's result right now "
+    "(at most GANDALF_QUEUE_MAX_WAITING per API process).",
+    multiprocess_mode="livesum",
+)
 SYNC_WAIT_TIMEOUTS = Counter(
     "gandalf_sync_wait_timeouts_total",
     "/query requests that gave up waiting for a worker (HTTP 504).",

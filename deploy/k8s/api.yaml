@@ -35,9 +35,10 @@ spec:
             - {name: GANDALF_SLACK_ENVIRONMENT, value: prod}
             - {name: GANDALF_SLACK_STATUS_URL, value: https://gandalf.example.org/status}
             # Two gunicorn workers is plenty: each request here is a
-            # validate, an XADD and a wait.  Each worker can hold 40 waiting
-            # /query calls (the thread pool), so this tier handles 80
-            # concurrent sync clients per pod.
+            # validate, an XADD and a wait.  A waiting /query holds no
+            # thread, only a Redis connection, so each worker can hold up
+            # to GANDALF_QUEUE_MAX_WAITING (1000) of them; keep
+            # pods x workers x that under Redis's maxclients.
             - {name: GANDALF_WORKERS, value: "2"}
             # Aggregates Prometheus metrics across the gunicorn workers.
             - {name: PROMETHEUS_MULTIPROC_DIR, value: /tmp/prometheus}

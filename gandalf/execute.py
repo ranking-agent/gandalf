@@ -173,7 +173,7 @@ def run_query(
     # Rehydration: skip lookup entirely, only enrich the supplied knowledge graph.
     if params.get("rehydrate") is not None:
         enrich_knowledge_graph(raw, graph)
-        return finalize_response({"message": raw["message"]}, raw)
+        return finalize_response({"message": raw["message"]}, raw, graph=graph)
 
     annotator_config = params.get("annotator_config") or {}
     response = lookup(
@@ -189,6 +189,9 @@ def run_query(
         deadline=deadline,
         attributes_as_json=as_json,
         results_as_json=as_json,
+        pairs=params.get("pairs"),
+        exclude_results=params.get("exclude_results", False),
+        subclass_qnodes=params.get("subclass_qnodes"),
     )
     if annotator_config:
         annotate_response(response, graph, annotator_config)

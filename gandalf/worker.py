@@ -36,7 +36,7 @@ import redis
 from bmt.toolkit import Toolkit
 from prometheus_client import start_http_server
 
-from gandalf import CSRGraph
+from gandalf import CSRGraph, otel
 from gandalf.config import settings
 from gandalf.execute import execute_to_bytes, load_runtime, post_callback
 from gandalf.execute import serialize_response
@@ -293,12 +293,39 @@ class Worker:
     def handle(self, delivery: Delivery) -> str:
         """Run one delivered job, deliver its answer and acknowledge it.
 
+        Traced in the trace of the request that made the job (see
+        :mod:`gandalf.otel`): ``gandalf.queue_wait`` for its time on the
+        stream, then ``gandalf.job`` around everything done with it here.
+
         Returns:
             The outcome recorded in ``gandalf_jobs_total``.
         """
         job = delivery.job
-        request_id_var.set(job.request_id or job.job_id[:8])
         started_at = time.time()
+        otel.record_span(
+            "gandalf.queue_wait",
+            start=job.accepted_at,
+            end=started_at,
+            carrier=job.trace_headers,
+            attributes={"gandalf.job_id": job.job_id},
+        )
+        with otel.span(
+            "gandalf.job",
+            carrier=job.trace_headers,
+            attributes={
+                "gandalf.job_id": job.job_id,
+                "gandalf.job_mode": job.mode,
+                "gandalf.worker": self.consumer,
+                "gandalf.deliveries": delivery.deliveries,
+                "gandalf.queue_wait_s": started_at - job.accepted_at,
+            },
+        ):
+            return self._handle(delivery, started_at)
+
+    def _handle(self, delivery: Delivery, started_at: float) -> str:
+        """:meth:`handle`'s work, inside the job's span."""
+        job = delivery.job
+        request_id_var.set(job.request_id or job.job_id[:8])
         wait_s = job.elapsed()
         JOB_QUEUE_WAIT.observe(wait_s)
         self._current = {
@@ -350,6 +377,7 @@ class Worker:
                     f"Query was abandoned after {delivery.deliveries - 1} attempts "
                     "ended without a result (the worker running it died); it was "
                     "not run again.",
+                    graph=self.graph,
                 )
             )
             http_status, outcome = 500, "poisoned"
@@ -363,6 +391,7 @@ class Worker:
                     on_tick=self.heartbeat,
                 ),
                 JOBS_INFLIGHT.track_inprogress(),
+                otel.span("gandalf.execute"),
             ):
                 body, http_status, outcome = self.execute(job)
         if outcome == "error":
@@ -376,9 +405,17 @@ class Worker:
                     {"job": job.job_id, "query": describe, "mode": job.mode},
                 )
             )
-        self.deliver(job, body, http_status)
+        with otel.span("gandalf.deliver"):
+            self.deliver(job, body, http_status)
         self.queue.ack(delivery.entry_id)
         body_size = len(body)
+        otel.set_attributes(
+            **{
+                "gandalf.outcome": outcome,
+                "http.status_code": http_status,
+                "gandalf.result_bytes": body_size,
+            }
+        )
         del body
         # The response is gone; hand its pages back rather than keep them.
         trim_heap_if_large(settings.heap_trim_threshold_mb)
@@ -427,7 +464,9 @@ class Worker:
             # The budget ran out while the job waited in the queue.  Answer as
             # a lookup that overran would, without starting one.
             return (
-                serialize_response(timeout_response(job.query, deadline, [])),
+                serialize_response(
+                    timeout_response(job.query, deadline, [], graph=self.graph)
+                ),
                 200,
                 "expired",
             )
@@ -443,7 +482,9 @@ class Worker:
         except Exception as exc:
             logger.exception("job %s failed", job.job_id)
             body = serialize_response(
-                error_response(job.query, f"{type(exc).__name__}: {exc}")
+                error_response(
+                    job.query, f"{type(exc).__name__}: {exc}", graph=self.graph
+                )
             )
             return body, 500, "error"
         JOB_DURATION.observe(time.perf_counter() - t0)
@@ -453,7 +494,10 @@ class Worker:
     def deliver(self, job: Job, body: bytes, http_status: int) -> None:
         """Hand the answer to whoever is waiting for it."""
         if job.callback:
-            post_callback(job.callback, body, job.trace_headers)
+            # The callback continues the trace from here, the deliver span.
+            headers = dict(job.trace_headers)
+            otel.inject_headers(headers)
+            post_callback(job.callback, body, headers)
         else:
             self.store.put(job.job_id, body, http_status=http_status)
 
@@ -466,6 +510,7 @@ def main() -> int:
     if not settings.queue_url:
         raise SystemExit("GANDALF_QUEUE_URL must be set to run a worker")
 
+    otel.init_otel()
     graph, bmt = load_runtime(serve_metadata=False)
     client = redis_client()
     worker = Worker(

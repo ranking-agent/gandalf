@@ -11,12 +11,14 @@
     --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
     --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
     --accent: #2a78d6; --good-text: #006300;
+    --wait-p50: #86b6ef; --wait-p95: #2a78d6;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       color-scheme: dark;
       --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
       --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --accent: #3987e5; --good-text: #0ca30c;
+      --wait-p50: #1c5cab; --wait-p95: #5598e7;
     }
   }
   * { box-sizing: border-box; }
@@ -56,6 +58,9 @@
   .empty { color: var(--muted); padding: 8px; }
   .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin-top: 6px; }
   .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; background: var(--c); }
+  .legend span.line::before { width: 14px; height: 2px; border-radius: 1px; vertical-align: 3px; }
+  #wait-chart { height: 160px; }
+  details summary { cursor: pointer; color: var(--ink-2); font-size: 12px; margin-top: 8px; }
   svg { display: block; width: 100%; height: 140px; }
   .tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--ring);
          border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); display: none; z-index: 2; }
@@ -89,6 +94,16 @@
         <span style="--c: var(--warning)">⏱ timed out</span>
         <span style="--c: var(--critical)">✕ failed</span>
       </div>
+    </div>
+
+    <h2>Queue wait per minute, last hour <span class="meta">· accepted → picked up by a worker, for the jobs finished each minute</span></h2>
+    <div class="card">
+      <svg id="wait-chart" role="img" aria-label="Queue wait of the jobs finished each minute over the last hour: median and 95th percentile"></svg>
+      <div class="legend">
+        <span class="line" style="--c: var(--wait-p95)">p95</span>
+        <span class="line" style="--c: var(--wait-p50)">p50 (median)</span>
+      </div>
+      <details><summary>Show as a table</summary><table id="wait-table"></table></details>
     </div>
 
     <h2>Alerts <span id="alerts-sub" class="meta"></span></h2>
@@ -159,6 +174,8 @@
     if (d.queue) {
       const q = d.queue, w = d.workers || {alive: 0, busy: 0}, h = d.jobs && d.jobs.windows["1h"];
       tile("Waiting for a worker", fmtN(q.lag), "stream lag · the scaling signal", q.lag > w.alive ? "warn" : "");
+      tile("Longest wait now", q.lag ? fmtS(q.oldest_waiting_s) : "–", q.lag ? "oldest job no worker has taken" : "nothing waiting", q.oldest_waiting_s > 30 ? "warn" : "");
+      tile("/query clients waiting", fmtN(q.sync_waiting), "on this pod, for a result");
       tile("Running", fmtN(q.pending), q.oldest_pending_s > 0 ? "oldest " + fmtS(q.oldest_pending_s) : "delivered, not acknowledged");
       tile("Workers", `${fmtN(w.busy)}<span class="meta"> / ${fmtN(w.alive)}</span>`, "busy / alive", w.alive === 0 ? "bad" : "");
       if (h) {
@@ -213,6 +230,94 @@
     });
   }
 
+  // A nice round axis top at or above v: 1, 2, 2.5 or 5 times a power of ten.
+  const niceMax = (v) => {
+    const p = 10 ** Math.floor(Math.log10(v));
+    return [1, 2, 2.5, 5, 10].map((m) => m * p).find((m) => m >= v);
+  };
+
+  let lastWait = [];
+  function waitChart(buckets) {
+    lastWait = buckets;
+    const svg = $("wait-chart");
+    // Drawn at the element's own pixel width, so text is never stretched.
+    const W = Math.max(320, Math.round(svg.getBoundingClientRect().width) || 1000), H = 160;
+    const top = 10, bottom = 20, left = 44, right = 84;
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const n = buckets.length, plotW = W - left - right, plotH = H - top - bottom;
+    const x = (i) => left + (n > 1 ? (plotW * i) / (n - 1) : plotW);
+    const series = [["wait_p95_s", "var(--wait-p95)", "p95"], ["wait_p50_s", "var(--wait-p50)", "p50"]];
+    const values = buckets.flatMap((b) => series.map(([k]) => b[k])).filter((v) => v != null);
+    if (!values.length) {
+      svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" font-size="13" fill="var(--muted)">No jobs finished in the last hour.</text>`;
+    } else {
+      const max = niceMax(Math.max(0.01, ...values));
+      const y = (v) => top + plotH * (1 - v / max);
+      let s = "";
+      [0, max / 2, max].forEach((t) => {
+        s += `<line x1="${left}" y1="${y(t)}" x2="${left + plotW}" y2="${y(t)}" stroke="var(${t ? "--grid" : "--axis"})" stroke-width="1"/>`;
+        s += `<text x="${left - 6}" y="${y(t) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${t ? fmtS(t) : "0"}</text>`;
+      });
+      // A time label every 5-30 minutes, as many as fit ~80px apart, and none
+      // crowding the newest minute's, which is always shown: it is right-aligned,
+      // so it reaches back about one label's width from its minute.
+      const perMinute = n > 1 ? plotW / (n - 1) : plotW;
+      const every = [5, 10, 15, 30].find((m) => m * perMinute >= 80) || n;
+      buckets.forEach((b, i) => {
+        const last = i === n - 1;
+        if (last || (i % every === 0 && (n - 1 - i) * perMinute >= 130)) {
+          s += `<text x="${x(i)}" y="${H - 4}" font-size="11" text-anchor="${last ? "end" : "start"}" fill="var(--muted)">${fmtT(b.minute).replace(/:\d\d( |$)/, "$1")}</text>`;
+        }
+      });
+      const ends = [];
+      series.forEach(([k, c, name]) => {
+        let d = "", pen = false, last = -1;
+        buckets.forEach((b, i) => {
+          const v = b[k];
+          if (v == null) { pen = false; return; }
+          d += (pen ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1);
+          pen = true; last = i;
+          // A minute alone between empty ones has no line; it gets a dot.
+          const prev = buckets[i - 1], next = buckets[i + 1];
+          if ((!prev || prev[k] == null) && (!next || next[k] == null)) {
+            s += `<circle cx="${x(i)}" cy="${y(v)}" r="4" fill="${c}" stroke="var(--surface)" stroke-width="2"/>`;
+          }
+        });
+        if (d) s += `<path d="${d}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+        if (last >= 0) ends.push({name, c, i: last, v: buckets[last][k]});
+      });
+      // End labels in text ink beside an end dot; only the p95's if they would touch.
+      const apart = ends.length < 2 || Math.abs(y(ends[0].v) - y(ends[1].v)) >= 14;
+      ends.forEach((e, j) => {
+        s += `<circle cx="${x(e.i)}" cy="${y(e.v)}" r="4" fill="${e.c}" stroke="var(--surface)" stroke-width="2"/>`;
+        if (j === 0 || apart) {
+          s += `<text x="${x(e.i) + 8}" y="${y(e.v) + 4}" font-size="11" fill="var(--ink-2)">${e.name} ${fmtS(e.v)}</text>`;
+        }
+      });
+      s += `<line id="wait-cross" x1="0" y1="${top}" x2="0" y2="${top + plotH}" stroke="var(--axis)" stroke-width="1" visibility="hidden"/>`;
+      s += `<rect id="wait-hit" x="${left}" y="${top}" width="${plotW}" height="${plotH}" fill="transparent"/>`;
+      svg.innerHTML = s;
+      const tip = $("tip"), cross = $("wait-cross");
+      $("wait-hit").addEventListener("mousemove", (e) => {
+        const px = e.clientX - svg.getBoundingClientRect().left;
+        const i = Math.max(0, Math.min(n - 1, Math.round(((px - left) / plotW) * (n - 1))));
+        const b = buckets[i], jobs = b.ok + b.timed_out + b.failed;
+        cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+        const key = (c) => `<span style="display:inline-block;width:12px;height:2px;background:${c};vertical-align:3px;margin-right:4px"></span>`;
+        tip.innerHTML = `<b>${fmtT(b.minute)}</b> · ${fmtN(jobs)} job${jobs === 1 ? "" : "s"}` + (jobs
+          ? `<br>${key("var(--wait-p95)")}p95 ${fmtS(b.wait_p95_s)}<br>${key("var(--wait-p50)")}p50 ${fmtS(b.wait_p50_s)}<br><span class="meta">longest ${fmtS(b.wait_max_s)}</span>`
+          : "");
+        tip.style.display = "block"; tip.style.left = (e.clientX + 12) + "px"; tip.style.top = (e.clientY + 12) + "px";
+      });
+      $("wait-hit").addEventListener("mouseleave", () => { tip.style.display = "none"; cross.setAttribute("visibility", "hidden"); });
+    }
+    const rows = buckets.filter((b) => b.wait_max_s != null).reverse();
+    table($("wait-table"), [{label: "Minute"}, {label: "Jobs", num: true}, {label: "p50", num: true}, {label: "p95", num: true}, {label: "Longest", num: true}],
+      rows.map((b) => [td(fmtT(b.minute)), td(fmtN(b.ok + b.timed_out + b.failed), "num"), td(fmtS(b.wait_p50_s), "num"), td(fmtS(b.wait_p95_s), "num"), td(fmtS(b.wait_max_s), "num")]),
+      "No jobs finished in the last hour.");
+  }
+  window.addEventListener("resize", () => { if (lastWait.length) waitChart(lastWait); });
+
   function render(d) {
     $("mode").className = "badge " + (d.mode === "queue" ? "ok" : "idle");
     $("mode").lastElementChild.textContent = d.mode + " mode";
@@ -221,6 +326,7 @@
     $("queue-section").style.display = d.queue ? "" : "none";
     if (d.queue) {
       chart(d.jobs ? d.jobs.per_minute : []);
+      waitChart(d.jobs ? d.jobs.per_minute : []);
       const al = d.alerts || {recent: [], slack: false, kinds: []};
       $("alerts-sub").textContent = al.slack ? "· Slack on for " + al.kinds.length + " kinds" : "· Slack not configured (GANDALF_SLACK_WEBHOOK_URL)";
       const sevIcon = {info: "ℹ", warning: "⚠", critical: "‼"};

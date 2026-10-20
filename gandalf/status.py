@@ -12,6 +12,7 @@ request counts); the queue, worker and job sections are then absent.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -33,18 +34,23 @@ WINDOWS = {"5m": 300, "1h": 3600, "24h": 86400}
 def percentile(values: list[float], fraction: float) -> Optional[float]:
     """The nearest-rank percentile of *values*, or None for no values.
 
+    The rank is rounded up, as nearest-rank has it; ``round()`` would round
+    a half to even and take the median of five values from the second.
+
     Examples:
         >>> percentile([1, 2, 3, 4], 0.5)
         2
         >>> percentile([5, 1, 3], 0.95)
         5
+        >>> percentile([1, 2, 3, 4, 5], 0.5)
+        3
         >>> percentile([], 0.5) is None
         True
     """
     if not values:
         return None
     ordered = sorted(values)
-    rank = max(1, int(round(fraction * len(ordered))))
+    rank = max(1, math.ceil(fraction * len(ordered)))
     return ordered[min(rank, len(ordered)) - 1]
 
 
@@ -94,18 +100,25 @@ def per_minute(records: list[dict], minutes: int, now: float) -> list[dict]:
     Each bucket is ``{"minute": epoch, "ok", "timed_out", "failed"}``:
     the three classes the page's chart stacks (``timeout`` and ``expired``
     are both the budget running out; ``error`` and ``poisoned`` both a
-    failure).
+    failure).  It also has the queue wait of those jobs --
+    ``wait_p50_s``, ``wait_p95_s``, ``wait_max_s`` -- which are None in a
+    minute that finished none.
 
     Examples:
         >>> buckets = per_minute([{"finished_at": 95, "outcome": "expired"}], 2, now=130)
         >>> [(b["minute"], b["timed_out"]) for b in buckets]
         [(60, 1), (120, 0)]
+        >>> recs = [{"finished_at": 125, "outcome": "ok", "wait_s": w} for w in (1, 2, 9)]
+        >>> b = per_minute(recs, 1, now=130)[0]
+        >>> b["wait_p50_s"], b["wait_p95_s"], b["wait_max_s"]
+        (2.0, 9.0, 9.0)
     """
     start = int(now // 60) * 60 - 60 * (minutes - 1)
-    buckets = [
+    buckets: list[dict] = [
         {"minute": start + 60 * i, "ok": 0, "timed_out": 0, "failed": 0}
         for i in range(minutes)
     ]
+    waits: list[list[float]] = [[] for _ in range(minutes)]
     for r in records:
         index = int((r.get("finished_at", 0) - start) // 60)
         if 0 <= index < minutes:
@@ -116,7 +129,25 @@ def per_minute(records: list[dict], minutes: int, now: float) -> list[dict]:
                 else "timed_out" if outcome in ("timeout", "expired") else "failed"
             )
             buckets[index][key] += 1
+            if "wait_s" in r:
+                waits[index].append(float(r["wait_s"]))
+    for bucket, minute_waits in zip(buckets, waits):
+        bucket["wait_p50_s"] = percentile(minute_waits, 0.5)
+        bucket["wait_p95_s"] = percentile(minute_waits, 0.95)
+        bucket["wait_max_s"] = max(minute_waits) if minute_waits else None
     return buckets
+
+
+def sync_waiting() -> int:
+    """``/query`` requests this pod is waiting on right now (all its processes).
+
+    The ``gandalf_sync_waiting`` gauge, summed over the pod's gunicorn
+    workers; each pod counts its own, so this is not the deployment's.
+    """
+    for metric in metrics_registry().collect():
+        if metric.name == "gandalf_sync_waiting":
+            return int(sum(sample.value for sample in metric.samples))
+    return 0
 
 
 def http_counts() -> list[dict]:
@@ -170,6 +201,8 @@ def snapshot(
         "pending": stats.pending,
         "length": queue.length(),
         "oldest_pending_s": max((p["idle_s"] for p in pending), default=0.0),
+        "oldest_waiting_s": queue.oldest_waiting_s(),
+        "sync_waiting": sync_waiting(),
         "pending_entries": pending,
         "dead_letters": queue.dead_letter_count(),
         "recent_dead_letters": queue.dead_letters(),

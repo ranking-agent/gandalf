@@ -60,7 +60,13 @@ def test_snapshot_without_queue_has_no_queue_sections(graph):  # noqa: F811
 
 @pytest.mark.parametrize(
     "values, fraction, expected",
-    [([1, 2, 3, 4], 0.5, 2), ([1, 2, 3, 4], 0.95, 4), ([7], 0.5, 7), ([], 0.5, None)],
+    [
+        ([1, 2, 3, 4], 0.5, 2),
+        ([1, 2, 3, 4], 0.95, 4),
+        ([1, 2, 3, 4, 5], 0.5, 3),  # rank 2.5 rounds up, not to even
+        ([7], 0.5, 7),
+        ([], 0.5, None),
+    ],
 )
 def test_percentile(values, fraction, expected):
     assert percentile(values, fraction) == expected
@@ -116,6 +122,38 @@ def test_per_minute_buckets_cover_the_window_oldest_first():
     )
     assert [b["minute"] for b in buckets] == [now - 120, now - 60, now]
     # now-30 falls in the minute starting at now-60; now-90 in the one before.
-    assert buckets[1] == {"minute": now - 60, "ok": 1, "timed_out": 0, "failed": 1}
+    no_waits = {"wait_p50_s": None, "wait_p95_s": None, "wait_max_s": None}
+    assert buckets[1] == {
+        "minute": now - 60,
+        "ok": 1,
+        "timed_out": 0,
+        "failed": 1,
+        **no_waits,
+    }
     assert buckets[0]["timed_out"] == 1
-    assert buckets[2] == {"minute": now, "ok": 0, "timed_out": 0, "failed": 0}
+    assert buckets[2] == {
+        "minute": now,
+        "ok": 0,
+        "timed_out": 0,
+        "failed": 0,
+        **no_waits,
+    }
+
+
+def test_per_minute_buckets_carry_the_queue_wait_of_their_jobs():
+    now = 7200.0
+    waits = [0.5, 1.0, 1.5, 2.0, 40.0]
+    buckets = per_minute(
+        [{"finished_at": now - 30, "outcome": "ok", "wait_s": w} for w in waits]
+        + [{"finished_at": now + 10, "outcome": "error", "wait_s": 3.0}],
+        3,
+        now,
+    )
+    assert buckets[0]["wait_max_s"] is None  # a minute that finished nothing
+    assert (
+        buckets[1]["wait_p50_s"],
+        buckets[1]["wait_p95_s"],
+        buckets[1]["wait_max_s"],
+    ) == (1.5, 40.0, 40.0)
+    # A failed job waited too, and counts.
+    assert buckets[2]["wait_p50_s"] == buckets[2]["wait_max_s"] == 3.0

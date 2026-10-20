@@ -426,12 +426,24 @@ Gandalf's own parameters:
 
 - `subclass` (bool): Enable biolink subclass inference (default `true`)
 - `subclass_depth` (int): Maximum `subclass_of` hops (default `1`)
+- `subclass_qnodes` (list of qnode ids): With `subclass`, expand only these
+  pinned qnodes to their subclass descendants; the other pinned qnodes match
+  their own ids only (default: every pinned qnode)
 - `dehydrated` (bool): Return the smallest useful response — edges carry only
   subject, object, predicate and the `knowledge_level` / `agent_type`
   attributes, with no other attributes and no `sources` (auto-enabled for very
   large result sets). TRAPI requires `sources`, so a dehydrated response is deliberately not
   schema-valid: the mode trades conformance for size, and rehydrating one
   (see `rehydrate`) restores a conformant response
+- `pairs` (list of `[subject_id, object_id]`): Restrict a one-hop query whose
+  ends are both pinned to edges between a listed pair, rather than between
+  every pinned subject and every pinned object. Fills in the edges of many
+  specific node pairs in one query without returning the edges of every other
+  combination. Requires exactly one query edge, both ends pinned, and
+  `"subclass": false`; anything else is a 400
+- `exclude_results` (bool): Leave `results` empty; the rest of the message
+  (`knowledge_graph`, `auxiliary_graphs`, ...) comes back as usual, for a
+  caller that only wants the edges
 - `rehydrate` (bool): When true, the server skips the graph lookup and **only** enriches the `knowledge_graph` already supplied in `message` — used to re-enrich a previously dehydrated response
 - `filter_config` (object): Plugin-defined node filter settings (each NodeFilter plugin reads its own key)
 - `annotator_config` (object): Per-request opt-in response-annotator settings (each key activates one annotator plugin)
@@ -471,6 +483,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_RATE_LIMIT` | `0` | Max requests per minute per client IP (0 = disabled) |
 | `GANDALF_SKIP_PRELOAD` | `false` | Skip module-level graph loading |
 | `GANDALF_WORKERS` | `2` | Gunicorn worker count |
+| `GANDALF_KEEPALIVE_SECONDS` | `75` | Seconds an idle keep-alive connection stays open. Keep it longer than the idle timeout of the clients' connection pools and of any proxy in front, or a client reusing a connection as the server closes it gets a connection error |
 | `GANDALF_QUEUE_URL` | _(empty)_ | Redis URL; set it to run queries in worker processes (see [Queue mode](#queue-mode-workers-and-autoscaling)) |
 | `GANDALF_QUEUE_SOCKET_TIMEOUT_SECONDS` | `30` | Redis socket timeout; a `?socket_timeout=` on the URL overrides it. Blocking waits are sliced to stay under it |
 | `GANDALF_QUEUE_CONNECT_TIMEOUT_SECONDS` | `5` | Redis connect timeout |
@@ -483,6 +496,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_CALLBACK_ATTEMPTS` | `3` | Tries to deliver an `/asyncquery` result to its callback on a connection failure, timeout or 5xx |
 | `GANDALF_CALLBACK_BACKOFF_SECONDS` | `2` | Wait before the second try, doubling after |
 | `GANDALF_QUEUE_SYNC_MAX_WAIT_SECONDS` | `1800` | How long `/query` waits for a worker when the query has no timeout |
+| `GANDALF_QUEUE_MAX_WAITING` | `1000` | Most `/query` results one API process waits on at once; one more is answered 503 without being enqueued. Each wait holds a Redis connection, so keep API processes × this under Redis's `maxclients` |
 | `GANDALF_QUEUE_SYNC_GRACE_SECONDS` | `30` | Added to the query's timeout for the worker's own Timeout response to arrive |
 | `GANDALF_RESULT_TTL_SECONDS` | `900` | How long an uncollected `/query` result lives in Redis |
 | `GANDALF_RESULT_CHUNK_BYTES` | `67108864` | Largest value written to one Redis key |
@@ -517,7 +531,6 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 |----------|---------|-------------|
 | `GANDALF_QUERY_TIMEOUT` | `0` | Server default for `parameters.timeout`, in seconds (0 = no timeout) |
 | `GANDALF_MIN_QUERY_TIMEOUT` | `1.0` | Shortest `parameters.timeout` the server accepts; below this it answers HTTP 409 |
-| `GANDALF_DATA_RELEASE_VERSIONS` | _(empty)_ | JSON object of source data versions reported as `Response.data_release_versions`, e.g. `{"translator_kg": "2026_06_21"}` |
 | `GANDALF_BIOLINK_VERSION` | `4.3.2` | Biolink Model version reported and used for predicate/qualifier expansion |
 
 ### Server Identity
@@ -659,6 +672,28 @@ each worker: request counts and latencies by route, jobs by outcome, job
 duration, queue wait, result size, the worker's anonymous RSS, and the
 stream's lag and pending counts.
 
+### Tracing a queued query
+
+With OpenTelemetry on in both the API and the workers, a queued query is one
+trace across both processes.  The job carries the request's W3C trace
+context (and its baggage, so a caller's `pk` is recorded on the worker's
+spans too).  In Jaeger, under the API's `POST /query` (or `/asyncquery`)
+span:
+
+| Span / event | Where | From → to |
+|---|---|---|
+| `POST /query` span | API | Gandalf receives the request → response sent; carries `gandalf.job_id` |
+| `job.enqueued` event | API | the job is on the stream |
+| `gandalf.queue_wait` span | worker | API accepted the query → a worker picked it up |
+| `gandalf.job` span | worker | picked up → answered and acknowledged; carries outcome, status, result size |
+| `gandalf.execute` span | worker | running the query |
+| `gandalf.deliver` span | worker | storing the result (or POSTing the callback) |
+| `job.result_received` event | API | the API has the result (`job.wait_timed_out` on a 504) |
+
+`gandalf.queue_wait` starts on the API's clock and ends on the worker's, so
+clock skew between hosts shows up in it.  The reference manifests and
+`compose.yml` report the workers as the `gandalf-worker` service.
+
 ### The status page
 
 `GET /status` on any API pod is a live view of the whole deployment, built
@@ -666,7 +701,11 @@ from what the processes report into Redis rather than from Kubernetes,
 Prometheus or Jaeger -- so it works for anyone who can reach the API:
 
 - how many jobs are waiting for a worker (the scaling signal), running, and
-  dead-lettered;
+  dead-lettered, and how long the oldest one still waiting has waited;
+- queue wait (accepted to picked up) per minute over the last hour, p50
+  and p95, with a table view, and how many `/query` clients this pod is
+  holding open for a result (`gandalf_sync_waiting`; each pod counts its
+  own);
 - every worker: idle or running what, for how long, jobs done, last
   outcome, memory, last seen;
 - the recent jobs with outcome, queue wait, run time and size, and a
