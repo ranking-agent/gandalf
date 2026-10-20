@@ -34,11 +34,20 @@ def make_toolkit() -> Toolkit:
     """Construct a BMT Toolkit pinned to ``settings.biolink_version``.
 
     If the version is empty, fall back to BMT's built-in default schema.
+
+    The schema's imports are resolved here, before the toolkit is returned.
+    BMT resolves them lazily, on first use, which fetches more of the model
+    (``attributes.yaml`` and the like) over the network: left to itself, that
+    happened inside the first query each process ran (about half a second,
+    or a failed query if the fetch failed), rather than at startup.
     """
     version = settings.biolink_version
     if not version:
-        return Toolkit()
-    return Toolkit(
-        schema=_SCHEMA_URL.format(version=version),
-        predicate_map=_PREDICATE_MAP_URL.format(version=version),
-    )
+        toolkit = Toolkit()
+    else:
+        toolkit = Toolkit(
+            schema=_SCHEMA_URL.format(version=version),
+            predicate_map=_PREDICATE_MAP_URL.format(version=version),
+        )
+    toolkit.view.imports_closure()
+    return toolkit
