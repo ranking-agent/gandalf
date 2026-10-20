@@ -11,6 +11,7 @@ on a free port for the session.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import shutil
@@ -509,6 +510,132 @@ def test_async_query_through_the_queue_posts_the_callback(
     assert _without_logs(posted["body"]) == _without_logs(
         _in_process_response(graph, bmt, ONE_HOP)
     )
+
+
+# ---------------------------------------------------------------------------
+# Tracing across the queue
+# ---------------------------------------------------------------------------
+
+_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+_TRACE_ID = int("0af7651916cd43dd8448eb211c80319c", 16)
+_PARENT_SPAN_ID = int("b7ad6b7169203331", 16)
+_PK = "0af76519-16cd-43dd-8448-eb211c80319c"
+
+
+def _tracing(monkeypatch, app=None):
+    """Turn tracing on (instrumenting *app*, if given) and collect the spans.
+
+    Yields an in-memory exporter; the module is reloaded afterwards so later
+    tests see tracing off again.
+    """
+    pytest.importorskip("opentelemetry.instrumentation.fastapi")
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    import gandalf.otel
+
+    monkeypatch.setattr(settings, "otel_enabled", True)
+    # No collector in tests; the in-memory exporter is what is read.
+    monkeypatch.setattr(settings, "otel_use_console_exporter", True)
+    importlib.reload(gandalf.otel)
+    gandalf.otel.init_otel(app)
+    if app is not None:
+        # The instrumentation takes effect when the middleware stack is
+        # built, which an app that has served requests already did (a server
+        # process instruments before its first request).
+        app.middleware_stack = app.build_middleware_stack()
+    exporter = InMemorySpanExporter()
+    gandalf.otel._provider.add_span_processor(SimpleSpanProcessor(exporter))
+    try:
+        yield exporter
+    finally:
+        if app is not None:
+            from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+            FastAPIInstrumentor.uninstrument_app(app)
+        importlib.reload(gandalf.otel)
+
+
+@pytest.fixture
+def traced(monkeypatch):
+    """Tracing on in this process, as in a worker; yields the span exporter."""
+    yield from _tracing(monkeypatch)
+
+
+@pytest.fixture
+def traced_api(monkeypatch):
+    """Tracing on with the API instrumented; yields the span exporter."""
+    yield from _tracing(monkeypatch, gandalf_server.APP)
+
+
+def test_worker_spans_join_the_trace_the_job_carries(
+    traced, graph, bmt, queue, store
+):  # noqa: F811
+    job = Job.new(
+        dict(ONE_HOP),
+        trace_headers={"traceparent": _TRACEPARENT, "baggage": f"pk={_PK}"},
+    )
+    queue.enqueue(job)
+    delivery = queue.receive("w", block_seconds=0.1)
+    assert delivery is not None
+    assert Worker(graph, bmt, queue, store, consumer="w").handle(delivery) == "ok"
+
+    spans = {span.name: span for span in traced.get_finished_spans()}
+    assert set(spans) == {
+        "gandalf.queue_wait",
+        "gandalf.job",
+        "gandalf.execute",
+        "gandalf.deliver",
+    }
+    assert {span.context.trace_id for span in spans.values()} == {_TRACE_ID}
+    wait, handled = spans["gandalf.queue_wait"], spans["gandalf.job"]
+    # Both hang off the API's span; the work happens inside the job's.
+    assert wait.parent.span_id == handled.parent.span_id == _PARENT_SPAN_ID
+    for inner in ("gandalf.execute", "gandalf.deliver"):
+        assert spans[inner].parent.span_id == handled.context.span_id
+    # Waiting runs from acceptance to pickup; then run, then answer.
+    assert wait.start_time == int(job.accepted_at * 1e9)
+    assert wait.end_time <= handled.start_time
+    assert spans["gandalf.execute"].end_time <= spans["gandalf.deliver"].start_time
+    assert spans["gandalf.deliver"].end_time <= handled.end_time
+    assert handled.attributes["gandalf.job_id"] == job.job_id
+    assert handled.attributes["gandalf.outcome"] == "ok"
+    assert handled.attributes["http.status_code"] == 200
+    assert handled.attributes["gandalf.result_bytes"] > 0
+    assert handled.attributes["pk"] == wait.attributes["pk"] == _PK
+
+
+def test_a_queued_query_is_one_trace_from_api_to_worker(
+    traced_api, api, worker
+):  # noqa: F811
+    resp = api.post(
+        "/query",
+        json=ONE_HOP,
+        headers={"traceparent": _TRACEPARENT, "baggage": f"pk={_PK}"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    def _spans() -> dict:
+        return {span.name: span for span in traced_api.get_finished_spans()}
+
+    assert _wait_for(lambda: "gandalf.job" in _spans())
+    spans = _spans()
+    request = spans["POST /query"]
+    handled = spans["gandalf.job"]
+    assert request.context.trace_id == handled.context.trace_id == _TRACE_ID
+    assert handled.parent.span_id == request.context.span_id
+    assert spans["gandalf.queue_wait"].parent.span_id == request.context.span_id
+    assert request.attributes["gandalf.job_id"] == handled.attributes["gandalf.job_id"]
+    assert handled.attributes["pk"] == _PK
+    # Only what causality orders: a worker can pick the job up before the
+    # API records job.enqueued, and the API can wake on the stored result
+    # before the worker closes its deliver span.
+    events = {event.name: event.timestamp for event in request.events}
+    assert request.start_time <= events["job.enqueued"]
+    assert spans["gandalf.deliver"].start_time <= events["job.result_received"]
+    assert events["job.result_received"] <= request.end_time
 
 
 def test_budget_spent_in_the_queue_is_a_timeout_response(

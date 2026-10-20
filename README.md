@@ -609,6 +609,28 @@ each worker: request counts and latencies by route, jobs by outcome, job
 duration, queue wait, result size, the worker's anonymous RSS, and the
 stream's lag and pending counts.
 
+### Tracing a queued query
+
+With OpenTelemetry on in both the API and the workers, a queued query is one
+trace across both processes.  The job carries the request's W3C trace
+context (and its baggage, so a caller's `pk` is recorded on the worker's
+spans too).  In Jaeger, under the API's `POST /query` (or `/asyncquery`)
+span:
+
+| Span / event | Where | From → to |
+|---|---|---|
+| `POST /query` span | API | Gandalf receives the request → response sent; carries `gandalf.job_id` |
+| `job.enqueued` event | API | the job is on the stream |
+| `gandalf.queue_wait` span | worker | API accepted the query → a worker picked it up |
+| `gandalf.job` span | worker | picked up → answered and acknowledged; carries outcome, status, result size |
+| `gandalf.execute` span | worker | running the query |
+| `gandalf.deliver` span | worker | storing the result (or POSTing the callback) |
+| `job.result_received` event | API | the API has the result (`job.wait_timed_out` on a 504) |
+
+`gandalf.queue_wait` starts on the API's clock and ends on the worker's, so
+clock skew between hosts shows up in it.  The reference manifests and
+`compose.yml` report the workers as the `gandalf-worker` service.
+
 ### The status page
 
 `GET /status` on any API pod is a live view of the whole deployment, built

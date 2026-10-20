@@ -840,14 +840,22 @@ async def _enqueue_and_wait(
     deadline: Optional[Deadline],
     accept_encoding: str,
 ) -> Response:
-    """Put the ``/query`` on the stream and answer with its result (or 504)."""
+    """Put the ``/query`` on the stream and answer with its result (or 504).
+
+    The job carries this request's trace context, so the worker's spans
+    join the request's trace (see :mod:`gandalf.otel`).
+    """
     assert AQUEUE is not None and RESULTS is not None
+    trace_headers: dict[str, str] = {}
+    otel.inject_headers(trace_headers)
     job = Job.new(
         raw,
         profile=profile,
         budget=deadline.budget if deadline is not None else None,
+        trace_headers=trace_headers,
         request_id=request_id_var.get(""),
     )
+    otel.set_attributes(**{"gandalf.job_id": job.job_id})
     wait = job.wait_seconds()
     t0 = time.monotonic()
     # Redis down is a 503, not a 500: the client can retry, and /ready is
@@ -855,12 +863,16 @@ async def _enqueue_and_wait(
     try:
         await AQUEUE.enqueue(job)
         JOBS_ENQUEUED.labels("sync").inc()
+        otel.add_event("job.enqueued")
         logger.info("job %s enqueued; waiting up to %.0fs", job.job_id, wait)
         result = await RESULTS.wait(job.job_id, timeout=wait)
     except redis.RedisError as exc:
         logger.error("job %s: queue unavailable: %s", job.job_id, exc)
         raise HTTPException(503, f"Queue unavailable: {type(exc).__name__}") from exc
     SYNC_WAIT.observe(time.monotonic() - t0)
+    otel.add_event(
+        "job.result_received" if result is not None else "job.wait_timed_out"
+    )
     if result is None:
         SYNC_WAIT_TIMEOUTS.inc()
         raise HTTPException(
@@ -962,6 +974,7 @@ def _dispatch_async(
             trace_headers=trace_headers,
             request_id=request_id_var.get(""),
         )
+        otel.set_attributes(**{"gandalf.job_id": job.job_id})
         try:
             QUEUE.enqueue(job)
         except redis.RedisError as exc:
@@ -970,6 +983,7 @@ def _dispatch_async(
                 503, f"Queue unavailable: {type(exc).__name__}"
             ) from exc
         JOBS_ENQUEUED.labels("callback").inc()
+        otel.add_event("job.enqueued")
         logger.info("job %s enqueued for callback %s", job.job_id, callback)
         return _async_accepted(callback, job.job_id)
     logger.info("Doing async lookup for %s", callback)
