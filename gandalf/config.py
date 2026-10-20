@@ -80,11 +80,6 @@ class Settings(BaseSettings):
     query_timeout: float = 0.0
     min_query_timeout: float = 1.0
 
-    # Source-data versions reported as Response.data_release_versions, as a
-    # JSON object mapping source name to release version, e.g.
-    # '{"translator_kg": "2026_06_21"}'.  Empty omits the property.
-    data_release_versions: str = ""
-
     # Path reconstruction tunables (search/reconstruct.py)
     debug_paths_tsv: str = ""
     large_result_threshold: int = 10_000_000

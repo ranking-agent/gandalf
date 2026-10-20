@@ -218,33 +218,26 @@ class Deadline:
             )
 
 
-def data_release_versions() -> dict:
-    """Return the configured source-data versions for ``Response.data_release_versions``.
+def data_release_versions(graph: Any = None) -> dict:
+    """Return the graph's source-data version for ``Response.data_release_versions``.
 
-    Read from the ``GANDALF_DATA_RELEASE_VERSIONS`` environment variable as a
-    JSON object mapping a source name to its release version, e.g.
-    ``{"translator_kg": "2026_06_21"}``.  Returns an empty dict when unset or
-    unparseable, in which case the Response omits the property (TRAPI 2.0
-    requires at least one entry when it is present).
+    Read from ``graph.graph_metadata["version"]`` (the graph directory's
+    ``graph-metadata.json``) and keyed by this server's infores.  Returns an
+    empty dict when there is no graph, no metadata or no version, in which
+    case the Response omits the property (TRAPI 2.0 requires at least one
+    entry when it is present).
+
+    Examples:
+        >>> data_release_versions(None)
+        {}
     """
-    raw = settings.data_release_versions
-    if not raw:
+    metadata = getattr(graph, "graph_metadata", None)
+    if not isinstance(metadata, dict):
         return {}
-    try:
-        parsed = orjson.loads(raw)
-    except orjson.JSONDecodeError:
-        logger.warning(
-            "GANDALF_DATA_RELEASE_VERSIONS is not valid JSON; "
-            "omitting data_release_versions from responses"
-        )
+    version = metadata.get("version")
+    if version is None or version == "":
         return {}
-    if not isinstance(parsed, dict) or not parsed:
-        logger.warning(
-            "GANDALF_DATA_RELEASE_VERSIONS must be a non-empty JSON object "
-            "mapping source name to version; omitting data_release_versions"
-        )
-        return {}
-    return {str(name): str(version) for name, version in parsed.items()}
+    return {settings.infores: str(version)}
 
 
 class GandalfParametersDict(QueryParametersDict):
@@ -625,6 +618,7 @@ def finalize_response(
     request: Optional[QueryDict] = None,
     status: str = "Success",
     description: Optional[str] = None,
+    graph: Any = None,
 ) -> ResponseDict:
     """Stamp the TRAPI 2.0 Response envelope onto a response dict, in place.
 
@@ -638,6 +632,7 @@ def finalize_response(
         request: The originating request, read for its ``parameters``.
         status: A short status code for the outcome.
         description: A brief human-readable description of the outcome.
+        graph: The loaded graph, read for its metadata's data version.
 
     Returns:
         The same dict, now complete.
@@ -657,7 +652,7 @@ def finalize_response(
     response["schema_version"] = SCHEMA_VERSION
     response["biolink_version"] = settings.biolink_version
 
-    releases = data_release_versions()
+    releases = data_release_versions(graph)
     if releases:
         response["data_release_versions"] = releases
 
@@ -680,7 +675,10 @@ def finalize_response(
 
 
 def timeout_response(
-    query: QueryDict, deadline: Deadline, logs: list[LogEntryDict]
+    query: QueryDict,
+    deadline: Deadline,
+    logs: list[LogEntryDict],
+    graph: Any = None,
 ) -> ResponseDict:
     """Build the Response for a query that ran out of time.
 
@@ -693,6 +691,7 @@ def timeout_response(
         query: The original request dict.
         deadline: The exhausted deadline, read for its budget and elapsed time.
         logs: TRAPI LogEntry dicts collected before the timeout.
+        graph: The loaded graph, read for its metadata's data version.
 
     Returns:
         A complete TRAPI Response with ``status`` of ``Timeout``.
@@ -702,10 +701,14 @@ def timeout_response(
         f"after {deadline.elapsed:.1f}s."
     )
     response: ResponseDict = {"message": _empty_message(query), "logs": logs}
-    return finalize_response(response, query, status="Timeout", description=description)
+    return finalize_response(
+        response, query, status="Timeout", description=description, graph=graph
+    )
 
 
-def error_response(query: QueryDict, description: str) -> ResponseDict:
+def error_response(
+    query: QueryDict, description: str, graph: Any = None
+) -> ResponseDict:
     """Build the Response for a query that failed outright.
 
     The shape of :func:`timeout_response` with a ``status`` of ``Error``: the
@@ -716,6 +719,7 @@ def error_response(query: QueryDict, description: str) -> ResponseDict:
     Args:
         query: The original request dict.
         description: What went wrong, in one sentence.
+        graph: The loaded graph, read for its metadata's data version.
 
     Returns:
         A complete TRAPI Response with ``status`` of ``Error``.
@@ -731,7 +735,9 @@ def error_response(query: QueryDict, description: str) -> ResponseDict:
         "message": description,
     }
     response: ResponseDict = {"message": _empty_message(query), "logs": [log]}
-    return finalize_response(response, query, status="Error", description=description)
+    return finalize_response(
+        response, query, status="Error", description=description, graph=graph
+    )
 
 
 def _empty_message(query: QueryDict) -> MessageDict:

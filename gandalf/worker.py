@@ -377,6 +377,7 @@ class Worker:
                     f"Query was abandoned after {delivery.deliveries - 1} attempts "
                     "ended without a result (the worker running it died); it was "
                     "not run again.",
+                    graph=self.graph,
                 )
             )
             http_status, outcome = 500, "poisoned"
@@ -463,7 +464,9 @@ class Worker:
             # The budget ran out while the job waited in the queue.  Answer as
             # a lookup that overran would, without starting one.
             return (
-                serialize_response(timeout_response(job.query, deadline, [])),
+                serialize_response(
+                    timeout_response(job.query, deadline, [], graph=self.graph)
+                ),
                 200,
                 "expired",
             )
@@ -479,7 +482,9 @@ class Worker:
         except Exception as exc:
             logger.exception("job %s failed", job.job_id)
             body = serialize_response(
-                error_response(job.query, f"{type(exc).__name__}: {exc}")
+                error_response(
+                    job.query, f"{type(exc).__name__}: {exc}", graph=self.graph
+                )
             )
             return body, 500, "error"
         JOB_DURATION.observe(time.perf_counter() - t0)

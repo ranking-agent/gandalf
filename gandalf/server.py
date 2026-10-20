@@ -1047,7 +1047,9 @@ def async_query(
         results = raw["message"].get("results") or []
         if int(max_results) < len(results):
             raw["message"]["results"] = results[: int(max_results)]
-        return _trapi_response(finalize_response({"message": raw["message"]}, raw))
+        return _trapi_response(
+            finalize_response({"message": raw["message"]}, raw, graph=GRAPH)
+        )
     if workflow_dicts[0].get("id") != "lookup":
         raise HTTPException(400, "operations must have id 'lookup'")
 

@@ -479,7 +479,6 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 |----------|---------|-------------|
 | `GANDALF_QUERY_TIMEOUT` | `0` | Server default for `parameters.timeout`, in seconds (0 = no timeout) |
 | `GANDALF_MIN_QUERY_TIMEOUT` | `1.0` | Shortest `parameters.timeout` the server accepts; below this it answers HTTP 409 |
-| `GANDALF_DATA_RELEASE_VERSIONS` | _(empty)_ | JSON object of source data versions reported as `Response.data_release_versions`, e.g. `{"translator_kg": "2026_06_21"}` |
 | `GANDALF_BIOLINK_VERSION` | `4.3.2` | Biolink Model version reported and used for predicate/qualifier expansion |
 
 ### Server Identity
