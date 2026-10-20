@@ -731,7 +731,8 @@ def _single_path_json(
     def id_lengths(edges: np.ndarray) -> np.ndarray:
         if store is None:
             return np.zeros(len(edges), dtype=np.int64)
-        return store.lengths(edges)
+        lengths: np.ndarray = store.lengths(edges)
+        return lengths
 
     fast_rows = first[fast_groups]
     # Each unique edge's ID as the JSON a result binds it by, and as the str

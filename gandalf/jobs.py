@@ -48,7 +48,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Iterator, Optional, cast
+from typing import Any, Callable, Iterator, Mapping, Optional, cast
 
 import orjson
 import redis
@@ -296,7 +296,7 @@ def summarize_query(query: QueryDict) -> dict:
         {'nodes': 0, 'edges': 0, 'ids': [], 'predicates': []}
     """
     message = query.get("message") or {}
-    query_graph = message.get("query_graph") or {}
+    query_graph: Mapping[str, Any] = message.get("query_graph") or {}
     nodes = query_graph.get("nodes") or {}
     edges = query_graph.get("edges") or {}
     ids = [i for node in nodes.values() for i in (node.get("ids") or [])]
@@ -387,7 +387,7 @@ class JobQueue:
 
     def enqueue(self, job: Job) -> str:
         """Put *job* on the stream and return its entry id."""
-        entry_id: bytes = self._r.xadd(self.stream, {b"job": job.to_bytes()})
+        entry_id = cast(bytes, self._r.xadd(self.stream, {b"job": job.to_bytes()}))
         return entry_id.decode()
 
     def receive(self, consumer: str, block_seconds: float) -> Optional[Delivery]:
@@ -400,12 +400,15 @@ class JobQueue:
         stale = self._claim_stale(consumer)
         if stale is not None:
             return stale
-        response = self._r.xreadgroup(
-            self.group,
-            consumer,
-            {self.stream: ">"},
-            count=1,
-            block=int(blocking_slice(self._r, block_seconds) * 1000),
+        response = cast(
+            list,  # decode_responses off: [[stream, [(entry_id, fields)]]]
+            self._r.xreadgroup(
+                self.group,
+                consumer,
+                {self.stream: ">"},
+                count=1,
+                block=int(blocking_slice(self._r, block_seconds) * 1000),
+            ),
         )
         if not response:
             return None
@@ -527,8 +530,11 @@ class JobQueue:
                 "idle_s": entry["time_since_delivered"] / 1000.0,
                 "deliveries": int(entry["times_delivered"]),
             }
-            for entry in self._r.xpending_range(
-                self.stream, self.group, min="-", max="+", count=count
+            for entry in cast(
+                list[dict],
+                self._r.xpending_range(
+                    self.stream, self.group, min="-", max="+", count=count
+                ),
             )
         ]
 
@@ -538,7 +544,9 @@ class JobQueue:
         Each is ``{"entry_id", "job_id", "query", "deliveries", "dead_at"}``.
         """
         letters = []
-        for entry_id, fields in self._r.xrevrange(self.dead_stream, count=count):
+        for entry_id, fields in cast(
+            list, self._r.xrevrange(self.dead_stream, count=count)
+        ):
             job = Job.from_bytes(fields[b"job"])
             letters.append(
                 {
@@ -817,7 +825,7 @@ class ResultReader(_ResultKeys):
         meta = await self._r.hgetall(self._key(job_id, "meta"))
         if not meta:
             return None
-        chunks = await self._r.mget(self._chunk_keys(job_id, meta))
+        chunks = cast(list, await self._r.mget(self._chunk_keys(job_id, meta)))
         if any(chunk is None for chunk in chunks):
             return None
         return StoredResult(
@@ -885,7 +893,7 @@ class WorkerRegistry:
         key = f"{self.prefix}:{name}"
         pipe = self._r.pipeline(transaction=True)
         pipe.delete(key)
-        pipe.hset(key, mapping=mapping)
+        pipe.hset(key, mapping=cast(dict, mapping))
         pipe.pexpire(key, int(self.ttl * 1000))
         pipe.zadd(self._index, {name: now})
         pipe.execute()
@@ -901,7 +909,9 @@ class WorkerRegistry:
 
     def last_words(self, name: str) -> str:
         """What *name*'s previous incarnation recorded as it died, consumed."""
-        words = self._r.getdel(f"{self.prefix}:{name}:last_words")
+        words = cast(
+            Optional[bytes], self._r.getdel(f"{self.prefix}:{name}:last_words")
+        )
         return words.decode() if words else ""
 
     def forget(self, name: str) -> None:
@@ -913,7 +923,7 @@ class WorkerRegistry:
 
     def workers(self) -> list[dict]:
         """Every worker with a live report, most recently seen first."""
-        names = self._r.zrevrange(self._index, 0, -1)
+        names = cast(list[bytes], self._r.zrevrange(self._index, 0, -1))
         reports = []
         for raw_name in names:
             name = raw_name.decode()
@@ -1000,7 +1010,7 @@ class JobHistory:
     def recent(self, count: int) -> list[dict]:
         """The newest *count* records, newest first."""
         records = []
-        for entry_id, fields in self._r.xrevrange(self.stream, count=count):
+        for entry_id, fields in cast(list, self._r.xrevrange(self.stream, count=count)):
             record = _typed_history(_decode(fields))
             record["entry_id"] = entry_id.decode()
             records.append(record)

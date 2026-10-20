@@ -30,7 +30,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, cast
 
 import httpx
 import orjson
@@ -365,7 +365,7 @@ class Notifier:
         if self._r is None:
             return []
         alerts = []
-        for entry_id, fields in self._r.xrevrange(LOG_STREAM, count=count):
+        for entry_id, fields in cast(list, self._r.xrevrange(LOG_STREAM, count=count)):
             alert = _decode(fields)
             alert["at"] = float(alert["at"])
             alert["fields"] = (
@@ -472,7 +472,7 @@ class Monitor:
         reports = {r["name"]: r for r in self.registry.workers()}
         known = {
             k.decode(): orjson.loads(v)
-            for k, v in self._r.hgetall(KNOWN_WORKERS).items()
+            for k, v in cast(dict, self._r.hgetall(KNOWN_WORKERS)).items()
         }
         events = []
         for name, last in known.items():

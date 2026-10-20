@@ -152,7 +152,7 @@ def sync_waiting() -> int:
 
 def http_counts() -> list[dict]:
     """This pod's request counts by route and status, from its Prometheus registry."""
-    rows = []
+    rows: list[dict[str, Any]] = []
     for metric in metrics_registry().collect():
         if metric.name != "gandalf_http_requests":
             continue
