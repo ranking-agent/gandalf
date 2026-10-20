@@ -692,7 +692,10 @@ how many were suppressed.  Scaling itself shows up as `worker_started` and
 `worker_stopped`, each with the pool size after the change.
 
 `docker compose --profile queue up --build` runs the API, a Redis and one
-worker locally with `GANDALF_QUEUE_URL=redis://redis:6379/0`.
+worker locally with `GANDALF_QUEUE_URL=redis://redis:6379/0`.  The API
+container starts only once the worker is healthy, that is, consuming (its
+heartbeat file is fresh), so queries are not accepted while every worker is
+still loading the graph.
 
 The Redis-backed tests need a server and are deselected by default:
 
