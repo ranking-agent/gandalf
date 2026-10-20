@@ -638,7 +638,11 @@ from what the processes report into Redis rather than from Kubernetes,
 Prometheus or Jaeger -- so it works for anyone who can reach the API:
 
 - how many jobs are waiting for a worker (the scaling signal), running, and
-  dead-lettered;
+  dead-lettered, and how long the oldest one still waiting has waited;
+- queue wait (accepted to picked up) per minute over the last hour, p50
+  and p95, with a table view, and how many `/query` clients this pod is
+  holding open for a result (`gandalf_sync_waiting`; each pod counts its
+  own);
 - every worker: idle or running what, for how long, jobs done, last
   outcome, memory, last seen;
 - the recent jobs with outcome, queue wait, run time and size, and a

@@ -169,6 +169,19 @@ def test_enqueue_receive_ack(queue):
     assert queue.receive("a", block_seconds=0.05) is None
 
 
+def test_oldest_waiting_counts_only_jobs_no_worker_has_taken(queue):
+    assert queue.oldest_waiting_s() == 0.0  # empty stream
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    time.sleep(0.3)
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert 0.3 <= queue.oldest_waiting_s() < 2.0
+    # Once the first is taken, the second is the oldest still waiting.
+    assert queue.receive("w", block_seconds=0.1) is not None
+    assert queue.oldest_waiting_s() < 0.3
+    assert queue.receive("w", block_seconds=0.1) is not None
+    assert queue.oldest_waiting_s() == 0.0
+
+
 def test_stale_job_is_taken_over_then_dead_lettered(queue, client):
     job = Job.new(dict(ONE_HOP))
     queue.enqueue(job)
@@ -439,6 +452,11 @@ def test_a_query_over_the_waiting_cap_is_not_enqueued(api, queue, monkeypatch):
     for thread in threads:
         thread.start()
     assert _wait_for(lambda: queue.stats().lag == 3, 2.0)
+    # The status page sees them: three clients waiting, the oldest for a while.
+    time.sleep(0.2)
+    waiting = api.get("/status.json").json()["queue"]
+    assert waiting["sync_waiting"] == 3
+    assert waiting["oldest_waiting_s"] >= 0.2
 
     over = api.post("/query", json=body)
     assert over.status_code == 503
@@ -830,6 +848,8 @@ def test_status_json_in_queue_mode(
 
     data = api.get("/status.json").json()
     assert data["queue"]["lag"] == 0 and data["queue"]["pending"] == 0
+    assert data["queue"]["oldest_waiting_s"] == 0.0
+    assert data["queue"]["sync_waiting"] == 0
     assert data["queue"]["dead_letters"] == 0
     recent = data["jobs"]["recent"]
     assert [j["mode"] for j in recent] == ["callback", "sync"]
@@ -840,6 +860,8 @@ def test_status_json_in_queue_mode(
     assert hour["jobs"] == 2 and hour["outcomes"]["ok"] == 2 and hour["failed"] == 0
     assert sum(b["ok"] for b in data["jobs"]["per_minute"]) == 2
     assert len(data["jobs"]["per_minute"]) == 60
+    waited = [b for b in data["jobs"]["per_minute"] if b["wait_max_s"] is not None]
+    assert waited and all(b["wait_p50_s"] >= 0 for b in waited)
     worker = data["workers"]["reports"][0]
     assert (
         worker["jobs_done"] == 2

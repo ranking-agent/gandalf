@@ -494,6 +494,27 @@ class JobQueue:
         """Entries on the stream, delivered or not (acknowledged ones are kept)."""
         return int(self._r.xlen(self.stream))
 
+    def oldest_waiting_s(self) -> float:
+        """How long the oldest job no worker has taken yet has been waiting.
+
+        A stream entry's id is the Redis server's clock, in milliseconds,
+        when it was added, so the age is measured on that clock too: no
+        skew between hosts.  Zero when every job has been taken.
+        """
+        last_delivered = b"0-0"
+        for group in self._r.xinfo_groups(self.stream):
+            if group["name"] == self.group.encode():
+                last_delivered = group["last-delivered-id"]
+        entries = self._r.xrange(
+            self.stream, min=b"(" + last_delivered, max="+", count=1
+        )
+        if not entries:
+            return 0.0
+        entry_id = cast(bytes, entries[0][0])  # decode_responses off
+        added_ms = int(entry_id.split(b"-")[0])
+        seconds, microseconds = self._r.time()
+        return max(0.0, seconds + microseconds / 1e6 - added_ms / 1000.0)
+
     def pending_entries(self, count: int = 100) -> list[dict]:
         """The jobs delivered and not yet acknowledged, oldest first.
 
