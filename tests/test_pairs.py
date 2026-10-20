@@ -67,8 +67,8 @@ class TestPairsLookup:
         }
         for result in response["message"]["results"]:
             bound = (
-                result["node_bindings"]["n0"]["ids"][0],
-                result["node_bindings"]["n1"]["ids"][0],
+                result["node_bindings"]["n0"][0]["id"],
+                result["node_bindings"]["n1"][0]["id"],
             )
             assert list(bound) in pairs
 
