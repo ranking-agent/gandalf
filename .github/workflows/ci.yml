@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, devel]
+    branches: [main, devel, trapi-1.6]
   pull_request:
-    branches: [main, devel]
+    branches: [main, devel, trapi-1.6]
 
 jobs:
   lint:
