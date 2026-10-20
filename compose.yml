@@ -6,14 +6,6 @@ services:
     restart: unless-stopped
     ports:
       - "6429:6429"
-    # Queue mode: start once the workers are taking jobs, so the first queries
-    # are not accepted only to wait on the stream while every worker is
-    # still loading the graph.  Without the queue profile there is no worker
-    # service and this is skipped.
-    depends_on:
-      worker:
-        condition: service_healthy
-        required: false
     environment:
       GANDALF_GRAPH_PATH: /data/graph
       # Traces go to Shepherd's Jaeger (OTLP gRPC) over the shared network.
@@ -47,20 +39,9 @@ services:
     command: ["python", "-m", "gandalf.worker"]
     restart: unless-stopped
     depends_on: [gandalf_queue]
-    # Healthy once the worker is consuming: it touches the heartbeat at the
-    # top of every poll (each queue_block_seconds) and every keepalive tick
-    # while a job runs, but only after the graph and toolkit are loaded.
-    # Loading can take minutes on a cold disk, hence the long start period.
-    healthcheck:
-      test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(stat -c %Y /tmp/gandalf-worker-heartbeat) )) -lt 60"]
-      interval: 5s
-      timeout: 3s
-      retries: 3
-      start_period: 10m
     environment:
       GANDALF_GRAPH_PATH: /data/graph
       GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://gandalf_queue:6379/0}
-      GANDALF_WORKER_HEARTBEAT_FILE: /tmp/gandalf-worker-heartbeat
       # The worker's spans join the API's traces (gandalf.queue_wait,
       # gandalf.job), reported as their own service.
       GANDALF_OTEL_ENABLED: ${GANDALF_OTEL_ENABLED:-true}

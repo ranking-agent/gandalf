@@ -505,10 +505,6 @@ def main() -> int:
     if not settings.queue_url:
         raise SystemExit("GANDALF_QUEUE_URL must be set to run a worker")
 
-    # A heartbeat left by this container's previous run would report the
-    # worker ready while it is still loading; the loop writes a fresh one.
-    if settings.worker_heartbeat_file:
-        Path(settings.worker_heartbeat_file).unlink(missing_ok=True)
     otel.init_otel()
     graph, bmt = load_runtime(serve_metadata=False)
     client = redis_client()
