@@ -30,14 +30,14 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import orjson
 import redis
 
 from gandalf.config import settings
-from gandalf.jobs import JobQueue, WorkerRegistry, _decode, _field
+from gandalf.jobs import JobQueue, WorkerRegistry, _decode, _entries, _field, _hash
 
 logger = logging.getLogger(__name__)
 
@@ -365,8 +365,8 @@ class Notifier:
         if self._r is None:
             return []
         alerts = []
-        for entry_id, fields in self._r.xrevrange(LOG_STREAM, count=count):
-            alert = _decode(fields)
+        for entry_id, fields in _entries(self._r.xrevrange(LOG_STREAM, count=count)):
+            alert: dict[str, Any] = _decode(fields)
             alert["at"] = float(alert["at"])
             alert["fields"] = (
                 orjson.loads(alert["fields"]) if alert.get("fields") else {}
@@ -472,7 +472,7 @@ class Monitor:
         reports = {r["name"]: r for r in self.registry.workers()}
         known = {
             k.decode(): orjson.loads(v)
-            for k, v in self._r.hgetall(KNOWN_WORKERS).items()
+            for k, v in _hash(self._r.hgetall(KNOWN_WORKERS)).items()
         }
         events = []
         for name, last in known.items():

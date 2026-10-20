@@ -17,7 +17,7 @@ import gc
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 import httpx
 import orjson
@@ -199,7 +199,7 @@ def run_query(
         # finalize_response converted the rest to TRAPI 1.6.  Idempotent.
         to_trapi_1_6(response)
     to_fragments(response)
-    return response
+    return cast(ResponseDict, response)
 
 
 def execute_to_bytes(
