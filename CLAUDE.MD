@@ -369,11 +369,26 @@ through a consumer group and run them.  Rules that follow:
   async results go straight to the callback.
 - **Blocking Redis reads are sliced.**  redis-py applies the socket
   timeout to blocking commands, so `XREADGROUP BLOCK` and `BLPOP` longer
-  than it raise `TimeoutError`.  `JobQueue.receive` and `ResultStore.wait`
+  than it raise `TimeoutError`.  `JobQueue.receive` and `ResultReader.wait`
   wait in slices of at most half the socket timeout (`blocking_slice`)
-  and loop; make any new blocking wait do the same.  The worker loop
-  catches `redis.RedisError` and retries with backoff rather than exiting;
-  the API turns it into a 503.
+  and loop; make any new blocking wait do the same.  (A client made
+  without a socket timeout still has one: 5s since redis-py 8.)  The
+  worker loop catches `redis.RedisError` and retries with backoff rather
+  than exiting; the API turns it into a 503.
+- **A waiting `/query` holds no thread.**  In queue mode `/query`,
+  `/ready` and `/metrics` are `async` and talk to Redis through
+  `redis.asyncio` (`AsyncJobQueue`, `ResultReader`); the blocking
+  `JobQueue` serves the monitor thread, `/asyncquery` and `/status.json`.
+  A thread-pool handler that waits on a worker would cap the waiting
+  queries at the pool's 40 threads per process and starve the probes
+  behind them, which takes the pod out of the Service under load.  Each
+  wait does hold a Redis connection (its `BLPOP`), from a pool of
+  `queue_max_waiting` kept apart from the one that enqueues and pings;
+  past that cap a `/query` is a 503 before it is enqueued.  The async
+  pools are `BlockingConnectionPool`s: redis-py's default pool raises
+  `Too many connections` at 100, which a burst on one event loop reaches.
+  Anything slow (decompressing a result, `malloc_trim`) goes through
+  `run_in_threadpool`, never inline on the event loop.
 - **A worker explains its own restart.**  A live registry report under a
   starting worker's own name means the previous instance never exited
   cleanly; the start is reported as `worker_restarted` with what it was

@@ -42,7 +42,12 @@ services:
     environment:
       GANDALF_GRAPH_PATH: /data/graph
       GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://gandalf_queue:6379/0}
-      GANDALF_OTEL_ENABLED: "false"
+      # The worker's spans join the API's traces (gandalf.queue_wait,
+      # gandalf.job), reported as their own service.
+      GANDALF_OTEL_ENABLED: ${GANDALF_OTEL_ENABLED:-true}
+      GANDALF_OTEL_SERVICE_NAME: gandalf-worker
+      GANDALF_JAEGER_HOST: ${GANDALF_JAEGER_HOST:-http://jaeger}
+      GANDALF_JAEGER_PORT: ${GANDALF_JAEGER_PORT:-4317}
     volumes:
       - ${GANDALF_GRAPH_DIR:-./translatorkg/gandalf_mmap}:/data/graph:ro
     networks:

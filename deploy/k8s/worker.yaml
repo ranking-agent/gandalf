@@ -45,6 +45,9 @@ spec:
             # to after large queries (the gunicorn max_requests trick).
             - {name: GANDALF_WORKER_MAX_JOBS, value: "500"}
             - {name: GANDALF_WORKER_METRICS_PORT, value: "9100"}
+            # Its spans join the API's traces as their own service; see
+            # "Tracing a queued query" in the README.
+            - {name: GANDALF_OTEL_SERVICE_NAME, value: gandalf-worker}
             - {name: GANDALF_WORKER_HEARTBEAT_FILE, value: /tmp/heartbeat}
           volumeMounts:
             - {name: graph, mountPath: /data/graph, readOnly: true}

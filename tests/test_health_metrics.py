@@ -80,7 +80,7 @@ def test_ready_with_graph_and_no_queue(client):
 def test_ready_needs_the_queue_when_configured(client, monkeypatch):
     """With a queue configured but not opened, the pod must not take traffic."""
     monkeypatch.setattr(settings, "queue_url", "redis://nowhere.invalid:6379/0")
-    monkeypatch.setattr(gandalf_server, "QUEUE", None)
+    monkeypatch.setattr(gandalf_server, "AQUEUE", None)
     resp = client.get("/ready")
     assert resp.status_code == 503
     assert resp.json() == {"status": "queue unreachable"}
@@ -187,18 +187,15 @@ def test_job_wait_seconds(budget, expected):
 
 def test_metrics_survive_a_queue_outage(client, monkeypatch):
     """A scrape still answers when Redis is down; only the queue gauges are stale."""
-    from gandalf.jobs import JobQueue
-    import redis
+    from gandalf.jobs import AsyncJobQueue
+    import redis.asyncio
 
-    dead = JobQueue(
-        redis.Redis(host="127.0.0.1", port=1, socket_connect_timeout=0.1),
+    dead = AsyncJobQueue(
+        redis.asyncio.Redis(host="127.0.0.1", port=1, socket_connect_timeout=0.1),
         stream="x",
         group="x",
-        dead_stream="x",
-        max_deliveries=1,
-        claim_idle_seconds=1,
     )
-    monkeypatch.setattr(gandalf_server, "QUEUE", dead)
+    monkeypatch.setattr(gandalf_server, "AQUEUE", dead)
     resp = client.get("/metrics")
     assert resp.status_code == 200
     assert "gandalf_http_requests_total" in resp.text

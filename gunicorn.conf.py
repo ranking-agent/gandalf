@@ -25,10 +25,18 @@ timeout = 300
 # Graceful shutdown timeout
 graceful_timeout = 30
 
+# Seconds an idle keep-alive connection is kept open; see
+# Settings.keepalive_seconds for why this outlasts the clients' own.
+keepalive = settings.keepalive_seconds
+
 # Recycle workers after this many requests (plus jitter) to release memory
-# that Python/glibc allocators hold onto after large queries.
-max_requests = 500
-max_requests_jitter = 100
+# that Python/glibc allocators hold onto after large queries.  A recycling
+# worker closes every idle connection it holds, so a client about to reuse
+# one gets a connection error.  In queue mode this process never runs a
+# query, and trim_heap_if_large returns the pages a stored result took, so
+# it is not recycled.
+max_requests = 0 if settings.queue_url else 500
+max_requests_jitter = 0 if settings.queue_url else 100
 
 # Access log to stdout (structured logging handled by app middleware)
 accesslog = "-"

@@ -6,6 +6,7 @@ no collection ever scans the response.  The pause is counted: concurrent
 queries share it, and GC comes back on only when the last one is done.
 """
 
+import asyncio
 import gc
 
 import httpx
@@ -106,7 +107,7 @@ def test_query_handler_holds_the_pause_until_the_response_is_serialized(
     request = Request(
         {"type": "http", "method": "POST", "path": "/query", "headers": []}
     )
-    rendered = server.sync_lookup(request, body=QUERY, profile=None)
+    rendered = asyncio.run(server.sync_lookup(request, body=QUERY, profile=None))
     assert seen == [False]
     assert gc.isenabled()
     assert b'"results"' in rendered.body

@@ -64,6 +64,13 @@ class Settings(BaseSettings):
 
     # Gunicorn worker count
     workers: int = 2
+    # Seconds an idle keep-alive connection stays open (gunicorn's
+    # keepalive).  It must outlast the idle timeout of every client's
+    # connection pool (and any proxy in front): when the server closes an
+    # idle connection, a client sending its next request on it at the same
+    # moment gets a connection error, and a POST is not retried.  gunicorn's
+    # own default of 2s loses that race under load.
+    keepalive_seconds: int = 75
 
     # TRAPI query-time budget (parameters.timeout, gandalf/trapi.py).
     # query_timeout is the server's own default in seconds; 0 disables it, and
@@ -127,6 +134,13 @@ class Settings(BaseSettings):
     # the query has no timeout.
     queue_sync_max_wait_seconds: float = 1800.0
     queue_sync_grace_seconds: float = 30.0
+    # Most /query results one API process waits on at once.  A waiting
+    # query holds no thread but does hold a Redis connection (its BLPOP),
+    # from a pool of this size kept apart from the connections that enqueue
+    # and answer /ready.  A /query over it is answered 503 without being
+    # enqueued.  Each API process may open this many connections, so keep
+    # processes x this under Redis's maxclients (10000 by default).
+    queue_max_waiting: int = 1000
     # Results of /query jobs are stored zstd-compressed in Redis, in chunks
     # (Redis caps a value at 512 MB), until the API collects them.
     result_ttl_seconds: int = 900

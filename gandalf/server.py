@@ -26,6 +26,7 @@ from fastapi.openapi.docs import (
     get_swagger_ui_html,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.routing import Match
 
@@ -48,18 +49,21 @@ from gandalf.metrics import (
     QUEUE_PENDING,
     SYNC_WAIT,
     SYNC_WAIT_TIMEOUTS,
+    SYNC_WAITING,
     metrics_payload,
     rss_anon_kb,
     rss_kb,
     trim_heap_if_large,
 )
 from gandalf.jobs import (
+    AsyncJobQueue,
     Job,
     JobHistory,
     JobQueue,
-    ResultStore,
+    ResultReader,
     StoredResult,
     WorkerRegistry,
+    async_redis_client,
     redis_client,
 )
 from gandalf.notify import Monitor, Notifier
@@ -260,9 +264,12 @@ if not _SKIP_PRELOAD:
 # Queue mode (GANDALF_QUEUE_URL): the job stream and result store this
 # process enqueues on and waits on.  Opened per worker process in the
 # lifespan rather than at import, so no Redis connection crosses gunicorn's
-# fork.  Both stay None in in-process mode.
+# fork.  All stay None in in-process mode.  /query, /ready and /metrics use
+# the asyncio pair (AQUEUE, RESULTS), so a query waiting for a worker holds
+# no thread; the rest, and the monitor's thread, use the blocking QUEUE.
 QUEUE: Optional[JobQueue] = None
-RESULTS: Optional[ResultStore] = None
+AQUEUE: Optional[AsyncJobQueue] = None
+RESULTS: Optional[ResultReader] = None
 WORKERS: Optional[WorkerRegistry] = None
 HISTORY: Optional[JobHistory] = None
 NOTIFIER: Optional[Notifier] = None
@@ -276,12 +283,14 @@ MONITOR: Optional[Monitor] = None
 
 def open_queue() -> None:
     """Connect this process to the configured job queue (no-op without one)."""
-    global QUEUE, RESULTS, WORKERS, HISTORY, NOTIFIER, MONITOR
+    global QUEUE, AQUEUE, RESULTS, WORKERS, HISTORY, NOTIFIER, MONITOR
     if not settings.queue_url or QUEUE is not None:
         return
     client = redis_client()
     QUEUE = JobQueue.from_settings(client)
-    RESULTS = ResultStore.from_settings(client)
+    async_client = async_redis_client()
+    AQUEUE = AsyncJobQueue.from_settings(async_client)
+    RESULTS = ResultReader.from_settings(async_client)
     WORKERS = WorkerRegistry.from_settings(client)
     HISTORY = JobHistory.from_settings(client)
     NOTIFIER = Notifier.from_settings(client)
@@ -323,6 +332,10 @@ async def lifespan(app: FastAPI):
         MONITOR.stop()
     if QUEUE is not None:
         QUEUE.client.close()
+    if AQUEUE is not None:
+        await AQUEUE.client.aclose()
+    if RESULTS is not None:
+        await RESULTS.wait_client.aclose()
     if (
         GRAPH is not None
         and hasattr(GRAPH, "lmdb_store")
@@ -536,11 +549,16 @@ async def health() -> dict:
 
 
 @APP.get("/ready", include_in_schema=False)
-def ready() -> JSONResponse:
+async def ready() -> JSONResponse:
     """Readiness: this process can take a query right now.
 
     The graph is loaded and, in queue mode, Redis answers.  503 takes the
     pod out of the Service until it does.
+
+    Async, so the probe never waits for a thread behind the queries (an
+    in-process query holds one for as long as it runs): a busy pod must
+    still answer its probe, or it is taken out of the Service and its new
+    connections refused.
     """
     if GRAPH is None:
         return JSONResponse(status_code=503, content={"status": "graph not loaded"})
@@ -548,7 +566,7 @@ def ready() -> JSONResponse:
         # Readiness is the one place a Redis failure must become a status
         # code rather than an exception: the probe reads the code.
         try:
-            reachable = QUEUE is not None and QUEUE.ping()
+            reachable = AQUEUE is not None and await AQUEUE.ping()
         except redis.RedisError as exc:
             logger.warning("Readiness: queue unreachable: %s", exc)
             reachable = False
@@ -560,13 +578,17 @@ def ready() -> JSONResponse:
 
 
 @APP.get("/metrics", include_in_schema=False)
-def metrics() -> Response:
-    """Prometheus metrics for this process (all gunicorn workers, aggregated)."""
-    if QUEUE is not None:
+async def metrics() -> Response:
+    """Prometheus metrics for this process (all gunicorn workers, aggregated).
+
+    Async for the same reason as ``/ready``: a scrape of a busy pod must not
+    wait for a thread, since that is when its numbers are wanted.
+    """
+    if AQUEUE is not None:
         # A Redis outage must not fail the scrape: the other metrics are
         # most wanted exactly then, and /ready already reports the outage.
         try:
-            stats = QUEUE.stats()
+            stats = await AQUEUE.stats()
         except redis.RedisError as exc:
             logger.warning("Metrics: queue stats unavailable: %s", exc)
         else:
@@ -699,7 +721,7 @@ _CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
     response_model_exclude_none=True,
     responses={200: {"model": TRAPIResponse}, **_CONFLICT_RESPONSE},
 )
-def sync_lookup(
+async def sync_lookup(
     request: Request,
     body: dict = Body(...),
     profile: Optional[bool] = Query(
@@ -717,14 +739,17 @@ def sync_lookup(
     unless ``validate_responses`` is enabled -- see ``_request_dict``.
 
     In queue mode the query becomes a job for a worker process and this
-    handler waits for its result; otherwise it runs here, on the thread pool.
+    handler waits for its result on the event loop, holding no thread, so
+    the number of queries waiting is bounded by memory rather than by the
+    thread pool; otherwise it runs here, on the thread pool.
     """
     otel.record_baggage()
     if GRAPH is None:
         raise HTTPException(503, "Graph not loaded")
     # The previous response's pages are free by now; return them before
-    # building (or receiving) the next one.
-    trim_heap_if_large(settings.heap_trim_threshold_mb)
+    # building (or receiving) the next one.  On a thread, since the trim
+    # takes longer the bigger the heap, and the event loop must not wait.
+    await run_in_threadpool(trim_heap_if_large, settings.heap_trim_threshold_mb)
 
     raw = _request_dict(body, TRAPIQuery)
 
@@ -733,10 +758,21 @@ def sync_lookup(
     rehydrate = query_parameters(raw).get("rehydrate") is not None
     deadline = None if rehydrate else _prepare_query(raw)
 
-    if QUEUE is not None:
+    if AQUEUE is not None:
         accept_encoding = request.headers.get("accept-encoding", "")
-        return _queued_lookup(raw, bool(profile), deadline, accept_encoding)
+        return await _queued_lookup(raw, bool(profile), deadline, accept_encoding)
+    return await run_in_threadpool(_lookup_in_process, raw, bool(profile), deadline)
 
+
+def _lookup_in_process(
+    raw: QueryDict, profile: bool, deadline: Optional[Deadline]
+) -> Any:
+    """Run a ``/query`` in this process (no queue configured), on a thread.
+
+    Returns:
+        The rendered response, or the raw dict when FastAPI is to validate it.
+    """
+    assert GRAPH is not None  # sync_lookup answers 503 without one
     # Keep GC paused until the response has been serialized and freed.
     # lookup() pauses it too, but lets it resume as it returns; the next
     # allocation would then trigger a collection over every object of the
@@ -752,7 +788,7 @@ def sync_lookup(
             GRAPH,
             BMT,
             raw,
-            profile=bool(profile),
+            profile=profile,
             deadline=deadline,
             as_json=not _validate,
         )
@@ -761,7 +797,12 @@ def sync_lookup(
     return rendered
 
 
-def _queued_lookup(
+#: /query calls this process is waiting on.  Each holds one connection of
+#: the result reader's wait pool, so there are at most queue_max_waiting.
+_waiting = 0
+
+
+async def _queued_lookup(
     raw: QueryDict,
     profile: bool,
     deadline: Optional[Deadline],
@@ -777,27 +818,65 @@ def _queued_lookup(
 
     The result is stored zstd-compressed; a client that accepts zstd gets
     those bytes as they are, anyone else gets them decompressed here.
+
+    A process already waiting on ``queue_max_waiting`` queries answers 503
+    before enqueueing, so no worker runs a query nobody will collect.
     """
-    assert QUEUE is not None and RESULTS is not None
+    global _waiting
+    if _waiting >= settings.queue_max_waiting:
+        raise HTTPException(
+            503,
+            f"This server is already waiting on {_waiting} queries; retry shortly.",
+            headers={"Retry-After": "1"},
+        )
+    _waiting += 1
+    SYNC_WAITING.inc()
+    try:
+        return await _enqueue_and_wait(raw, profile, deadline, accept_encoding)
+    finally:
+        _waiting -= 1
+        SYNC_WAITING.dec()
+
+
+async def _enqueue_and_wait(
+    raw: QueryDict,
+    profile: bool,
+    deadline: Optional[Deadline],
+    accept_encoding: str,
+) -> Response:
+    """Put the ``/query`` on the stream and answer with its result (or 504).
+
+    The job carries this request's trace context, so the worker's spans
+    join the request's trace (see :mod:`gandalf.otel`).
+    """
+    assert AQUEUE is not None and RESULTS is not None
+    trace_headers: dict[str, str] = {}
+    otel.inject_headers(trace_headers)
     job = Job.new(
         raw,
         profile=profile,
         budget=deadline.budget if deadline is not None else None,
+        trace_headers=trace_headers,
         request_id=request_id_var.get(""),
     )
+    otel.set_attributes(**{"gandalf.job_id": job.job_id})
     wait = job.wait_seconds()
     t0 = time.monotonic()
     # Redis down is a 503, not a 500: the client can retry, and /ready is
     # already telling the load balancer the same thing.
     try:
-        QUEUE.enqueue(job)
+        await AQUEUE.enqueue(job)
         JOBS_ENQUEUED.labels("sync").inc()
+        otel.add_event("job.enqueued")
         logger.info("job %s enqueued; waiting up to %.0fs", job.job_id, wait)
-        result = RESULTS.wait(job.job_id, timeout=wait)
+        result = await RESULTS.wait(job.job_id, timeout=wait)
     except redis.RedisError as exc:
         logger.error("job %s: queue unavailable: %s", job.job_id, exc)
         raise HTTPException(503, f"Queue unavailable: {type(exc).__name__}") from exc
     SYNC_WAIT.observe(time.monotonic() - t0)
+    otel.add_event(
+        "job.result_received" if result is not None else "job.wait_timed_out"
+    )
     if result is None:
         SYNC_WAIT_TIMEOUTS.inc()
         raise HTTPException(
@@ -805,12 +884,16 @@ def _queued_lookup(
             f"Query {job.job_id} did not complete within {wait:.0f}s; "
             "the queue may be deeper than the requested timeout allows.",
         )
-    RESULTS.delete(job.job_id)
-    return _stored_response(result, accept_encoding)
+    await RESULTS.delete(job.job_id)
+    return await _stored_response(result, accept_encoding)
 
 
-def _stored_response(result: StoredResult, accept_encoding: str) -> Response:
-    """Answer with a stored result, compressed when the client takes zstd."""
+async def _stored_response(result: StoredResult, accept_encoding: str) -> Response:
+    """Answer with a stored result, compressed when the client takes zstd.
+
+    Decompressing for a client that does not is done on a thread: it can be
+    gigabytes, and the event loop is serving every other waiting query.
+    """
     if settings.compress_response_enabled and "zstd" in accept_encoding.lower():
         # The compression middleware leaves an already-encoded body alone.
         return Response(
@@ -820,7 +903,7 @@ def _stored_response(result: StoredResult, accept_encoding: str) -> Response:
             headers={"Content-Encoding": "zstd"},
         )
     return Response(
-        content=result.decompress(),
+        content=await run_in_threadpool(result.decompress),
         status_code=result.http_status,
         media_type="application/json",
     )
@@ -895,6 +978,7 @@ def _dispatch_async(
             trace_headers=trace_headers,
             request_id=request_id_var.get(""),
         )
+        otel.set_attributes(**{"gandalf.job_id": job.job_id})
         try:
             QUEUE.enqueue(job)
         except redis.RedisError as exc:
@@ -903,6 +987,7 @@ def _dispatch_async(
                 503, f"Queue unavailable: {type(exc).__name__}"
             ) from exc
         JOBS_ENQUEUED.labels("callback").inc()
+        otel.add_event("job.enqueued")
         logger.info("job %s enqueued for callback %s", job.job_id, callback)
         return _async_accepted(callback, job.job_id)
     logger.info("Doing async lookup for %s", callback)
