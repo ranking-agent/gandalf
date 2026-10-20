@@ -189,7 +189,7 @@ def run_query(
         attributes_as_json=as_json,
         results_as_json=as_json,
         pairs=params.get("pairs"),
-        kg_only=params.get("kg_only", False),
+        exclude_results=params.get("exclude_results", False),
         subclass_qnodes=params.get("subclass_qnodes"),
     )
     if annotator_config:

@@ -1,9 +1,9 @@
-"""Tests for ``parameters.pairs``, ``kg_only`` and ``subclass_qnodes``.
+"""Tests for ``parameters.pairs``, ``exclude_results`` and ``subclass_qnodes``.
 
 ``pairs`` restricts a one-hop lookup between pinned ends to listed
 ``[subject_id, object_id]`` pairs, so a caller filling in the edges of many
 specific pairs gets those edges rather than the edges of every combination of
-pinned subject and object.  ``kg_only`` leaves the results out, and
+pinned subject and object.  ``exclude_results`` leaves the results out, and
 ``subclass_qnodes`` expands only the pinned qnodes it lists.
 """
 
@@ -107,26 +107,31 @@ class TestPairsLookup:
             assert response["message"]["knowledge_graph"]["edges"] == {}
 
 
-class TestKgOnly:
-    def test_kg_only_keeps_the_edges_and_drops_the_results(self, graph, bmt):
+class TestExcludeResults:
+    def test_exclude_results_keeps_the_edges_and_drops_the_results(self, graph, bmt):
         full = lookup(graph, _query(SUBJECTS, OBJECTS), bmt=bmt, subclass=False)
-        kg_only = lookup(
-            graph, _query(SUBJECTS, OBJECTS), bmt=bmt, subclass=False, kg_only=True
+        exclude_results = lookup(
+            graph,
+            _query(SUBJECTS, OBJECTS),
+            bmt=bmt,
+            subclass=False,
+            exclude_results=True,
         )
         assert full["message"]["results"]
-        assert kg_only["message"]["results"] == []
+        assert exclude_results["message"]["results"] == []
         assert (
-            kg_only["message"]["knowledge_graph"] == full["message"]["knowledge_graph"]
+            exclude_results["message"]["knowledge_graph"]
+            == full["message"]["knowledge_graph"]
         )
 
-    def test_kg_only_keeps_subclass_support_graphs(self, graph, bmt):
+    def test_exclude_results_keeps_subclass_support_graphs(self, graph, bmt):
         query = _query(["CHEBI:6801"], ["MONDO:0005015"], subclass=True)
         full = lookup(graph, query, bmt=bmt)
-        kg_only = lookup(graph, query, bmt=bmt, kg_only=True)
-        assert kg_only["message"]["results"] == []
-        assert kg_only["message"]["auxiliary_graphs"]
+        exclude_results = lookup(graph, query, bmt=bmt, exclude_results=True)
+        assert exclude_results["message"]["results"] == []
+        assert exclude_results["message"]["auxiliary_graphs"]
         assert (
-            kg_only["message"]["auxiliary_graphs"]
+            exclude_results["message"]["auxiliary_graphs"]
             == full["message"]["auxiliary_graphs"]
         )
 
@@ -143,14 +148,14 @@ def client(graph, bmt, monkeypatch):  # noqa: F811
 
 
 class TestPairsOverHttp:
-    def test_pairs_and_kg_only_reach_lookup(self, client):
+    def test_pairs_and_exclude_results_reach_lookup(self, client):
         response = client.post(
             "/query",
             json=_query(
                 SUBJECTS,
                 OBJECTS,
                 pairs=[["CHEBI:6801", "MONDO:0005148"]],
-                kg_only=True,
+                exclude_results=True,
             ),
         )
         assert response.status_code == 200, response.text

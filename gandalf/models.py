@@ -209,10 +209,10 @@ class QueryParameters(TRAPIQueryParameters):
         "pair, not between every pinned subject and object. Requires a single "
         "query edge and subclass false.",
     )
-    kg_only: Optional[bool] = Field(
+    exclude_results: Optional[bool] = Field(
         None,
-        description="When true, return the knowledge graph and auxiliary "
-        "graphs with no results.",
+        description="When true, leave results empty; the rest of the message "
+        "(knowledge graph, auxiliary graphs) comes back as usual.",
     )
     rehydrate: Optional[bool] = Field(
         None,

@@ -389,8 +389,9 @@ Gandalf's own parameters:
   specific node pairs in one query without returning the edges of every other
   combination. Requires exactly one query edge, both ends pinned, and
   `"subclass": false`; anything else is a 400
-- `kg_only` (bool): Return the `knowledge_graph` and `auxiliary_graphs` with
-  an empty `results` list, for a caller that only wants the edges
+- `exclude_results` (bool): Leave `results` empty; the rest of the message
+  (`knowledge_graph`, `auxiliary_graphs`, ...) comes back as usual, for a
+  caller that only wants the edges
 - `rehydrate` (bool): When true, the server skips the graph lookup and **only** enriches the `knowledge_graph` already supplied in `message` — used to re-enrich a previously dehydrated response
 - `filter_config` (object): Plugin-defined node filter settings (each NodeFilter plugin reads its own key)
 - `annotator_config` (object): Per-request opt-in response-annotator settings (each key activates one annotator plugin)

@@ -59,7 +59,7 @@ def lookup(
     attributes_as_json: bool = False,
     results_as_json: bool = False,
     pairs: Optional[list] = None,
-    kg_only: bool = False,
+    exclude_results: bool = False,
     subclass_qnodes: Optional[list] = None,
 ):
     """Take an arbitrary Translator query graph and return all matching paths.
@@ -110,8 +110,9 @@ def lookup(
             matched through its inverse counts for the pair it answers.
             ``request_validation.validate_pairs`` holds the request shape it
             needs (one edge, both ends pinned, no subclass expansion).
-        kg_only: If True, return the knowledge graph (and auxiliary graphs)
-            with no results, for a caller that only wants the edges.
+        exclude_results: If True, leave ``results`` empty; the rest of the
+            message (knowledge graph, auxiliary graphs) is built as usual,
+            for a caller that only wants the edges.
         profile: If True, capture per-stage timings (BMT init, per-qedge
             query, path reconstruction, response building, LMDB enrichment,
             annotators) and append them to ``response["logs"]`` as TRAPI
@@ -194,7 +195,7 @@ def lookup(
                     attributes_as_json=attributes_as_json,
                     results_as_json=results_as_json,
                     pairs=pairs,
-                    kg_only=kg_only,
+                    exclude_results=exclude_results,
                     subclass_qnodes=subclass_qnodes,
                 )
             except QueryTimeout as exc:
@@ -236,7 +237,7 @@ def _lookup_inner(
     attributes_as_json: bool = False,
     results_as_json: bool = False,
     pairs: Optional[list] = None,
-    kg_only: bool = False,
+    exclude_results: bool = False,
     subclass_qnodes: Optional[list] = None,
 ):
     """Inner implementation of lookup with all the core logic.
@@ -540,7 +541,7 @@ def _lookup_inner(
                 results_as_json=results_as_json,
             )
 
-    if kg_only:
+    if exclude_results:
         # The knowledge graph is filled while the results are built, so they
         # are built all the same and only left out of the response.
         response["message"]["results"] = []
