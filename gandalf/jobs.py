@@ -308,7 +308,7 @@ def summarize_query(query: QueryDict) -> dict:
         "ids": ids[:3],
         "predicates": predicates[:3],
     }
-    parameters = query.get("parameters") or {}
+    parameters = cast("dict[str, Any]", query.get("parameters") or {})
     if "timeout" in parameters:
         summary["timeout"] = parameters["timeout"]
     return summary

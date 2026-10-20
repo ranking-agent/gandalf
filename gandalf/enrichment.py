@@ -12,6 +12,8 @@ LMDB cold-path store.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import orjson
 
 from translator_tom.model_dicts import EdgeDict, NodeDict, QueryDict, ResponseDict
@@ -61,7 +63,7 @@ def enrich_knowledge_graph(
     Returns:
         The same *message* dict, now enriched.
     """
-    kg = message.get("message", {}).get("knowledge_graph", {})
+    kg = cast("dict[str, Any]", message.get("message", {}).get("knowledge_graph") or {})
 
     prof = current_profiler()
     nodes = kg.get("nodes", {})
@@ -164,8 +166,11 @@ def _enrich_edges(edges: dict[str, EdgeDict], graph: CSRGraph) -> None:
             # unresolvable edge still gets the Biolink "not_provided" value.
             edge.setdefault("sources", [])
             edge.setdefault("attributes", [])
-            edge.setdefault("knowledge_level", NOT_PROVIDED)
-            edge.setdefault("agent_type", NOT_PROVIDED)
+            # Internal (2.0) Edge properties, not TRAPI 1.6 ones: edge_to_1_6
+            # moves them into the attributes below.
+            internal = cast("dict[str, Any]", edge)
+            internal.setdefault("knowledge_level", NOT_PROVIDED)
+            internal.setdefault("agent_type", NOT_PROVIDED)
             # No qualifiers default: the property is optional in TRAPI 2.0 and
             # an empty list is not a valid value for it.
             prune_edge(edge)
@@ -185,8 +190,9 @@ def _enrich_edges(edges: dict[str, EdgeDict], graph: CSRGraph) -> None:
 
         if "knowledge_level" not in edge or "agent_type" not in edge:
             knowledge_level, agent_type = graph.edge_properties.get_kl_at(fwd_idx)
-            edge.setdefault("knowledge_level", knowledge_level)
-            edge.setdefault("agent_type", agent_type)
+            internal = cast("dict[str, Any]", edge)
+            internal.setdefault("knowledge_level", knowledge_level)
+            internal.setdefault("agent_type", agent_type)
 
         # Cold-path properties (LMDB)
         detail = lmdb_results.get(fwd_idx, {})

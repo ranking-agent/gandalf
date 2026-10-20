@@ -289,7 +289,8 @@ def query_parameters(query: QueryDict) -> GandalfParametersDict:
         >>> query_parameters({"message": {}, "parameters": {"subclass": False}})
         {'subclass': False}
     """
-    parameters = query.get("parameters") or {}  # type: ignore[typeddict-item]
+    # TRAPI 1.6 has no Query.parameters: TOM 1.x types the value as object.
+    parameters = cast("dict[str, Any]", query.get("parameters") or {})
     return cast("GandalfParametersDict", fold_top_level_parameters(query, parameters))
 
 
@@ -670,7 +671,8 @@ def finalize_response(
 
     releases = data_release_versions(graph)
     if releases:
-        response["data_release_versions"] = releases
+        # Not a TRAPI 1.6 Response property; carried as an additional one.
+        cast("dict[str, Any]", response)["data_release_versions"] = releases
 
     if not response.get("logs"):
         response.pop("logs", None)
@@ -681,7 +683,8 @@ def finalize_response(
     if isinstance(message, dict) and not message.get("auxiliary_graphs", True):
         del message["auxiliary_graphs"]
 
-    return to_trapi_1_6(response)
+    to_trapi_1_6(response)
+    return response
 
 
 def timeout_response(

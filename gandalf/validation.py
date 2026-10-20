@@ -6,7 +6,7 @@ query results are consistent with the actual graph data.
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from bmt.toolkit import Toolkit
 from translator_tom.model_dicts import (
@@ -209,8 +209,8 @@ def validate_trapi_response(
     """
     errors = []
     message = response.get("message", {})
-    kg = message.get("knowledge_graph", {})
-    results = message.get("results", [])
+    kg = cast("dict[str, Any]", message.get("knowledge_graph") or {})
+    results = cast("list[Any]", message.get("results") or [])
 
     logger.debug(
         "Validating response with %s KG nodes, %s KG edges, %s results",
@@ -286,7 +286,7 @@ def validate_trapi_response(
         # Check edge bindings
         analyses = result.get("analyses", [])
         for analysis in analyses:
-            edge_bindings = analysis.get("edge_bindings", {})
+            edge_bindings = cast("dict[str, Any]", analysis.get("edge_bindings", {}))
             for qedge_id, binding in edge_bindings.items():
                 for edge_id in bound_ids(binding):
                     if edge_id and edge_id not in kg_edges:
@@ -609,7 +609,7 @@ def _format_result_path(
     edge_bindings: dict = {}
     analyses = result.get("analyses", [])
     if analyses:
-        edge_bindings = analyses[0].get("edge_bindings", {})
+        edge_bindings = cast("dict", analyses[0].get("edge_bindings", {}))
 
     # Map qnode_id -> bound node ID.
     qnode_to_id: dict[str, str] = {}

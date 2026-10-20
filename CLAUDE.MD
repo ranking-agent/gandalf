@@ -366,6 +366,13 @@ Where conflicts and breakage show up, and what to do:
 - **New request fields on `devel`** that 1.6 spells differently: translate in
   `trapi_1_6` and, if a 2.0 spelling would otherwise be silently ignored,
   reject it in `reject_retired_trapi_fields`.
+- **mypy against TOM 1.x types**: run it in a clean venv installed with
+  `pip install -e ".[dev,server]"`, as CI does -- an environment carrying
+  other packages can hide errors.  Code from `devel` typed against TOM 2.x
+  fails here where it touches what 1.6 types differently (`Query.parameters`,
+  `Edge.knowledge_level` / `agent_type`, `Response.data_release_versions`,
+  nullable `Message` fields, required `Node.attributes`); fix those with a
+  narrow `cast` at that spot rather than changing the behaviour.
 - **Versions**: keep this branch's 1.x version (see above).
 - **`pyproject.toml` / `requirements.txt`**: keep `translator_tom>=1.7.0,<2`
   when `devel` bumps TOM; new TOM 2.x imports may not exist in 1.x.
