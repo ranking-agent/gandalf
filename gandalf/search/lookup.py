@@ -58,6 +58,9 @@ def lookup(
     deadline=None,
     attributes_as_json: bool = False,
     results_as_json: bool = False,
+    pairs: Optional[list] = None,
+    exclude_results: bool = False,
+    subclass_qnodes: Optional[list] = None,
 ):
     """Take an arbitrary Translator query graph and return all matching paths.
 
@@ -67,6 +70,8 @@ def lookup(
         bmt: Biolink Model Toolkit instance (optional, will create if not provided)
         subclass: If True, expand pinned nodes to include subclass descendants
         subclass_depth: Maximum number of subclass_of hops to traverse (default 1)
+        subclass_qnodes: With ``subclass``, the pinned qnodes to expand; the
+            others match their own ids only.  None expands every pinned qnode.
         filter_config: Optional dict of plugin-defined node filter settings
             (e.g. ``{"max_node_degree": 50, "min_information_content": 0.8}``).
             Each registered NodeFilter plugin reads its own key. Unknown keys
@@ -96,6 +101,18 @@ def lookup(
             Read them through :func:`~gandalf.trapi.response_results`.  The
             serialized response is byte-identical either way.  If False
             (default), every result is a dict.
+        pairs: Optional ``[subject_id, object_id]`` pairs restricting a
+            one-hop query whose ends are both pinned: an edge matches only
+            between the two ids of a listed pair, rather than between any
+            pinned subject and any pinned object.  Pinning n subjects and m
+            objects to get k specific pairs otherwise returns the edges of
+            all n * m pairs.  The pair is in query direction, so an edge
+            matched through its inverse counts for the pair it answers.
+            ``request_validation.validate_pairs`` holds the request shape it
+            needs (one edge, both ends pinned, no subclass expansion).
+        exclude_results: If True, leave ``results`` empty; the rest of the
+            message (knowledge graph, auxiliary graphs) is built as usual,
+            for a caller that only wants the edges.
         profile: If True, capture per-stage timings (BMT init, per-qedge
             query, path reconstruction, response building, LMDB enrichment,
             annotators) and append them to ``response["logs"]`` as TRAPI
@@ -177,6 +194,9 @@ def lookup(
                     deadline=deadline,
                     attributes_as_json=attributes_as_json,
                     results_as_json=results_as_json,
+                    pairs=pairs,
+                    exclude_results=exclude_results,
+                    subclass_qnodes=subclass_qnodes,
                 )
             except QueryTimeout as exc:
                 # Report the overrun as a TRAPI outcome rather than an error:
@@ -216,6 +236,9 @@ def _lookup_inner(
     deadline=None,
     attributes_as_json: bool = False,
     results_as_json: bool = False,
+    pairs: Optional[list] = None,
+    exclude_results: bool = False,
+    subclass_qnodes: Optional[list] = None,
 ):
     """Inner implementation of lookup with all the core logic.
 
@@ -263,7 +286,9 @@ def _lookup_inner(
                 "Rewriting query graph for subclass expansion (depth=%s)",
                 subclass_depth,
             )
-            _rewrite_for_subclass(subqgraph, subclass_depth=subclass_depth)
+            _rewrite_for_subclass(
+                subqgraph, subclass_depth=subclass_depth, qnodes=subclass_qnodes
+            )
             # Use the rewritten graph as the query graph for the rest of the pipeline
             query_graph = copy.deepcopy(subqgraph)
 
@@ -294,6 +319,8 @@ def _lookup_inner(
         for qnode_id, qnode in subqgraph["nodes"].items()
         if len(qnode.get("ids", [])) > 0
     }
+    # The pairs, as each subject's allowed objects by graph index.
+    pair_targets = _resolve_pairs(graph, pairs) if pairs is not None else None
     # Binding counts that replace a qnode's own ids for the query planner:
     # set once an edge query has discovered the qnode's nodes.
     discovered_counts: dict[str, int] = {}
@@ -399,6 +426,7 @@ def _lookup_inner(
                 node_filters=edge_node_filters,
                 start_node_constraints=start_node_constraints,
                 end_node_constraints=end_node_constraints,
+                pair_targets=pair_targets,
                 logger=logger,
             )
 
@@ -512,6 +540,11 @@ def _lookup_inner(
                 attributes_as_json=attributes_as_json,
                 results_as_json=results_as_json,
             )
+
+    if exclude_results:
+        # The knowledge graph is filled while the results are built, so they
+        # are built all the same and only left out of the response.
+        response["message"]["results"] = []
 
     # GC summary is printed after GC is re-enabled in the caller's finally block.
     # The monitor is still accumulating events until stop() is called there.
@@ -711,7 +744,7 @@ def _single_path_json(
         len_edges = id_lengths(u_edges)
         with_ids = (len_edges[e_inv] > 0).reshape(-1, m).all(axis=1)
         if not with_ids.all():
-            # An edge without an ID gets a fresh one per result: the loop's.
+            # An edge without an ID is left to the loop, for its stand-in id.
             fast_groups = fast_groups[with_ids]
             fast_rows = fast_rows[with_ids]
             u_edges, e_first, e_inv = unique_edges(fast_rows)
@@ -1438,8 +1471,8 @@ def _build_response(
         # The edge dict itself goes into kg_edges rather than a copy: it sits
         # under one KG ID only (its edge's), the general loop only ever
         # changes copies of it, and the cache holding it is dropped when this
-        # function returns.  An edge with no ID gets a fresh uuid per result,
-        # as in the general loop, and so a copy of its own.
+        # function returns.  An edge with no ID goes under its stand-in id,
+        # as in the general loop.
         if (
             single_path_fast
             and len(rows_nodes) == 1
@@ -1482,10 +1515,7 @@ def _build_response(
                             edge_urls_map.get(fwd_eidx),
                         )
                         edge_templates[fwd_eidx] = edge
-                edge_kg_id = edge_id_map.get(fwd_eidx)
-                if not edge_kg_id:
-                    edge_kg_id = str(uuid.uuid4())[:8]
-                    edge = edge.copy()
+                edge_kg_id = edge_id_map.get(fwd_eidx) or _stand_in_id(fwd_eidx)
                 kg_edges[edge_kg_id] = edge
                 shared = shared_bindings.get(edge_kg_id)
                 if shared is None:
@@ -1569,8 +1599,9 @@ def _build_response(
 
                     if fwd_eidx >= 0:
                         orig_id = edge_id_map.get(fwd_eidx)
-                        if orig_id is not None:
-                            edge_props["_edge_id"] = orig_id
+                        edge_props["_edge_id"] = (
+                            orig_id if orig_id is not None else _stand_in_id(fwd_eidx)
+                        )
 
                     # Store query-aligned subject/object for building
                     # inferred composite edges.  edge["subject"]/["object"]
@@ -1808,13 +1839,38 @@ def _expanders_for(bmt) -> tuple[PredicateExpander, QualifierExpander]:
     return expanders
 
 
+def _stand_in_id(fwd_eidx: int) -> str:
+    """The KG id of a graph edge the build gave no ID.
+
+    One per physical edge, so the edge has one KG entry however many results
+    and derivations bind it.  A fresh id per binding filed a subclass_of edge
+    once for every edge inferred through it -- with each inferred edge and
+    support graph, keyed by it, distinct as well -- multiplying a response
+    on a pinned node with many subclass children.  Rehydration locates edges
+    by their endpoints and content, not by id.
+    """
+    return f"gandalf:edge:{fwd_eidx}"
+
+
 def _resolve_node_idxes(graph, node_ids) -> list[int]:
     """Map node IDs to graph indices, dropping IDs the graph does not contain."""
     idxes = (graph.get_node_idx(node_id) for node_id in node_ids)
     return [idx for idx in idxes if idx is not None]
 
 
-def _rewrite_for_subclass(query_graph, subclass_depth=1):
+def _resolve_pairs(graph, pairs) -> dict[int, set[int]]:
+    """Map ``[subject_id, object_id]`` pairs to each subject's allowed
+    objects by graph index, dropping pairs with an ID the graph lacks."""
+    targets: dict[int, set[int]] = defaultdict(set)
+    for subject_id, object_id in pairs:
+        subject_idx = graph.get_node_idx(subject_id)
+        object_idx = graph.get_node_idx(object_id)
+        if subject_idx is not None and object_idx is not None:
+            targets[subject_idx].add(object_idx)
+    return dict(targets)
+
+
+def _rewrite_for_subclass(query_graph, subclass_depth=1, qnodes=None):
     """Rewrite query graph to add subclass expansion for pinned nodes.
 
     For each pinned node (one with ``ids``), creates a synthetic superclass
@@ -1827,6 +1883,7 @@ def _rewrite_for_subclass(query_graph, subclass_depth=1):
     Args:
         query_graph: The query graph dict (mutated in-place).
         subclass_depth: Maximum number of ``subclass_of`` hops to traverse.
+        qnodes: The pinned qnodes to expand, or None for every one.
     """
     nodes = query_graph["nodes"]
     edges = query_graph["edges"]
@@ -1843,7 +1900,9 @@ def _rewrite_for_subclass(query_graph, subclass_depth=1):
     pinned_qnodes = [
         qnode_id
         for qnode_id, qnode in list(nodes.items())
-        if qnode.get("ids") and qnode_id not in excluded
+        if qnode.get("ids")
+        and qnode_id not in excluded
+        and (qnodes is None or qnode_id in qnodes)
     ]
 
     for qnode_id in pinned_qnodes:

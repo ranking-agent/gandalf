@@ -190,11 +190,29 @@ class QueryParameters(TRAPIQueryParameters):
     subclass_depth: Optional[int] = Field(
         None, description="Maximum subclass_of hops to traverse (default 1)"
     )
+    subclass_qnodes: Optional[List[str]] = Field(
+        None,
+        description="With subclass, the pinned qnodes to expand to their "
+        "subclass descendants; the others match their own ids only (default "
+        "every pinned qnode)",
+    )
     dehydrated: Optional[bool] = Field(
         None,
         description="Return a dehydrated response (skip edge attribute "
         "enrichment). Automatically enabled when path count exceeds the large "
         "result threshold.",
+    )
+    pairs: Optional[List[List[str]]] = Field(
+        None,
+        description="[subject_id, object_id] pairs restricting a one-hop "
+        "query with both ends pinned: edges are returned only between a listed "
+        "pair, not between every pinned subject and object. Requires a single "
+        "query edge and subclass false.",
+    )
+    exclude_results: Optional[bool] = Field(
+        None,
+        description="When true, leave results empty; the rest of the message "
+        "(knowledge graph, auxiliary graphs) comes back as usual.",
     )
     rehydrate: Optional[bool] = Field(
         None,

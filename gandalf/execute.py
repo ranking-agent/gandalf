@@ -188,6 +188,9 @@ def run_query(
         deadline=deadline,
         attributes_as_json=as_json,
         results_as_json=as_json,
+        pairs=params.get("pairs"),
+        exclude_results=params.get("exclude_results", False),
+        subclass_qnodes=params.get("subclass_qnodes"),
     )
     if annotator_config:
         annotate_response(response, graph, annotator_config)

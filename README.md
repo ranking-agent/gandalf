@@ -374,12 +374,24 @@ Gandalf's own parameters:
 
 - `subclass` (bool): Enable biolink subclass inference (default `true`)
 - `subclass_depth` (int): Maximum `subclass_of` hops (default `1`)
+- `subclass_qnodes` (list of qnode ids): With `subclass`, expand only these
+  pinned qnodes to their subclass descendants; the other pinned qnodes match
+  their own ids only (default: every pinned qnode)
 - `dehydrated` (bool): Return the smallest useful response — edges carry only
   subject, object, predicate, `knowledge_level` and `agent_type`, with no
   attributes and no `sources` (auto-enabled for very large result sets).
   TRAPI 2.0 requires `sources`, so a dehydrated response is deliberately not
   schema-valid: the mode trades conformance for size, and rehydrating one
   (see `rehydrate`) restores a conformant response
+- `pairs` (list of `[subject_id, object_id]`): Restrict a one-hop query whose
+  ends are both pinned to edges between a listed pair, rather than between
+  every pinned subject and every pinned object. Fills in the edges of many
+  specific node pairs in one query without returning the edges of every other
+  combination. Requires exactly one query edge, both ends pinned, and
+  `"subclass": false`; anything else is a 400
+- `exclude_results` (bool): Leave `results` empty; the rest of the message
+  (`knowledge_graph`, `auxiliary_graphs`, ...) comes back as usual, for a
+  caller that only wants the edges
 - `rehydrate` (bool): When true, the server skips the graph lookup and **only** enriches the `knowledge_graph` already supplied in `message` — used to re-enrich a previously dehydrated response
 - `filter_config` (object): Plugin-defined node filter settings (each NodeFilter plugin reads its own key)
 - `annotator_config` (object): Per-request opt-in response-annotator settings (each key activates one annotator plugin)
