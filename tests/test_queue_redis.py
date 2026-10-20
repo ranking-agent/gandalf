@@ -1,9 +1,9 @@
 """Queue mode against a real Redis: the stream, the result store, the worker.
 
 Marked ``integration`` and deselected by default, since it needs a
-``redis-server``.  ``GANDALF_TEST_REDIS_URL`` points at one (CI runs a
-service container); without it a local ``redis-server`` binary is started
-on a free port for the session.
+``redis-server``.  ``GANDALF_TEST_REDIS_URL`` points at one; without it a
+local ``redis-server`` binary is started on a free port for the session (as
+in CI).  The outage test always starts its own, so needs the binary either way.
 
     python -m pytest -m integration tests/test_queue_redis.py
 """

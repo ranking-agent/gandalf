@@ -5,7 +5,7 @@ kept separate from ``gandalf.server`` so they can be imported without
 triggering module-level graph loading.
 """
 
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from fastapi import HTTPException
 from translator_tom.model_dicts import MessageDict, QueryGraphDict
@@ -242,7 +242,9 @@ def validate_edge_node_references(query_graph: QueryGraphDict) -> None:
                 )
 
 
-def validate_pairs(query_graph: QueryGraphDict, parameters: Optional[dict]) -> None:
+def validate_pairs(
+    query_graph: QueryGraphDict, parameters: Optional[Mapping[str, Any]]
+) -> None:
     """Validate ``parameters.pairs`` against the query graph it restricts.
 
     ``pairs`` restricts a one-hop lookup between pinned ends to listed
@@ -284,7 +286,7 @@ def validate_pairs(query_graph: QueryGraphDict, parameters: Optional[dict]) -> N
 
 
 def validate_subclass_qnodes(
-    query_graph: QueryGraphDict, parameters: Optional[dict]
+    query_graph: QueryGraphDict, parameters: Optional[Mapping[str, Any]]
 ) -> None:
     """Require ``parameters.subclass_qnodes`` to name qnodes of the query graph.
 

@@ -48,12 +48,13 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Iterator, Optional, cast
+from typing import Any, Callable, Iterator, Mapping, Optional, TypedDict, cast
 
 import orjson
 import redis
 import redis.asyncio
 import zstandard
+from redis.typing import EncodableT, FieldT
 from translator_tom.model_dicts import QueryDict
 
 from gandalf.config import settings
@@ -296,7 +297,7 @@ def summarize_query(query: QueryDict) -> dict:
         {'nodes': 0, 'edges': 0, 'ids': [], 'predicates': []}
     """
     message = query.get("message") or {}
-    query_graph = message.get("query_graph") or {}
+    query_graph: Mapping[str, Any] = message.get("query_graph") or {}
     nodes = query_graph.get("nodes") or {}
     edges = query_graph.get("edges") or {}
     ids = [i for node in nodes.values() for i in (node.get("ids") or [])]
@@ -313,9 +314,83 @@ def summarize_query(query: QueryDict) -> dict:
     return summary
 
 
-def _decode(fields: dict) -> dict:
+def _decode(fields: Fields) -> dict[str, str]:
     """A Redis hash or stream entry as ``str`` keys and values."""
     return {k.decode(): v.decode() for k, v in fields.items()}
+
+
+# ---------------------------------------------------------------------------
+# Redis replies
+# ---------------------------------------------------------------------------
+#
+# redis-py types each reply for both ``decode_responses`` settings at once
+# (``bytes | str``), and older releases for the sync and async clients at
+# once (``Awaitable | Any``).  Every client here has ``decode_responses``
+# off, so each helper below gives one reply shape the types it really has.
+# They tell the type checker only: nothing is checked at runtime.
+
+Fields = dict[bytes, bytes]
+"""A Redis hash, or a stream entry's fields."""
+
+StreamEntry = tuple[bytes, Fields]
+"""A stream entry as ``(entry_id, fields)``."""
+
+
+class PendingEntry(TypedDict):
+    """One entry of an ``XPENDING key group start end count`` reply."""
+
+    message_id: bytes
+    consumer: bytes
+    time_since_delivered: int
+    times_delivered: int
+
+
+def _bytes(reply: object) -> bytes:
+    """A bulk string reply: ``XADD``'s entry id."""
+    return cast(bytes, reply)
+
+
+def _optional_bytes(reply: object) -> Optional[bytes]:
+    """A bulk string reply, nil for a missing key: ``GET``, ``GETDEL``."""
+    return cast(Optional[bytes], reply)
+
+
+def _bytes_list(reply: object) -> list[bytes]:
+    """An array of bulk strings: ``ZRANGE`` and ``ZREVRANGE`` members."""
+    return cast(list[bytes], reply)
+
+
+def _optional_bytes_list(reply: object) -> list[Optional[bytes]]:
+    """An array of bulk strings, nil for a missing key: ``MGET``."""
+    return cast(list[Optional[bytes]], reply)
+
+
+def _hash(reply: object) -> Fields:
+    """An ``HGETALL`` reply, empty for a missing key."""
+    return cast(Fields, reply)
+
+
+def _entries(reply: object) -> list[StreamEntry]:
+    """An ``XRANGE`` or ``XREVRANGE`` reply."""
+    return cast(list[StreamEntry], reply)
+
+
+def _read_entries(reply: object) -> list[tuple[bytes, list[StreamEntry]]]:
+    """An ``XREADGROUP`` reply: ``(stream, entries)`` per stream read."""
+    return cast(list[tuple[bytes, list[StreamEntry]]], reply)
+
+
+def _claimed_entries(reply: object) -> list[tuple[bytes, Optional[Fields]]]:
+    """The entries an ``XAUTOCLAIM`` reply claimed.
+
+    Redis 6.2 reports an entry deleted from the stream with nil fields.
+    """
+    return cast(list[tuple[bytes, Optional[Fields]]], cast(list, reply)[1])
+
+
+def _pending(reply: object) -> list[PendingEntry]:
+    """An ``XPENDING key group start end count`` reply, as redis-py parses it."""
+    return cast(list[PendingEntry], reply)
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +462,7 @@ class JobQueue:
 
     def enqueue(self, job: Job) -> str:
         """Put *job* on the stream and return its entry id."""
-        entry_id: bytes = self._r.xadd(self.stream, {b"job": job.to_bytes()})
+        entry_id = _bytes(self._r.xadd(self.stream, {b"job": job.to_bytes()}))
         return entry_id.decode()
 
     def receive(self, consumer: str, block_seconds: float) -> Optional[Delivery]:
@@ -400,12 +475,14 @@ class JobQueue:
         stale = self._claim_stale(consumer)
         if stale is not None:
             return stale
-        response = self._r.xreadgroup(
-            self.group,
-            consumer,
-            {self.stream: ">"},
-            count=1,
-            block=int(blocking_slice(self._r, block_seconds) * 1000),
+        response = _read_entries(
+            self._r.xreadgroup(
+                self.group,
+                consumer,
+                {self.stream: ">"},
+                count=1,
+                block=int(blocking_slice(self._r, block_seconds) * 1000),
+            )
         )
         if not response:
             return None
@@ -414,15 +491,16 @@ class JobQueue:
 
     def _claim_stale(self, consumer: str) -> Optional[Delivery]:
         """Take over one pending job whose worker went quiet, if there is one."""
-        claimed = self._r.xautoclaim(
-            self.stream,
-            self.group,
-            consumer,
-            min_idle_time=self.claim_idle_ms,
-            start_id="0-0",
-            count=1,
+        entries = _claimed_entries(
+            self._r.xautoclaim(
+                self.stream,
+                self.group,
+                consumer,
+                min_idle_time=self.claim_idle_ms,
+                start_id="0-0",
+                count=1,
+            )
         )
-        entries = claimed[1]
         if not entries:
             return None
         entry_id, fields = entries[0]
@@ -452,22 +530,20 @@ class JobQueue:
 
     def _deliveries(self, entry_id: bytes) -> int:
         """How many times a pending entry has been delivered."""
-        pending = self._r.xpending_range(
-            self.stream, self.group, min=entry_id, max=entry_id, count=1
+        pending = _pending(
+            self._r.xpending_range(
+                self.stream, self.group, min=entry_id, max=entry_id, count=1
+            )
         )
-        return int(pending[0]["times_delivered"]) if pending else 1
+        return pending[0]["times_delivered"] if pending else 1
 
-    def _dead_letter(self, entry_id: bytes, fields: dict, deliveries: int) -> None:
+    def _dead_letter(self, entry_id: bytes, fields: Fields, deliveries: int) -> None:
+        letter: dict[FieldT, EncodableT] = dict(fields.items())
+        letter[b"source_id"] = entry_id
+        letter[b"deliveries"] = str(deliveries).encode()
+        letter[b"dead_at"] = repr(time.time()).encode()
         pipe = self._r.pipeline(transaction=True)
-        pipe.xadd(
-            self.dead_stream,
-            {
-                **fields,
-                b"source_id": entry_id,
-                b"deliveries": str(deliveries).encode(),
-                b"dead_at": repr(time.time()).encode(),
-            },
-        )
+        pipe.xadd(self.dead_stream, letter)
         pipe.xack(self.stream, self.group, entry_id)
         pipe.execute()
 
@@ -505,12 +581,12 @@ class JobQueue:
         for group in self._r.xinfo_groups(self.stream):
             if group["name"] == self.group.encode():
                 last_delivered = group["last-delivered-id"]
-        entries = self._r.xrange(
-            self.stream, min=b"(" + last_delivered, max="+", count=1
+        entries = _entries(
+            self._r.xrange(self.stream, min=b"(" + last_delivered, max="+", count=1)
         )
         if not entries:
             return 0.0
-        entry_id = cast(bytes, entries[0][0])  # decode_responses off
+        entry_id = entries[0][0]
         added_ms = int(entry_id.split(b"-")[0])
         seconds, microseconds = self._r.time()
         return max(0.0, seconds + microseconds / 1e6 - added_ms / 1000.0)
@@ -525,10 +601,12 @@ class JobQueue:
                 "entry_id": entry["message_id"].decode(),
                 "consumer": entry["consumer"].decode(),
                 "idle_s": entry["time_since_delivered"] / 1000.0,
-                "deliveries": int(entry["times_delivered"]),
+                "deliveries": entry["times_delivered"],
             }
-            for entry in self._r.xpending_range(
-                self.stream, self.group, min="-", max="+", count=count
+            for entry in _pending(
+                self._r.xpending_range(
+                    self.stream, self.group, min="-", max="+", count=count
+                )
             )
         ]
 
@@ -538,7 +616,9 @@ class JobQueue:
         Each is ``{"entry_id", "job_id", "query", "deliveries", "dead_at"}``.
         """
         letters = []
-        for entry_id, fields in self._r.xrevrange(self.dead_stream, count=count):
+        for entry_id, fields in _entries(
+            self._r.xrevrange(self.dead_stream, count=count)
+        ):
             job = Job.from_bytes(fields[b"job"])
             letters.append(
                 {
@@ -611,10 +691,7 @@ class AsyncJobQueue:
 
     async def enqueue(self, job: Job) -> str:
         """Put *job* on the stream and return its entry id."""
-        # A client returning bytes (decode_responses off), as everywhere here.
-        entry_id = cast(
-            bytes, await self._r.xadd(self.stream, {b"job": job.to_bytes()})
-        )
+        entry_id = _bytes(await self._r.xadd(self.stream, {b"job": job.to_bytes()}))
         return entry_id.decode()
 
     async def stats(self) -> QueueStats:
@@ -657,7 +734,7 @@ class _ResultKeys:
     def _key(self, job_id: str, suffix: str) -> str:
         return f"{self.prefix}:{job_id}:{suffix}"
 
-    def _chunk_keys(self, job_id: str, meta: dict) -> list[str]:
+    def _chunk_keys(self, job_id: str, meta: Fields) -> list[str]:
         """The chunk keys a result's ``meta`` hash describes (none without it)."""
         n_chunks = int(meta[b"chunks"]) if meta else 0
         return [self._key(job_id, f"chunk:{n}") for n in range(n_chunks)]
@@ -814,21 +891,24 @@ class ResultReader(_ResultKeys):
 
     async def get(self, job_id: str) -> Optional[StoredResult]:
         """The stored result, or None if there is none (or it expired)."""
-        meta = await self._r.hgetall(self._key(job_id, "meta"))
+        meta = _hash(await self._r.hgetall(self._key(job_id, "meta")))
         if not meta:
             return None
-        chunks = await self._r.mget(self._chunk_keys(job_id, meta))
-        if any(chunk is None for chunk in chunks):
+        chunks = _optional_bytes_list(
+            await self._r.mget(self._chunk_keys(job_id, meta))
+        )
+        present = [chunk for chunk in chunks if chunk is not None]
+        if len(present) < len(chunks):
             return None
         return StoredResult(
-            compressed=b"".join(chunks),
+            compressed=b"".join(present),
             size=int(meta[b"size"]),
             http_status=int(meta[b"http_status"]),
         )
 
     async def delete(self, job_id: str) -> None:
         """Drop a collected result rather than wait for its TTL."""
-        meta = await self._r.hgetall(self._key(job_id, "meta"))
+        meta = _hash(await self._r.hgetall(self._key(job_id, "meta")))
         await self._r.delete(
             self._key(job_id, "meta"),
             self._key(job_id, "done"),
@@ -879,7 +959,7 @@ class WorkerRegistry:
     def report(self, name: str, **fields: object) -> None:
         """Record *fields* as *name*'s current state (replacing the last report)."""
         now = time.time()
-        mapping = {k: _field(v) for k, v in fields.items()}
+        mapping: dict[FieldT, EncodableT] = {k: _field(v) for k, v in fields.items()}
         mapping["name"] = name
         mapping["last_seen"] = repr(now)
         key = f"{self.prefix}:{name}"
@@ -892,7 +972,7 @@ class WorkerRegistry:
 
     def get(self, name: str) -> Optional[dict]:
         """*name*'s live report, or None if it has none (never ran, or expired)."""
-        fields = self._r.hgetall(f"{self.prefix}:{name}")
+        fields = _hash(self._r.hgetall(f"{self.prefix}:{name}"))
         return _typed_report(_decode(fields)) if fields else None
 
     def record_last_words(self, name: str, text: str, ttl_seconds: int = 3600) -> None:
@@ -901,7 +981,7 @@ class WorkerRegistry:
 
     def last_words(self, name: str) -> str:
         """What *name*'s previous incarnation recorded as it died, consumed."""
-        words = self._r.getdel(f"{self.prefix}:{name}:last_words")
+        words = _optional_bytes(self._r.getdel(f"{self.prefix}:{name}:last_words"))
         return words.decode() if words else ""
 
     def forget(self, name: str) -> None:
@@ -913,11 +993,11 @@ class WorkerRegistry:
 
     def workers(self) -> list[dict]:
         """Every worker with a live report, most recently seen first."""
-        names = self._r.zrevrange(self._index, 0, -1)
+        names = _bytes_list(self._r.zrevrange(self._index, 0, -1))
         reports = []
         for raw_name in names:
             name = raw_name.decode()
-            fields = self._r.hgetall(f"{self.prefix}:{name}")
+            fields = _hash(self._r.hgetall(f"{self.prefix}:{name}"))
             if not fields:
                 self._r.zrem(self._index, name)  # expired: gone for good
                 continue
@@ -1000,7 +1080,7 @@ class JobHistory:
     def recent(self, count: int) -> list[dict]:
         """The newest *count* records, newest first."""
         records = []
-        for entry_id, fields in self._r.xrevrange(self.stream, count=count):
+        for entry_id, fields in _entries(self._r.xrevrange(self.stream, count=count)):
             record = _typed_history(_decode(fields))
             record["entry_id"] = entry_id.decode()
             records.append(record)
