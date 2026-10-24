@@ -41,7 +41,13 @@ from gandalf.config import settings
 from gandalf.execute import execute_to_bytes, load_runtime, post_callback
 from gandalf.execute import serialize_response
 from gandalf.logging_config import configure_logging, request_id_var
-from gandalf.notify import Event, Notifier, mark_worker_leaving
+from gandalf.notify import (
+    Event,
+    Notifier,
+    mark_worker_leaving,
+    mark_worker_recycled,
+    was_worker_recycled,
+)
 from gandalf.metrics import (
     JOB_DURATION,
     JOB_QUEUE_WAIT,
@@ -214,6 +220,8 @@ class Worker:
         # monitor reports a lost worker.
         if self.registry is not None:
             mark_worker_leaving(self.registry.client, self.consumer)
+            if recycled:
+                mark_worker_recycled(self.registry.client, self.consumer)
             self.registry.forget(self.consumer)
         pool = self._pool_size()
         self.notify(
@@ -238,10 +246,22 @@ class Worker:
         A report under this worker's name that is still live means the
         previous process with this name never exited cleanly (a clean exit
         removes it): it crashed, or was killed.  Its last words, if it
-        managed any, say which.
+        managed any, say which.  A start right after a recycle is routine,
+        so it is a ``worker_recycled`` event, which Slack skips by default.
         """
         previous = self.registry.get(self.consumer) if self.registry else None
         pool = self._pool_size() + (0 if previous else 1)
+        if (
+            previous is None
+            and self.registry is not None
+            and was_worker_recycled(self.registry.client, self.consumer)
+        ):
+            return Event(
+                "worker_recycled",
+                "Worker back after recycling",
+                f"Worker {self.consumer} is taking jobs again; {pool} alive.",
+                {"worker": self.consumer, "pool": pool},
+            )
         if previous is None:
             return Event(
                 "worker_started",
