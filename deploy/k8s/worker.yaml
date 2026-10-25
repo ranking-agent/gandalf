@@ -23,7 +23,7 @@ spec:
       terminationGracePeriodSeconds: 1800
       containers:
         - name: worker
-          image: ghcr.io/ranking-agent/gandalf:2.0.0
+          image: ghcr.io/ranking-agent/gandalf:2.2.0
           command: ["python", "-m", "gandalf.worker"]
           ports:
             - {name: metrics, containerPort: 9100}
@@ -48,7 +48,6 @@ spec:
             # Its spans join the API's traces as their own service; see
             # "Tracing a queued query" in the README.
             - {name: GANDALF_OTEL_SERVICE_NAME, value: gandalf-worker}
-            - {name: GANDALF_WORKER_HEARTBEAT_FILE, value: /tmp/heartbeat}
           volumeMounts:
             - {name: graph, mountPath: /data/graph, readOnly: true}
           resources:
@@ -57,12 +56,21 @@ spec:
             # the mapped graph.  A query is single-threaded Python, so one
             # CPU is what it can use.
             limits: {cpu: "2", memory: 16Gi}
-          readinessProbe:
-            # A worker takes no traffic, but "ready" keeps rollouts honest:
-            # the heartbeat file appears once the graph is open and the
-            # loop has started.
+          startupProbe:
+            # The heartbeat file appears once the graph is open and the
+            # loop has started, which takes minutes on a full graph.  Allow
+            # up to 15; the liveness probe waits for this one, so a slow
+            # start is not killed for a heartbeat that does not exist yet.
             exec:
-              command: ["test", "-f", "/tmp/heartbeat"]
+              command: ["test", "-f", "/tmp/gandalf-worker-heartbeat"]
+            periodSeconds: 10
+            failureThreshold: 90
+          readinessProbe:
+            # A worker takes no traffic, but "ready" keeps rollouts honest.
+            # The path is GANDALF_WORKER_HEARTBEAT_FILE's default; if you
+            # set that variable, change all three probes to match.
+            exec:
+              command: ["test", "-f", "/tmp/gandalf-worker-heartbeat"]
             periodSeconds: 10
           livenessProbe:
             # The loop touches the heartbeat every poll and every keepalive
@@ -72,8 +80,7 @@ spec:
               command:
                 - sh
                 - -c
-                - test $(( $(date +%s) - $(stat -c %Y /tmp/heartbeat) )) -lt 120
-            initialDelaySeconds: 60
+                - test $(( $(date +%s) - $(stat -c %Y /tmp/gandalf-worker-heartbeat) )) -lt 120
             periodSeconds: 30
             failureThreshold: 3
       volumes:

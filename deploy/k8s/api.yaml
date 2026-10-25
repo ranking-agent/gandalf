@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: gandalf
-          image: ghcr.io/ranking-agent/gandalf:2.0.0
+          image: ghcr.io/ranking-agent/gandalf:2.2.0
           ports:
             - {name: http, containerPort: 6429}
           env:
@@ -49,18 +49,28 @@ spec:
             # The API holds a compressed /query result in memory while it
             # streams it out; a few GB covers the largest.
             limits: {memory: 6Gi}
+          startupProbe:
+            # gunicorn opens the port only once the graph is open and the
+            # Biolink model fetched (preload_app), so nothing answers until
+            # then: a full graph takes minutes.  Allow up to 15 minutes;
+            # the liveness and readiness probes wait for this one, so a
+            # slow start is not killed.
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 90
           readinessProbe:
             # 503 until the graph is open and Redis answers, so a pod that
-            # cannot enqueue gets no traffic.
+            # cannot enqueue gets no traffic.  The default 1s timeout is
+            # too tight for a Redis round trip on a busy pod.
             httpGet: {path: /ready, port: http}
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
             # Generous: a worker process compressing a multi-gigabyte
             # response blocks its event loop for seconds and must not be
             # killed for it.
             httpGet: {path: /health, port: http}
-            initialDelaySeconds: 30
             periodSeconds: 20
             timeoutSeconds: 10
             failureThreshold: 6
