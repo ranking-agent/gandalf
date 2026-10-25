@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     # A job delivered more than this many times (a worker died running it)
     # is dead-lettered instead of run again.
     queue_max_deliveries: int = 2
+    # A dead-lettered job's query is refused for this long if sent again:
+    # by the API (422, before it is enqueued) and by a worker taking a copy
+    # that was already queued.  0 disables it.
+    queue_quarantine_seconds: float = 3600.0
     # A running job idle in the consumer group for longer than this is taken
     # over by another worker.  Idle time counts from the worker's last
     # keepalive, not from delivery: a worker refreshes its job every

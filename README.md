@@ -439,6 +439,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_QUEUE_GROUP` | `gandalf-workers` | Consumer group the workers read through |
 | `GANDALF_QUEUE_DEAD_STREAM` | `gandalf:jobs:dead` | Where jobs over the delivery limit are moved |
 | `GANDALF_QUEUE_MAX_DELIVERIES` | `2` | Attempts a job gets before it is dead-lettered |
+| `GANDALF_QUEUE_QUARANTINE_SECONDS` | `3600` | How long a dead-lettered job's query is refused (422) if sent again, by the API and by a worker taking a copy already queued (0 = never) |
 | `GANDALF_QUEUE_CLAIM_IDLE_SECONDS` | `45` | A job whose worker has not refreshed it for this long is taken over as abandoned (idle counts from the last keepalive, not from delivery) |
 | `GANDALF_QUEUE_KEEPALIVE_SECONDS` | `15` | How often a running worker refreshes its job; keep the claim threshold several of these |
 | `GANDALF_CALLBACK_ATTEMPTS` | `3` | Tries to deliver an `/asyncquery` result to its callback on a connection failure, timeout or 5xx |
@@ -602,7 +603,15 @@ What the queue gives, beyond "more workers":
   (`GANDALF_QUEUE_CLAIM_IDLE_SECONDS`; a live worker refreshes its job every
   15 seconds however long the query runs); one that has killed a worker
   twice (`GANDALF_QUEUE_MAX_DELIVERIES`) is moved to the dead-letter stream
-  and answered with an `Error` response rather than run again.  A query that
+  and answered with an `Error` response rather than run again.  Its query
+  is then quarantined for an hour (`GANDALF_QUEUE_QUARANTINE_SECONDS`): the
+  same query sent again -- matched on its message, workflow and parameters,
+  whatever its `timeout` -- is answered 422 without being enqueued, and a
+  copy already queued is answered the same way without being run, so a
+  client resending a query that crashes workers costs two workers, not two
+  per submission.  The dead letters on `/status.json` carry the query's
+  `fingerprint`; `redis-cli DEL gandalf:jobs:quarantine:<fingerprint>` lifts
+  a quarantine early.  A query that
   raises is answered with an `Error` at once, not retried.  An `/asyncquery`
   result whose callback fails with a connection error, a timeout or a 5xx is
   posted again (`GANDALF_CALLBACK_ATTEMPTS`); a 4xx is final.
@@ -682,7 +691,7 @@ link back to the status page:
 | `worker_restarted` | critical | A worker came back under a name whose last instance never exited cleanly. Says how long it lived, what it was running, and the error it died with, or that it recorded none and was killed from outside (an OOM kill, a probe) |
 | `worker_lost` | critical | A worker stopped reporting without a clean exit: an OOM kill, usually. Says what it was running |
 | `job_retried` | warning | A job abandoned by a dead worker is being run again |
-| `job_dead_lettered` | critical | A job ended two workers and was answered with an error instead of a third try |
+| `job_dead_lettered` | critical | A job ended two workers and was answered with an error instead of a third try; its query is quarantined |
 | `job_failed` | warning | A query raised; the client got an Error response |
 | `queue_backlog` / `queue_backlog_cleared` | warning / info | Jobs waiting for a worker stayed at or over `GANDALF_ALERT_QUEUE_LAG_PER_WORKER` × the live workers for `GANDALF_ALERT_QUEUE_BACKLOG_SECONDS`, then dropped to zero |
 | `queue_stuck` | warning | A job has been with one worker longer than `GANDALF_ALERT_STUCK_SECONDS` |
