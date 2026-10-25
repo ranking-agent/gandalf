@@ -1475,3 +1475,38 @@ def test_api_answers_503_when_redis_is_gone(api, graph, bmt, monkeypatch):  # no
     body["callback"] = "http://cb.invalid/x"
     assert api.post("/asyncquery", json=body).status_code == 503
     assert api.get("/status.json").status_code == 503
+
+
+def test_worker_back_after_recycling_is_not_a_slack_start(
+    graph, bmt, queue, store, registry, notifier
+):  # noqa: F811
+    """The process Kubernetes starts after a recycle is routine, not a new worker."""
+    n, hook = notifier
+
+    def worker() -> Worker:
+        return Worker(
+            graph,
+            bmt,
+            queue,
+            store,
+            consumer="w1",
+            max_jobs=1,
+            block_seconds=0.05,
+            registry=registry,
+            notifier=n,
+        )
+
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert worker().run() == 1
+    assert worker().run() == 1  # the same pod's next process
+    kinds = [a["kind"] for a in reversed(n.recent())]
+    assert kinds == [
+        "worker_started",
+        "worker_recycled",
+        "worker_recycled",
+        "worker_recycled",
+    ]
+    assert n.recent()[1]["title"] == "Worker back after recycling"
+    assert n.webhook.flush(5.0)
+    assert sum("Worker started" in r["text"] for r in hook.received) == 1

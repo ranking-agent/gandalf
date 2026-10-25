@@ -180,7 +180,7 @@ class Settings(BaseSettings):
     worker_name: str = ""  # consumer name; default "<hostname>-<pid>"
     # Exit after this many jobs so Kubernetes restarts the process and
     # returns the memory glibc holds after large queries (0 = never).
-    worker_max_jobs: int = 500
+    worker_max_jobs: int = 2000
     # Prometheus /metrics port for the worker (0 = disabled).
     worker_metrics_port: int = 9100
     # Touched on every loop iteration; a liveness probe checks its age.
