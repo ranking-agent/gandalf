@@ -41,7 +41,13 @@ from gandalf.config import settings
 from gandalf.execute import execute_to_bytes, load_runtime, post_callback
 from gandalf.execute import serialize_response
 from gandalf.logging_config import configure_logging, request_id_var
-from gandalf.notify import Event, Notifier, mark_worker_leaving
+from gandalf.notify import (
+    Event,
+    Notifier,
+    mark_worker_leaving,
+    mark_worker_recycled,
+    was_worker_recycled,
+)
 from gandalf.metrics import (
     JOB_DURATION,
     JOB_QUEUE_WAIT,
@@ -58,6 +64,7 @@ from gandalf.jobs import (
     Job,
     JobHistory,
     JobQueue,
+    Quarantined,
     ResultStore,
     WorkerRegistry,
     default_consumer_name,
@@ -214,6 +221,8 @@ class Worker:
         # monitor reports a lost worker.
         if self.registry is not None:
             mark_worker_leaving(self.registry.client, self.consumer)
+            if recycled:
+                mark_worker_recycled(self.registry.client, self.consumer)
             self.registry.forget(self.consumer)
         pool = self._pool_size()
         self.notify(
@@ -238,10 +247,22 @@ class Worker:
         A report under this worker's name that is still live means the
         previous process with this name never exited cleanly (a clean exit
         removes it): it crashed, or was killed.  Its last words, if it
-        managed any, say which.
+        managed any, say which.  A start right after a recycle is routine,
+        so it is a ``worker_recycled`` event, which Slack skips by default.
         """
         previous = self.registry.get(self.consumer) if self.registry else None
         pool = self._pool_size() + (0 if previous else 1)
+        if (
+            previous is None
+            and self.registry is not None
+            and was_worker_recycled(self.registry.client, self.consumer)
+        ):
+            return Event(
+                "worker_recycled",
+                "Worker back after recycling",
+                f"Worker {self.consumer} is taking jobs again; {pool} alive.",
+                {"worker": self.consumer, "pool": pool},
+            )
         if previous is None:
             return Event(
                 "worker_started",
@@ -370,6 +391,7 @@ class Worker:
                     {"job": job.job_id, "query": describe, "mode": job.mode},
                 )
             )
+        quarantined = None if delivery.poisoned else self._quarantined(job)
         if delivery.poisoned:
             body = serialize_response(
                 error_response(
@@ -381,6 +403,18 @@ class Worker:
                 )
             )
             http_status, outcome = 500, "poisoned"
+        elif quarantined is not None:
+            # Queued before its twin was dead-lettered; the API refuses any
+            # sent since.  Answered as the API would, without running it.
+            logger.warning(
+                "job %s refused: it matches dead-lettered job %s",
+                job.job_id,
+                quarantined.job_id,
+            )
+            body = serialize_response(
+                error_response(job.query, quarantined.reason(), graph=self.graph)
+            )
+            http_status, outcome = 422, "refused"
         else:
             with (
                 keepalive(
@@ -451,6 +485,18 @@ class Worker:
             body_size,
         )
         return outcome
+
+    def _quarantined(self, job: Job) -> Optional[Quarantined]:
+        """The dead letter *job* is a copy of, if any; None if Redis fails.
+
+        A failed check runs the job: at worst it kills this worker, which the
+        delivery limit already bounds.
+        """
+        try:
+            return self.queue.quarantined(job.query)
+        except redis.RedisError as exc:
+            logger.warning("job %s: quarantine check failed: %s", job.job_id, exc)
+            return None
 
     def execute(self, job: Job) -> tuple[bytes, int, str]:
         """Run a job to a serialized Response.

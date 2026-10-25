@@ -82,8 +82,8 @@ class Settings(BaseSettings):
 
     # Path reconstruction tunables (search/reconstruct.py)
     debug_paths_tsv: str = ""
-    large_result_threshold: int = 10_000_000
-    max_path_limit: int = 0
+    large_result_threshold: int = 1_000_000
+    max_path_limit: int = 200_000
 
     # Default service URL for the literature_cooccurrence annotator plugin.
     # Empty disables the plugin unless a request supplies its own service_url.
@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     # A job delivered more than this many times (a worker died running it)
     # is dead-lettered instead of run again.
     queue_max_deliveries: int = 2
+    # A dead-lettered job's query is refused for this long if sent again:
+    # by the API (422, before it is enqueued) and by a worker taking a copy
+    # that was already queued.  0 disables it.
+    queue_quarantine_seconds: float = 3600.0
     # A running job idle in the consumer group for longer than this is taken
     # over by another worker.  Idle time counts from the worker's last
     # keepalive, not from delivery: a worker refreshes its job every
@@ -180,7 +184,7 @@ class Settings(BaseSettings):
     worker_name: str = ""  # consumer name; default "<hostname>-<pid>"
     # Exit after this many jobs so Kubernetes restarts the process and
     # returns the memory glibc holds after large queries (0 = never).
-    worker_max_jobs: int = 500
+    worker_max_jobs: int = 2000
     # Prometheus /metrics port for the worker (0 = disabled).
     worker_metrics_port: int = 9100
     # Touched on every loop iteration; a liveness probe checks its age.

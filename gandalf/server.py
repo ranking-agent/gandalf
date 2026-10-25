@@ -45,6 +45,7 @@ from gandalf.metrics import (
     HTTP_DURATION,
     HTTP_REQUESTS,
     JOBS_ENQUEUED,
+    QUERIES_QUARANTINED,
     QUEUE_LAG,
     QUEUE_PENDING,
     SYNC_WAIT,
@@ -60,6 +61,7 @@ from gandalf.jobs import (
     Job,
     JobHistory,
     JobQueue,
+    Quarantined,
     ResultReader,
     StoredResult,
     WorkerRegistry,
@@ -764,9 +766,27 @@ async def sync_lookup(
     deadline = None if rehydrate else _prepare_query(raw)
 
     if AQUEUE is not None:
+        try:
+            _refuse_if_quarantined(await AQUEUE.quarantined(raw))
+        except redis.RedisError as exc:
+            # The enqueue that follows answers 503 if Redis is really gone.
+            logger.warning("quarantine check failed: %s", exc)
         accept_encoding = request.headers.get("accept-encoding", "")
         return await _queued_lookup(raw, bool(profile), deadline, accept_encoding)
     return await run_in_threadpool(_lookup_in_process, raw, bool(profile), deadline)
+
+
+def _refuse_if_quarantined(quarantined: Optional[Quarantined]) -> None:
+    """Answer 422 for a query that matches a recent dead letter.
+
+    Such a query OOM-killed the workers that ran it, so sending it again
+    would only kill two more (see ``queue_quarantine_seconds``).
+    """
+    if quarantined is None:
+        return
+    QUERIES_QUARANTINED.inc()
+    logger.warning("query refused: it matches dead-lettered job %s", quarantined.job_id)
+    raise HTTPException(422, quarantined.reason())
 
 
 def _lookup_in_process(
@@ -985,6 +1005,7 @@ def _dispatch_async(
         )
         otel.set_attributes(**{"gandalf.job_id": job.job_id})
         try:
+            _refuse_if_quarantined(QUEUE.quarantined(raw))
             QUEUE.enqueue(job)
         except redis.RedisError as exc:
             logger.error("job %s: queue unavailable: %s", job.job_id, exc)

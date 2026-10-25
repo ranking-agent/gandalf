@@ -82,6 +82,11 @@ JOBS_ENQUEUED = Counter(
     "/query; callback: /asyncquery).",
     ["mode"],
 )
+QUERIES_QUARANTINED = Counter(
+    "gandalf_queries_quarantined_total",
+    "Queries the API refused (422) because the same query was dead-lettered "
+    "within queue_quarantine_seconds.",
+)
 SYNC_WAIT = Histogram(
     "gandalf_sync_wait_seconds",
     "How long a /query waited for its job's result, queue time included.",
@@ -113,7 +118,8 @@ QUEUE_PENDING = Gauge(
 JOBS = Counter(
     "gandalf_jobs_total",
     "Jobs finished, by outcome: ok, timeout, expired (budget spent before "
-    "the worker started it), error, poisoned (dead-lettered).",
+    "the worker started it), error, poisoned (dead-lettered), refused (a "
+    "copy of a dead-lettered query, not run).",
     ["outcome"],
 )
 JOB_DURATION = Histogram(

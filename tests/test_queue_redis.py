@@ -211,6 +211,95 @@ def test_stale_job_is_taken_over_then_dead_lettered(queue, client):
     assert fields[b"deliveries"] == b"3"
 
 
+@pytest.fixture
+def quarantining_queue(client):
+    q = JobQueue(
+        client,
+        stream="t:jobs",
+        group="t:workers",
+        dead_stream="t:dead",
+        max_deliveries=2,
+        claim_idle_seconds=0.2,
+        quarantine_seconds=60,
+    )
+    q.ensure_group()
+    return q
+
+
+def _dead_letter_one(queue: JobQueue, job: Job) -> None:
+    """Enqueue *job* and abandon it until the queue dead-letters it."""
+    queue.enqueue(job)
+    assert queue.receive("died-1", block_seconds=0.1) is not None
+    time.sleep(0.3)
+    assert queue.receive("died-2", block_seconds=0.1) is not None
+    time.sleep(0.3)
+    third = queue.receive("judge", block_seconds=0.1)
+    assert third is not None and third.poisoned
+
+
+def test_a_dead_lettered_query_is_quarantined(quarantining_queue, client):
+    job = Job.new(dict(ONE_HOP))
+    assert quarantining_queue.quarantined(job.query) is None
+    _dead_letter_one(quarantining_queue, job)
+
+    # The same query sent again, with a new timeout, matches; another does not.
+    resent = dict(ONE_HOP, parameters={"timeout": 30})
+    quarantined = quarantining_queue.quarantined(resent)
+    assert quarantined is not None
+    assert quarantined.job_id == job.job_id
+    assert 0 < quarantined.remaining_s <= 60
+    other = orjson.loads(orjson.dumps(ONE_HOP))
+    other["message"]["query_graph"]["nodes"]["n0"]["ids"] = ["CHEBI:0000"]
+    assert quarantining_queue.quarantined(other) is None
+    letter = quarantining_queue.dead_letters()[0]
+    assert client.exists(f"t:jobs:quarantine:{letter['fingerprint']}")
+
+
+def test_quarantine_off_remembers_nothing(queue, client):
+    _dead_letter_one(queue, Job.new(dict(ONE_HOP)))
+    assert queue.quarantined(dict(ONE_HOP)) is None
+    assert not client.keys("t:jobs:quarantine:*")
+
+
+def test_an_abandoned_copy_of_a_dead_letter_is_not_run_again(quarantining_queue):
+    """Two copies queued at once: the second gets no second worker either."""
+    first, copy = Job.new(dict(ONE_HOP)), Job.new(dict(ONE_HOP))
+    quarantining_queue.enqueue(first)
+    quarantining_queue.enqueue(copy)
+    assert quarantining_queue.receive("a", block_seconds=0.1).job == first
+    assert quarantining_queue.receive("b", block_seconds=0.1).job == copy
+    time.sleep(0.3)  # both workers died
+    retried = quarantining_queue.receive("c", block_seconds=0.1)
+    assert retried is not None and retried.job == first and not retried.poisoned
+    time.sleep(0.3)  # and so did the one retrying the first
+    judged = quarantining_queue.receive("d", block_seconds=0.1)
+    assert judged is not None and judged.job == first and judged.poisoned
+    # The copy has been abandoned once, as the first had: dead-lettered now.
+    taken = quarantining_queue.receive("e", block_seconds=0.1)
+    assert taken is not None and taken.job == copy
+    assert taken.poisoned and taken.deliveries == 2
+    assert quarantining_queue.dead_letter_count() == 2
+
+
+def test_a_queued_copy_of_a_dead_letter_is_refused_unrun(
+    graph, bmt, quarantining_queue, store, redis_url  # noqa: F811
+):
+    _dead_letter_one(quarantining_queue, Job.new(dict(ONE_HOP)))
+    copy = Job.new(dict(ONE_HOP))
+    quarantining_queue.enqueue(copy)
+    delivery = quarantining_queue.receive("w", block_seconds=0.1)
+    assert delivery is not None and delivery.deliveries == 1
+    w = Worker(graph, bmt, quarantining_queue, store, consumer="w")
+    w.execute = None  # running it would raise
+    assert w.handle(delivery) == "refused"
+    assert quarantining_queue.stats().pending == 0
+    result = _read(redis_url, lambda r: r.get(copy.job_id))
+    assert result is not None and result.http_status == 422
+    answered = orjson.loads(result.decompress())
+    assert answered["status"] == "Error"
+    assert "dead-lettered" in answered["description"]
+
+
 def test_touch_keeps_a_running_job_from_being_claimed(queue):
     job = Job.new(dict(ONE_HOP))
     queue.enqueue(job)
@@ -398,6 +487,22 @@ def test_sync_query_times_out_when_nobody_answers(api, queue, monkeypatch):
     assert resp.status_code == 504, resp.text
     assert 1.0 <= time.monotonic() - t0 < 5.0
     assert queue.stats().lag == 1  # still there for the next worker
+
+
+def test_api_refuses_a_quarantined_query_before_enqueueing(
+    api, quarantining_queue, monkeypatch
+):
+    _dead_letter_one(quarantining_queue, Job.new(dict(ONE_HOP)))
+    monkeypatch.setattr(gandalf_server.AQUEUE, "quarantine_ms", 60_000)
+    monkeypatch.setattr(gandalf_server, "QUEUE", quarantining_queue)
+    length = quarantining_queue.length()
+
+    refused = api.post("/query", json=dict(ONE_HOP, parameters={"timeout": 5}))
+    assert refused.status_code == 422
+    assert "dead-lettered" in refused.json()["detail"]
+    callback = dict(ONE_HOP, callback="http://127.0.0.1:9/cb")
+    assert api.post("/asyncquery", json=callback).status_code == 422
+    assert quarantining_queue.length() == length  # neither reached the stream
 
 
 def test_ready_reports_the_queue(api, queue):
@@ -1475,3 +1580,38 @@ def test_api_answers_503_when_redis_is_gone(api, graph, bmt, monkeypatch):  # no
     body["callback"] = "http://cb.invalid/x"
     assert api.post("/asyncquery", json=body).status_code == 503
     assert api.get("/status.json").status_code == 503
+
+
+def test_worker_back_after_recycling_is_not_a_slack_start(
+    graph, bmt, queue, store, registry, notifier
+):  # noqa: F811
+    """The process Kubernetes starts after a recycle is routine, not a new worker."""
+    n, hook = notifier
+
+    def worker() -> Worker:
+        return Worker(
+            graph,
+            bmt,
+            queue,
+            store,
+            consumer="w1",
+            max_jobs=1,
+            block_seconds=0.05,
+            registry=registry,
+            notifier=n,
+        )
+
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert worker().run() == 1
+    assert worker().run() == 1  # the same pod's next process
+    kinds = [a["kind"] for a in reversed(n.recent())]
+    assert kinds == [
+        "worker_started",
+        "worker_recycled",
+        "worker_recycled",
+        "worker_recycled",
+    ]
+    assert n.recent()[1]["title"] == "Worker back after recycling"
+    assert n.webhook.flush(5.0)
+    assert sum("Worker started" in r["text"] for r in hook.received) == 1

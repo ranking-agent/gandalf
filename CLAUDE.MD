@@ -374,6 +374,9 @@ Where conflicts and breakage show up, and what to do:
   nullable `Message` fields, required `Node.attributes`); fix those with a
   narrow `cast` at that spot rather than changing the behaviour.
 - **Versions**: keep this branch's 1.x version (see above).
+- **Image tags in `deploy/k8s/*.yaml`**: keep them on a 1.x image
+  (`ghcr.io/ranking-agent/gandalf:1.x.y`); `devel` pins its own 2.x image,
+  which serves TRAPI 2.0.
 - **`pyproject.toml` / `requirements.txt`**: keep `translator_tom>=1.7.0,<2`
   when `devel` bumps TOM; new TOM 2.x imports may not exist in 1.x.
 - **Graph format changes** come across untouched -- the rebuild notes on
@@ -473,7 +476,11 @@ through a consumer group and run them.  Rules that follow:
   `queue_claim_idle_seconds`; a running worker `touch`es its job every
   `queue_keepalive_seconds`), and one over `queue_max_deliveries` is
   dead-lettered and answered with `error_response` -- the poison case, a
-  query that OOM-kills whatever runs it.
+  query that OOM-kills whatever runs it.  Dead-lettering also quarantines
+  the query's `query_fingerprint` for `queue_quarantine_seconds`: the API
+  answers a resubmission 422 before enqueueing it, a worker answers a
+  queued copy (outcome `refused`) without running it, and `_claim_stale`
+  dead-letters an abandoned copy instead of giving it a second worker.
 - **Results do not go through the stream.**  `/query` results go to the
   `ResultStore` (zstd, chunked under Redis's 512 MB value cap, with a TTL);
   async results go straight to the callback.

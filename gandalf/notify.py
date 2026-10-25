@@ -80,6 +80,7 @@ _EMOJI = {
 LOG_STREAM = "gandalf:alerts"
 KNOWN_WORKERS = "gandalf:notify:known_workers"
 LEAVING_PREFIX = "gandalf:notify:leaving"
+RECYCLED_PREFIX = "gandalf:notify:recycled"
 MONITOR_LOCK = "gandalf:notify:monitor"
 BACKLOG_FLAG = "gandalf:notify:backlog"
 BACKLOG_SINCE = "gandalf:notify:backlog_since"
@@ -382,6 +383,16 @@ def mark_worker_leaving(client: redis.Redis, name: str) -> None:
     pipe.set(f"{LEAVING_PREFIX}:{name}", "1", ex=120)
     pipe.hdel(KNOWN_WORKERS, name)
     pipe.execute()
+
+
+def mark_worker_recycled(client: redis.Redis, name: str) -> None:
+    """Note that *name* is exiting at its job limit, so its comeback is routine."""
+    client.set(f"{RECYCLED_PREFIX}:{name}", "1", ex=600)
+
+
+def was_worker_recycled(client: redis.Redis, name: str) -> bool:
+    """Whether the last process named *name* recycled; clears the note."""
+    return bool(client.delete(f"{RECYCLED_PREFIX}:{name}"))
 
 
 class Monitor:
