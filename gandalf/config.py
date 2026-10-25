@@ -82,8 +82,8 @@ class Settings(BaseSettings):
 
     # Path reconstruction tunables (search/reconstruct.py)
     debug_paths_tsv: str = ""
-    large_result_threshold: int = 10_000_000
-    max_path_limit: int = 0
+    large_result_threshold: int = 1_000_000
+    max_path_limit: int = 200_000
 
     # Default service URL for the literature_cooccurrence annotator plugin.
     # Empty disables the plugin unless a request supplies its own service_url.
