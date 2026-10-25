@@ -25,7 +25,7 @@ from gandalf.jobs import JobHistory, JobQueue, WorkerRegistry
 from gandalf.notify import Notifier
 
 #: Outcomes a job can end with, in the order the page lists them.
-OUTCOMES = ("ok", "timeout", "expired", "error", "poisoned")
+OUTCOMES = ("ok", "timeout", "expired", "error", "poisoned", "refused")
 
 #: Time windows the aggregates are computed over, in seconds.
 WINDOWS = {"5m": 300, "1h": 3600, "24h": 86400}
@@ -78,7 +78,7 @@ def aggregate(records: list[dict], window_s: float, now: float) -> dict:
         )
     durations = [float(r["duration_s"]) for r in within if "duration_s" in r]
     waits = [float(r["wait_s"]) for r in within if "wait_s" in r]
-    failed = outcomes["error"] + outcomes["poisoned"]
+    failed = outcomes["error"] + outcomes["poisoned"] + outcomes["refused"]
     return {
         "window_s": window_s,
         "jobs": len(within),
@@ -99,8 +99,8 @@ def per_minute(records: list[dict], minutes: int, now: float) -> list[dict]:
 
     Each bucket is ``{"minute": epoch, "ok", "timed_out", "failed"}``:
     the three classes the page's chart stacks (``timeout`` and ``expired``
-    are both the budget running out; ``error`` and ``poisoned`` both a
-    failure).  It also has the queue wait of those jobs --
+    are both the budget running out; ``error``, ``poisoned`` and
+    ``refused`` all a failure).  It also has the queue wait of those jobs --
     ``wait_p50_s``, ``wait_p95_s``, ``wait_max_s`` -- which are None in a
     minute that finished none.
 

@@ -100,12 +100,19 @@ def test_aggregate_counts_every_outcome_and_only_the_window():
         "expired": 1,
         "error": 1,
         "poisoned": 1,
+        "refused": 0,
     }
     assert agg["failed"] == 2
     assert agg["duration_max_s"] == 6.0
     assert agg["duration_p95_s"] == 6.0
     assert agg["bytes"] == 30
     assert agg["per_minute"] == pytest.approx(6 / 5)
+
+
+def test_a_refused_job_counts_as_failed():
+    agg = aggregate([{"finished_at": 999.0, "outcome": "refused"}], 300, 1000.0)
+    assert agg["outcomes"]["refused"] == 1
+    assert agg["failed"] == 1
 
 
 def test_per_minute_buckets_cover_the_window_oldest_first():

@@ -58,6 +58,7 @@ from gandalf.jobs import (
     Job,
     JobHistory,
     JobQueue,
+    Quarantined,
     ResultStore,
     WorkerRegistry,
     default_consumer_name,
@@ -370,6 +371,7 @@ class Worker:
                     {"job": job.job_id, "query": describe, "mode": job.mode},
                 )
             )
+        quarantined = None if delivery.poisoned else self._quarantined(job)
         if delivery.poisoned:
             body = serialize_response(
                 error_response(
@@ -381,6 +383,18 @@ class Worker:
                 )
             )
             http_status, outcome = 500, "poisoned"
+        elif quarantined is not None:
+            # Queued before its twin was dead-lettered; the API refuses any
+            # sent since.  Answered as the API would, without running it.
+            logger.warning(
+                "job %s refused: it matches dead-lettered job %s",
+                job.job_id,
+                quarantined.job_id,
+            )
+            body = serialize_response(
+                error_response(job.query, quarantined.reason(), graph=self.graph)
+            )
+            http_status, outcome = 422, "refused"
         else:
             with (
                 keepalive(
@@ -451,6 +465,18 @@ class Worker:
             body_size,
         )
         return outcome
+
+    def _quarantined(self, job: Job) -> Optional[Quarantined]:
+        """The dead letter *job* is a copy of, if any; None if Redis fails.
+
+        A failed check runs the job: at worst it kills this worker, which the
+        delivery limit already bounds.
+        """
+        try:
+            return self.queue.quarantined(job.query)
+        except redis.RedisError as exc:
+            logger.warning("job %s: quarantine check failed: %s", job.job_id, exc)
+            return None
 
     def execute(self, job: Job) -> tuple[bytes, int, str]:
         """Run a job to a serialized Response.

@@ -151,7 +151,7 @@
   const fmtT = (epoch) => epoch == null ? "–" : new Date(epoch * 1000).toLocaleTimeString();
   const ago = (s) => s == null ? "–" : s < 60 ? Math.round(s) + "s ago" : fmtS(s) + " ago";
   const badge = (kind, text) => `<span class="badge ${esc(kind)}"><span class="dot"></span>${esc(text || kind)}</span>`;
-  const outcomeIcon = {ok: "✓", timeout: "⏱", expired: "⏱", error: "✕", poisoned: "☠"};
+  const outcomeIcon = {ok: "✓", timeout: "⏱", expired: "⏱", error: "✕", poisoned: "☠", refused: "⛔"};
   const outcome = (o) => badge(o, (outcomeIcon[o] || "") + " " + o);
   const querySummary = (q) => {
     if (!q) return "";

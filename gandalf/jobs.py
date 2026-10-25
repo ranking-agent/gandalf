@@ -16,6 +16,11 @@ group, which gives the properties the design needs:
   before (an OOM kill, typically), so it is moved to the dead-letter stream
   and answered with an error instead of being run a third time and killing
   every worker in turn.
+* **Quarantine.**  A dead-lettered job's query is remembered by its
+  :func:`query_fingerprint` for ``queue_quarantine_seconds``.  The API
+  refuses a resubmission of it (422) before it reaches the stream, and a
+  worker refuses a copy that was already queued, so one query sent again and
+  again kills two workers, not two for every time it is sent.
 * **One scaling signal.**  The group's *lag* -- entries not yet delivered to
   any consumer -- is exactly "jobs nobody has started", which is what KEDA's
   ``redis-streams`` scaler reads (``lagCount``).
@@ -39,6 +44,7 @@ any API pod can show the whole deployment.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import logging
 import os
@@ -314,6 +320,78 @@ def summarize_query(query: QueryDict) -> dict:
     return summary
 
 
+#: Request parameters that do not change what a query does, left out of its
+#: fingerprint so a resubmission with a new timeout is still recognised.
+_UNFINGERPRINTED_PARAMETERS = frozenset({"timeout", "log_level", "bypass_cache"})
+
+
+def query_fingerprint(query: QueryDict) -> str:
+    """A hash of what a query asks the graph to do, to recognise it when resent.
+
+    The message, workflow and parameters, keys sorted, without the
+    parameters that leave the work unchanged (``timeout``, ``log_level``,
+    ``bypass_cache``) or any other top-level key (``callback``,
+    ``submitter``).  Computed on the query as the API normalized it, which
+    is the query the job carries, so the API and the workers agree.
+
+    Examples:
+        >>> q = {"message": {"query_graph": {"nodes": {"n0": {"ids": ["A:1"]}}}}}
+        >>> resent = dict(q, parameters={"timeout": 30}, submitter="ars")
+        >>> query_fingerprint(q) == query_fingerprint(resent)
+        True
+        >>> other = {"message": {"query_graph": {"nodes": {"n0": {"ids": ["A:2"]}}}}}
+        >>> query_fingerprint(q) == query_fingerprint(other)
+        False
+    """
+    parameters = {
+        k: v
+        for k, v in (query.get("parameters") or {}).items()
+        if k not in _UNFINGERPRINTED_PARAMETERS
+    }
+    canonical = orjson.dumps(
+        {
+            "message": query.get("message") or {},
+            "workflow": query.get("workflow"),
+            "parameters": parameters,
+        },
+        option=orjson.OPT_SORT_KEYS,
+    )
+    return hashlib.sha256(canonical).hexdigest()[:32]
+
+
+def _quarantine_key(stream: str, fingerprint: str) -> str:
+    return f"{stream}:quarantine:{fingerprint}"
+
+
+@dataclass(frozen=True)
+class Quarantined:
+    """A query refused because the same query was dead-lettered recently.
+
+    Attributes:
+        job_id: The dead-lettered job it matches.
+        remaining_s: How much longer the quarantine lasts.
+    """
+
+    job_id: str
+    remaining_s: float
+
+    def reason(self) -> str:
+        """Why the query is refused, for the client."""
+        return (
+            f"This query matches job {self.job_id}, which crashed the workers "
+            "that ran it and was dead-lettered. It is refused for another "
+            f"{self.remaining_s:.0f}s rather than run again."
+        )
+
+
+def _quarantined(reply: list) -> Optional[Quarantined]:
+    """A ``GET`` and ``PTTL`` of a quarantine key, as a :class:`Quarantined`."""
+    job_id = _optional_bytes(reply[0])
+    if job_id is None:
+        return None
+    return Quarantined(job_id.decode(), max(int(reply[1]), 0) / 1000.0)
+
+
 def _decode(fields: Fields) -> dict[str, str]:
     """A Redis hash or stream entry as ``str`` keys and values."""
     return {k.decode(): v.decode() for k, v in fields.items()}
@@ -408,6 +486,8 @@ class JobQueue:
         dead_stream: Where jobs over the delivery limit are moved.
         max_deliveries: Deliveries a job may have before it is dead-lettered.
         claim_idle_seconds: Idle time after which a pending job is taken over.
+        quarantine_seconds: How long a dead-lettered job's query is refused
+            if sent again (0: never refused).
     """
 
     def __init__(
@@ -419,6 +499,7 @@ class JobQueue:
         dead_stream: str,
         max_deliveries: int,
         claim_idle_seconds: float,
+        quarantine_seconds: float = 0.0,
     ):
         self._r = client
         self.stream = stream
@@ -426,6 +507,7 @@ class JobQueue:
         self.dead_stream = dead_stream
         self.max_deliveries = max_deliveries
         self.claim_idle_ms = int(claim_idle_seconds * 1000)
+        self.quarantine_ms = int(quarantine_seconds * 1000)
 
     @classmethod
     def from_settings(cls, client: Optional[redis.Redis] = None) -> "JobQueue":
@@ -437,6 +519,7 @@ class JobQueue:
             dead_stream=settings.queue_dead_stream,
             max_deliveries=settings.queue_max_deliveries,
             claim_idle_seconds=settings.queue_claim_idle_seconds,
+            quarantine_seconds=settings.queue_quarantine_seconds,
         )
 
     @property
@@ -520,6 +603,18 @@ class JobQueue:
             )
             self._dead_letter(entry_id, fields, deliveries)
             return Delivery(entry_id, job, deliveries, poisoned=True)
+        # A copy of a query dead-lettered while this one was running: it has
+        # just killed a worker too, so it is not given another.
+        quarantined = self.quarantined(job.query)
+        if quarantined is not None:
+            logger.error(
+                "job %s matches dead-lettered job %s and was abandoned by its "
+                "worker: dead-lettering it",
+                job.job_id,
+                quarantined.job_id,
+            )
+            self._dead_letter(entry_id, fields, deliveries)
+            return Delivery(entry_id, job, deliveries, poisoned=True)
         logger.warning(
             "job %s taken over after %d earlier deliver%s",
             job.job_id,
@@ -538,14 +633,34 @@ class JobQueue:
         return pending[0]["times_delivered"] if pending else 1
 
     def _dead_letter(self, entry_id: bytes, fields: Fields, deliveries: int) -> None:
+        """Move an entry to the dead stream and quarantine its query."""
+        job = Job.from_bytes(fields[b"job"])
+        fingerprint = query_fingerprint(job.query)
         letter: dict[FieldT, EncodableT] = dict(fields.items())
         letter[b"source_id"] = entry_id
         letter[b"deliveries"] = str(deliveries).encode()
         letter[b"dead_at"] = repr(time.time()).encode()
+        letter[b"fingerprint"] = fingerprint.encode()
         pipe = self._r.pipeline(transaction=True)
         pipe.xadd(self.dead_stream, letter)
         pipe.xack(self.stream, self.group, entry_id)
+        if self.quarantine_ms > 0:
+            pipe.set(
+                _quarantine_key(self.stream, fingerprint),
+                job.job_id,
+                px=self.quarantine_ms,
+            )
         pipe.execute()
+
+    def quarantined(self, query: QueryDict) -> Optional[Quarantined]:
+        """The recent dead letter *query* matches, if any (None when off)."""
+        if self.quarantine_ms <= 0:
+            return None
+        key = _quarantine_key(self.stream, query_fingerprint(query))
+        pipe = self._r.pipeline(transaction=False)
+        pipe.get(key)
+        pipe.pttl(key)
+        return _quarantined(pipe.execute())
 
     def touch(self, entry_id: bytes, consumer: str) -> None:
         """Reset a running job's idle time so no other worker claims it.
@@ -613,7 +728,9 @@ class JobQueue:
     def dead_letters(self, count: int = 20) -> list[dict]:
         """The most recent dead-lettered jobs, newest first.
 
-        Each is ``{"entry_id", "job_id", "query", "deliveries", "dead_at"}``.
+        Each is ``{"entry_id", "job_id", "mode", "query", "deliveries",
+        "dead_at", "fingerprint"}``; the fingerprint names the query's
+        quarantine key, ``<stream>:quarantine:<fingerprint>``.
         """
         letters = []
         for entry_id, fields in _entries(
@@ -628,6 +745,7 @@ class JobQueue:
                     "query": summarize_query(job.query),
                     "deliveries": int(fields[b"deliveries"]),
                     "dead_at": float(fields[b"dead_at"]),
+                    "fingerprint": fields.get(b"fingerprint", b"").decode(),
                 }
             )
         return letters
@@ -662,12 +780,21 @@ class AsyncJobQueue:
         client: A ``redis.asyncio.Redis`` returning bytes.
         stream: Stream key the jobs go on.
         group: Consumer group the workers read through.
+        quarantine_seconds: As for :class:`JobQueue`; 0 refuses nothing.
     """
 
-    def __init__(self, client: redis.asyncio.Redis, *, stream: str, group: str):
+    def __init__(
+        self,
+        client: redis.asyncio.Redis,
+        *,
+        stream: str,
+        group: str,
+        quarantine_seconds: float = 0.0,
+    ):
         self._r = client
         self.stream = stream
         self.group = group
+        self.quarantine_ms = int(quarantine_seconds * 1000)
 
     @classmethod
     def from_settings(
@@ -678,6 +805,7 @@ class AsyncJobQueue:
             client if client is not None else async_redis_client(),
             stream=settings.queue_stream,
             group=settings.queue_group,
+            quarantine_seconds=settings.queue_quarantine_seconds,
         )
 
     @property
@@ -693,6 +821,16 @@ class AsyncJobQueue:
         """Put *job* on the stream and return its entry id."""
         entry_id = _bytes(await self._r.xadd(self.stream, {b"job": job.to_bytes()}))
         return entry_id.decode()
+
+    async def quarantined(self, query: QueryDict) -> Optional[Quarantined]:
+        """The recent dead letter *query* matches, if any (None when off)."""
+        if self.quarantine_ms <= 0:
+            return None
+        key = _quarantine_key(self.stream, query_fingerprint(query))
+        pipe = self._r.pipeline(transaction=False)
+        pipe.get(key)
+        pipe.pttl(key)
+        return _quarantined(await pipe.execute())
 
     async def stats(self) -> QueueStats:
         """Lag and pending counts of the consumer group (zero before it exists)."""
