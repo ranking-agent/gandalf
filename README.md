@@ -471,7 +471,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GANDALF_LARGE_RESULT_THRESHOLD` | `50000` | Path count threshold for auto-dehydrated responses |
-| `GANDALF_MAX_PATH_LIMIT` | `0` | Max intermediate paths during joins (0 = unlimited) |
+| `GANDALF_MAX_PATH_LIMIT` | `0` | Max intermediate paths during joins (0 = unlimited). A query that would build more is refused with a `QueryTooLarge` response and no results, never a truncated result set |
 | `GANDALF_DEBUG_PATHS_TSV` | _(empty)_ | File path to write debug TSV of reconstructed paths |
 
 ### TRAPI
