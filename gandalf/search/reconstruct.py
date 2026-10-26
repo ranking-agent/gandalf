@@ -13,7 +13,7 @@ from translator_tom.model_dicts import NodeDict
 from gandalf.config import settings
 from gandalf.profiler import current_profiler
 from gandalf.search.path_arrays import PathArrays
-from gandalf.trapi import ensure_node_category
+from gandalf.trapi import QueryTooLarge, ensure_node_category
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,8 @@ DEBUG_PATHS_TSV = settings.debug_paths_tsv
 LARGE_RESULT_PATH_THRESHOLD = settings.large_result_threshold
 
 # Maximum number of intermediate paths allowed during join operations.
-# When exceeded, paths are truncated to this limit and a warning is printed.
+# A join that would build more raises QueryTooLarge before allocating them,
+# and the query is answered with no results rather than a truncated set.
 # Set to 0 to disable the limit.
 MAX_PATH_LIMIT = settings.max_path_limit
 
@@ -208,18 +209,22 @@ def reconstruct_paths(
             edge_keys = np.zeros(len(edge.subj), dtype=np.int8)
             new_node_cols = {subj_col: edge.subj, obj_col: edge.obj}
 
-        paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = _join(
-            paths_nodes,
-            paths_preds,
-            paths_via_inverse,
-            paths_fwd_edge_idx,
-            path_keys,
-            edge_keys,
-            edge,
-            new_node_cols,
-            join_idx,
-            logger=logger,
-        )
+        try:
+            paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx = _join(
+                paths_nodes,
+                paths_preds,
+                paths_via_inverse,
+                paths_fwd_edge_idx,
+                path_keys,
+                edge_keys,
+                edge,
+                new_node_cols,
+                join_idx,
+                logger=logger,
+            )
+        except QueryTooLarge:
+            join_cm.__exit__(None, None, None)
+            raise
 
         t_join_end = time.perf_counter()
         prof.add_metric("paths_out", len(paths_nodes))
@@ -603,8 +608,7 @@ def _join(
     """Extend each path with every edge match whose key equals the path's key.
 
     Output rows come in path order and, within a path, in the edge matches'
-    original order.  When the output would exceed ``MAX_PATH_LIMIT`` it is
-    truncated to the first ``MAX_PATH_LIMIT`` rows of that order.
+    original order.
 
     Args:
         paths_nodes, paths_preds, paths_via_inverse, paths_fwd_edge_idx: The
@@ -618,6 +622,11 @@ def _join(
 
     Returns:
         The joined ``(nodes, preds, via_inverse, fwd_edge_idx)`` arrays.
+
+    Raises:
+        QueryTooLarge: The output would exceed ``MAX_PATH_LIMIT`` rows.  It
+            is counted before anything is allocated, so refusing costs
+            nothing.
     """
     logger = logger if logger is not None else logging.getLogger(__name__)
 
@@ -630,19 +639,11 @@ def _join(
 
     output_count = int(counts.sum())
     if MAX_PATH_LIMIT > 0 and output_count > MAX_PATH_LIMIT:
-        logger.warning(
-            "Truncating %s intermediate paths to %s",
-            f"{output_count:,}",
-            f"{MAX_PATH_LIMIT:,}",
+        raise QueryTooLarge(
+            f"Query too large: it would build {output_count:,} intermediate "
+            f"paths, over this server's limit of {MAX_PATH_LIMIT:,}. Narrow it "
+            "with more specific ids, categories or predicates."
         )
-        # Keep whole paths up to the limit, then part of the path that
-        # crosses it, then nothing.
-        ends = np.cumsum(counts)
-        cut = int(np.searchsorted(ends, MAX_PATH_LIMIT, side="left"))
-        counts = counts.copy()
-        counts[cut] = MAX_PATH_LIMIT - (int(ends[cut - 1]) if cut > 0 else 0)
-        counts[cut + 1 :] = 0
-        output_count = MAX_PATH_LIMIT
 
     # Output row -> (source path, matching edge)
     path_of_row = np.repeat(np.arange(len(path_keys)), counts)

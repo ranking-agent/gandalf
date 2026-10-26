@@ -91,6 +91,14 @@ class QueryTimeout(Exception):
     """Raised when a query exceeds the client's ``parameters.timeout`` budget."""
 
 
+class QueryTooLarge(Exception):
+    """Raised when a join would build more paths than ``max_path_limit`` allows.
+
+    The query is refused rather than answered with a truncated result set:
+    a client cannot tell which results a truncation dropped.
+    """
+
+
 class TimeoutNotSatisfiable(ValueError):
     """Raised when the client's requested timeout is below what this server offers.
 
@@ -716,6 +724,33 @@ def timeout_response(
     response: ResponseDict = {"message": _empty_message(query), "logs": logs}
     return finalize_response(
         response, query, status="Timeout", description=description, graph=graph
+    )
+
+
+def too_large_response(
+    query: QueryDict,
+    description: str,
+    logs: list[LogEntryDict],
+    graph: Any = None,
+) -> ResponseDict:
+    """Build the Response for a query refused for building too many paths.
+
+    The shape of :func:`timeout_response`, with a ``status`` of
+    ``QueryTooLarge``: the query graph echoed back, no results (never a
+    truncated set), and the logs collected so far.
+
+    Args:
+        query: The original request dict.
+        description: Why it was refused, from the :class:`QueryTooLarge`.
+        logs: TRAPI LogEntry dicts collected before the refusal.
+        graph: The loaded graph, read for its metadata's data version.
+
+    Returns:
+        A complete TRAPI Response with ``status`` of ``QueryTooLarge``.
+    """
+    response: ResponseDict = {"message": _empty_message(query), "logs": logs}
+    return finalize_response(
+        response, query, status="QueryTooLarge", description=description, graph=graph
     )
 
 

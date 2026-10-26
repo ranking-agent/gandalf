@@ -20,7 +20,7 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
-from gandalf.search import lookup
+from gandalf.search import lookup, reconstruct
 from gandalf.search.edge_constraints import (
     AllowDeny,
     ConstraintError,
@@ -653,6 +653,45 @@ class TestDeadline:
         assert response["message"]["results"] == []
         assert response["message"]["query_graph"]["nodes"]["n0"]["ids"] == [METFORMIN]
         assert any("timeout" in entry["message"] for entry in response["logs"])
+
+
+class TestPathLimit:
+    """Over ``max_path_limit`` the query is refused, never truncated."""
+
+    def _paths(self, graph, bmt):  # noqa: F811
+        return len(lookup(graph, affects_query(), bmt=bmt)["message"]["results"])
+
+    def test_over_the_limit_is_refused_with_no_results(
+        self, graph, bmt, monkeypatch  # noqa: F811
+    ):
+        assert self._paths(graph, bmt) > 1
+        monkeypatch.setattr(reconstruct, "MAX_PATH_LIMIT", 1)
+        response = lookup(graph, affects_query(), bmt=bmt)
+        assert response["status"] == "QueryTooLarge"
+        assert response["message"]["results"] == []
+        assert response["message"]["query_graph"]["nodes"]["n0"]["ids"] == [METFORMIN]
+        assert "limit of 1" in response["description"]
+        assert any("too large" in entry["message"] for entry in response["logs"])
+
+    def test_under_the_limit_is_answered_in_full(
+        self, graph, bmt, monkeypatch  # noqa: F811
+    ):
+        # The limit is on intermediate paths, which bound the results.
+        full = lookup(graph, affects_query(), bmt=bmt)["message"]["results"]
+        monkeypatch.setattr(reconstruct, "MAX_PATH_LIMIT", 10_000)
+        response = lookup(graph, affects_query(), bmt=bmt)
+        assert response.get("status", "Success") == "Success"
+        assert len(response["message"]["results"]) == len(full)
+
+    def test_endpoint_answers_200_with_the_refusal(
+        self, server, monkeypatch  # noqa: F811
+    ):
+        _, client = server
+        monkeypatch.setattr(reconstruct, "MAX_PATH_LIMIT", 1)
+        resp = client.post("/query", json=affects_query())
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "QueryTooLarge"
+        assert resp.json()["message"]["results"] == []
 
 
 # ---------------------------------------------------------------------------
