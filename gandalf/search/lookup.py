@@ -32,9 +32,11 @@ from gandalf.trapi import (
     Deadline,
     InFlightEdge,
     QueryTimeout,
+    QueryTooLarge,
     finalize_response,
     prune_edge,
     timeout_response,
+    too_large_response,
     with_source_record_urls,
 )
 from gandalf.search.edge_constraints import EdgeConstraints
@@ -207,6 +209,14 @@ def lookup(
                 if profile:
                     logs.extend(prof.to_log_entries())
                 return timeout_response(query, deadline, logs, graph=graph)
+            except QueryTooLarge as exc:
+                # Refused, not truncated: a partial result set would look
+                # complete to the client.
+                query_logger.error("%s", exc)
+                logs = log_collector.get_logs()
+                if profile:
+                    logs.extend(prof.to_log_entries())
+                return too_large_response(query, str(exc), logs, graph=graph)
 
             logs = log_collector.get_logs()
             if profile:

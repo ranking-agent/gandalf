@@ -264,8 +264,8 @@ def _probe_worker(conn, graph_dir: str, path_cap: int) -> None:
 
     Receives ``(body, timeout_s)``; replies ``(outcome, result count, ms)``
     where outcome is ``"ok"``, ``"timeout"`` (the query's own deadline
-    expired) or ``"over_cap"`` (a join hit ``path_cap`` rows, so the count
-    would be a truncated one).  ``None`` ends the loop.
+    expired) or ``"over_cap"`` (a join would exceed ``path_cap`` rows, so
+    the query was refused).  ``None`` ends the loop.
     """
     # Ctrl-C reaches the whole process group; the parent handles it and
     # shuts this process down, so it must not die mid-probe with a traceback.
@@ -293,10 +293,7 @@ def _probe_worker(conn, graph_dir: str, path_cap: int) -> None:
         ms = (time.perf_counter() - t0) * 1000.0
         if response.get("status") == "Timeout":
             conn.send(("timeout", None, ms))
-        elif any(
-            "Truncating" in entry.get("message", "")
-            for entry in response.get("logs") or []
-        ):
+        elif response.get("status") == "QueryTooLarge":
             conn.send(("over_cap", None, ms))
         else:
             conn.send(("ok", len(response["message"]["results"]), ms))
