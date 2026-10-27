@@ -378,8 +378,9 @@ Gandalf's own parameters:
   pinned qnodes to their subclass descendants; the other pinned qnodes match
   their own ids only (default: every pinned qnode)
 - `dehydrated` (bool): Return the smallest useful response — edges carry only
-  subject, object, predicate, `knowledge_level` and `agent_type`, with no
-  attributes and no `sources` (auto-enabled for very large result sets).
+  subject, object, predicate, `knowledge_level`, `agent_type` and their
+  `qualifiers`, with no attributes and no `sources` (auto-enabled for very
+  large result sets).
   TRAPI 2.0 requires `sources`, so a dehydrated response is deliberately not
   schema-valid: the mode trades conformance for size, and rehydrating one
   (see `rehydrate`) restores a conformant response

@@ -113,10 +113,9 @@ def test_multi_path_and_single_path_results_mixed(
         subclass=subclass,
         dehydrated=dehydrated,
     )
-    # INSR's two `affects` edges differ only in qualifiers and sources, so a
-    # dehydrated response, which dedups on (subject, predicate, object)
-    # alone, binds one of them.
-    assert _binding_sizes(response) == ({1} if dehydrated else {1, 2})
+    # INSR's two `affects` edges differ in their qualifiers, which a
+    # dehydrated edge keeps too, so either way both are bound.
+    assert _binding_sizes(response) == {1, 2}
 
 
 @pytest.mark.parametrize("dehydrated", [False, True])

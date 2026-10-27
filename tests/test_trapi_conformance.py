@@ -215,10 +215,18 @@ class TestDehydratedResponsesTradeConformanceForSize:
     """
 
     def test_edges_omit_sources_and_attributes(self, graph, bmt):  # noqa: F811
+        """Everything else stays, qualifiers included: they are part of what
+        the edge states, not a detail of it.  Metformin's `affects` edges are
+        qualified but for one, which has no qualifiers property at all."""
         edges = lookup(graph, one_hop(), bmt=bmt, dehydrated=True)["message"][
             "knowledge_graph"
         ]["edges"]
-        assert edges
+        full = lookup(graph, one_hop(), bmt=bmt, dehydrated=False)["message"][
+            "knowledge_graph"
+        ]["edges"]
+        assert edges.keys() == full.keys()
+        qualified = {edge_id for edge_id, edge in full.items() if "qualifiers" in edge}
+        assert qualified and qualified != edges.keys()
         for edge_id, edge in edges.items():
             assert set(edge) == {
                 "subject",
@@ -226,7 +234,9 @@ class TestDehydratedResponsesTradeConformanceForSize:
                 "predicate",
                 "knowledge_level",
                 "agent_type",
+                *(["qualifiers"] if edge_id in qualified else []),
             }, edge_id
+            assert edge.get("qualifiers") == full[edge_id].get("qualifiers"), edge_id
 
     def test_that_is_the_only_reason_they_are_invalid(self, graph, bmt):  # noqa: F811
         """Nothing else about a dehydrated response is non-conformant.
@@ -245,9 +255,11 @@ class TestDehydratedResponsesTradeConformanceForSize:
         assert_valid_trapi(response)
 
     def test_dehydrated_is_materially_smaller(self, graph, bmt):  # noqa: F811
+        """Even here, where every edge is qualified: the qualifiers are the
+        most a dehydrated edge keeps."""
         dehydrated = lookup(graph, one_hop(), bmt=bmt, dehydrated=True)
         full = lookup(graph, one_hop(), bmt=bmt, dehydrated=False)
-        assert len(orjson.dumps(dehydrated)) < len(orjson.dumps(full)) / 2
+        assert len(orjson.dumps(dehydrated)) < len(orjson.dumps(full)) * 0.6
 
     def test_no_nulls_even_when_dehydrated(self, graph, bmt):  # noqa: F811
         """Smaller is not licence to emit a null: those are never valid."""
