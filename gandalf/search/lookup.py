@@ -1025,26 +1025,36 @@ def _minimal_edge(
 
     knowledge_level and agent_type are required on every TRAPI 2.0 Edge and
     come from the in-memory dedup store, so even a dehydrated edge carries
-    them.  A dehydrated edge otherwise carries the smallest useful shape: no
-    cold-path attributes, and no sources either, even though TRAPI 2.0
-    requires them and they are cheap to read.  Sources are the largest thing
-    left on an edge once attributes are gone (~200 bytes each), and that mode
-    exists to keep the payload minimal -- so a dehydrated response is
-    knowingly not schema-valid.  See InFlightEdge for the contract.
+    them.  So do its qualifiers, when it has any: they are part of what the
+    edge says (``affects`` the activity of, increased), they come from the
+    same store, and they tell apart parallel edges that rehydration would
+    otherwise confuse.  A dehydrated edge otherwise carries the smallest
+    useful shape: no cold-path attributes, and no sources either, even though
+    TRAPI 2.0 requires them and they are cheap to read.  Sources are the
+    largest thing left on an edge once attributes are gone (~200 bytes each),
+    and that mode exists to keep the payload minimal -- so a dehydrated
+    response is knowingly not schema-valid.  See InFlightEdge for the
+    contract.
 
-    Needs no pruning: none of its properties is one TRAPI 2.0 forbids empty.
+    Needs no pruning: none of its properties is one TRAPI 2.0 forbids empty,
+    and an edge without qualifiers has none rather than an empty list.
     """
     if fwd_eidx >= 0:
         knowledge_level, agent_type = graph.edge_properties.get_kl_at(fwd_eidx)
     else:
         knowledge_level = agent_type = NOT_PROVIDED
-    return {
+    edge: InFlightEdge = {
         "predicate": predicate,
         "subject": subj_id,
         "object": obj_id,
         "knowledge_level": knowledge_level,
         "agent_type": agent_type,
     }
+    if fwd_eidx >= 0:
+        qualifiers = graph.edge_properties.get_qualifiers(fwd_eidx)
+        if qualifiers:
+            edge["qualifiers"] = qualifiers
+    return edge
 
 
 def _edge_content_key(graph, fwd_eidx: int) -> tuple:
@@ -1570,7 +1580,7 @@ def _build_response(
                 obj_id = node_id_cache[actual_obj_idx]
 
                 # Compute dedup key
-                if lightweight or fwd_eidx < 0:
+                if fwd_eidx < 0:
                     edge_key: tuple = (subj_id, predicate, obj_id, (), ())
                 else:
                     content_key = edge_content_keys.get(fwd_eidx)
@@ -1581,6 +1591,10 @@ def _build_response(
                             content_key = _edge_content_key(graph, fwd_eidx)
                             content_keys_by_pools[pools] = content_key
                         edge_content_keys[fwd_eidx] = content_key
+                    if lightweight:
+                        # A dehydrated edge carries its qualifiers but not its
+                        # sources, so only qualifiers tell parallel ones apart.
+                        content_key = (content_key[0], ())
                     edge_key = (subj_id, predicate, obj_id) + content_key
 
                 if edge_key not in edge_seen_keys[qedge_id]:
@@ -1718,12 +1732,12 @@ def _build_response(
                             }
 
                         if composite_edge_id not in kg_edges:
-                            # The inferred edge restates the base edge with the
-                            # expanded child swapped for its superclass, so it
-                            # runs the way the base edge is stored.  The
-                            # overrides are keyed by query end, and an edge
-                            # matched through its inverse is stored the other
-                            # way round.
+                            # The inferred edge restates the base edge, its
+                            # qualifiers included, with the expanded child
+                            # swapped for its superclass, so it runs the way
+                            # the base edge is stored.  The overrides are keyed
+                            # by query end, and an edge matched through its
+                            # inverse is stored the other way round.
                             subject_end, object_end = "subject", "object"
                             if edge.get("_matched_inverse"):
                                 subject_end, object_end = "object", "subject"
@@ -1764,6 +1778,8 @@ def _build_response(
                                     },
                                 ],
                             }
+                            if "qualifiers" in edge:
+                                inferred_edge["qualifiers"] = edge["qualifiers"]
                             kg_edges[composite_edge_id] = inferred_edge
 
                         _append_edge_binding(binding, bound_kg_ids, composite_edge_id)

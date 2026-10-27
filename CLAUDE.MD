@@ -153,7 +153,8 @@ other that no TOM model is constructed for a response at all.
 
 **Dehydrated responses are deliberately not conformant.**  That mode exists to
 make the payload as small as possible, and it omits `Edge.sources` as well as
-the cold-path `attributes` -- sources are the largest thing left on an edge
+the cold-path `attributes` (it keeps `qualifiers`, which are part of what an
+edge states) -- sources are the largest thing left on an edge
 once attributes are gone (~210 bytes, +36% on a dehydrated payload).  TRAPI 2.0
 requires `sources`, so a dehydrated response is knowingly not schema-valid and
 is excluded from the conformance tests; validating it would only assert
