@@ -240,23 +240,33 @@ class TestDehydratedResponsesTradeConformanceForSize:
     """
 
     def test_edges_omit_sources_and_attributes(self, graph, bmt):  # noqa: F811
-        """Under 1.6 the only attributes left are knowledge_level and
-        agent_type, which 1.6 carries as attributes."""
+        """Everything else stays, qualifiers included: they are part of what
+        the edge states, not a detail of it.  Metformin's `affects` edges are
+        qualified but for one, which has no qualifiers property at all.  Under
+        1.6 the only attributes left are knowledge_level and agent_type, which
+        1.6 carries as attributes."""
         edges = lookup(graph, one_hop(), bmt=bmt, dehydrated=True)["message"][
             "knowledge_graph"
         ]["edges"]
-        assert edges
+        full = lookup(graph, one_hop(), bmt=bmt, dehydrated=False)["message"][
+            "knowledge_graph"
+        ]["edges"]
+        assert edges.keys() == full.keys()
+        qualified = {edge_id for edge_id, edge in full.items() if "qualifiers" in edge}
+        assert qualified and qualified != edges.keys()
         for edge_id, edge in edges.items():
             assert set(edge) == {
                 "subject",
                 "object",
                 "predicate",
                 "attributes",
+                *(["qualifiers"] if edge_id in qualified else []),
             }, edge_id
             assert [a["attribute_type_id"] for a in edge["attributes"]] == [
                 "biolink:knowledge_level",
                 "biolink:agent_type",
             ], edge_id
+            assert edge.get("qualifiers") == full[edge_id].get("qualifiers"), edge_id
 
     def test_that_is_the_only_reason_they_are_invalid(self, graph, bmt):  # noqa: F811
         """Nothing else about a dehydrated response is non-conformant.
@@ -275,9 +285,14 @@ class TestDehydratedResponsesTradeConformanceForSize:
         assert_valid_trapi(response)
 
     def test_dehydrated_is_materially_smaller(self, graph, bmt):  # noqa: F811
+        """Even here, where every edge is qualified: the qualifiers are the
+        most a dehydrated edge keeps."""
         dehydrated = lookup(graph, one_hop(), bmt=bmt, dehydrated=True)
         full = lookup(graph, one_hop(), bmt=bmt, dehydrated=False)
-        assert len(orjson.dumps(dehydrated)) < len(orjson.dumps(full)) / 2
+        # 0.6 on the 2.0 line.  Under 1.6 knowledge_level and agent_type are
+        # attribute objects rather than two plain properties, ~130 bytes more
+        # per dehydrated edge, which puts this fixture at ~0.6.
+        assert len(orjson.dumps(dehydrated)) < len(orjson.dumps(full)) * 0.65
 
     def test_no_nulls_even_when_dehydrated(self, graph, bmt):  # noqa: F811
         """Smaller is not licence to emit a null: those are never valid."""

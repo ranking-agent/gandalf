@@ -295,6 +295,41 @@ class TestEnrichEdgesWithQualifiers:
             # non-empty (TRAPI 2.0 gives Edge.qualifiers a minItems of 1).
             assert edge["qualifiers"], edge_id
 
+    def test_rehydrated_parallel_edges_are_each_their_own(self, graph, bmt):
+        """INSR's two `affects` edges from metformin differ in their
+        qualifiers and sources.  Dehydrated, each keeps its qualifiers, so
+        rehydrating gives each its own sources and attributes, as the full
+        response has them."""
+        query = {
+            "message": {
+                "query_graph": {
+                    "nodes": {
+                        "n0": {"ids": ["CHEBI:6801"]},
+                        "n1": {"ids": ["NCBIGene:3643"]},
+                    },
+                    "edges": {
+                        "e0": {
+                            "subject": "n0",
+                            "object": "n1",
+                            "predicates": ["biolink:affects"],
+                        },
+                    },
+                },
+            },
+        }
+
+        rehydrated = lookup(graph, query, bmt=bmt, dehydrated=True)
+        enrich_knowledge_graph(rehydrated, graph)
+        full = lookup(graph, query, bmt=bmt, dehydrated=False)
+
+        edges = rehydrated["message"]["knowledge_graph"]["edges"]
+        expected = full["message"]["knowledge_graph"]["edges"]
+        assert len(expected) == 2
+        assert edges.keys() == expected.keys()
+        for edge_id, edge in expected.items():
+            for key in ("qualifiers", "sources", "attributes"):
+                assert edges[edge_id][key] == edge[key], (edge_id, key)
+
 
 class TestEnrichEmptyMessage:
     """Test enrichment handles edge cases gracefully."""

@@ -738,3 +738,79 @@ def test_inferred_edge_from_a_self_loop_follows_the_match(
     for edge in inferred.values():
         assert edge["predicate"] == "biolink:affects"
         assert (edge["subject"], edge["object"]) == expected
+
+
+@pytest.fixture
+def qualified_child_graph(tmp_path):
+    """A chemical whose child alone affects a gene, through a qualified edge:
+    the activity of the gene, increased."""
+    nodes = [
+        {"id": "TEST:parent", "name": "parent", "category": ["biolink:SmallMolecule"]},
+        {"id": "TEST:child", "name": "child", "category": ["biolink:SmallMolecule"]},
+        {"id": "TEST:gene", "name": "gene", "category": ["biolink:Gene"]},
+    ]
+    edges = [
+        {
+            "id": "sc",
+            "subject": "TEST:child",
+            "predicate": "biolink:subclass_of",
+            "object": "TEST:parent",
+        },
+        {
+            "id": "affects",
+            "subject": "TEST:child",
+            "predicate": "biolink:affects",
+            "object": "TEST:gene",
+            "qualified_predicate": "biolink:causes",
+            "object_aspect_qualifier": "activity",
+            "object_direction_qualifier": "increased",
+        },
+    ]
+    edges_file = tmp_path / "edges.jsonl"
+    nodes_file = tmp_path / "nodes.jsonl"
+    nodes_file.write_text("".join(json.dumps(n) + "\n" for n in nodes))
+    edges_file.write_text(
+        "".join(
+            json.dumps({**edge, "primary_knowledge_source": "infores:test"}) + "\n"
+            for edge in edges
+        )
+    )
+    return build_graph_from_jsonl(str(edges_file), str(nodes_file))
+
+
+@pytest.mark.parametrize("dehydrated", [False, True])
+def test_inferred_edge_keeps_the_base_edge_s_qualifiers(
+    qualified_child_graph, bmt, dehydrated: bool
+) -> None:
+    """The parent affects the gene only through its child's edge, and the
+    inferred edge says what that edge says: it causes increased activity of
+    the gene, not merely that it affects it.  Dehydrated or not."""
+    query = {
+        "message": {
+            "query_graph": {
+                "nodes": {
+                    "n0": {"ids": ["TEST:parent"]},
+                    "n1": {"ids": ["TEST:gene"]},
+                },
+                "edges": {
+                    "e0": {
+                        "subject": "n0",
+                        "object": "n1",
+                        "predicates": ["biolink:affects"],
+                    },
+                },
+            },
+        },
+    }
+
+    response = lookup(
+        qualified_child_graph, query, bmt=bmt, subclass=True, dehydrated=dehydrated
+    )
+    base = response["message"]["knowledge_graph"]["edges"]["affects"]
+    assert base["subject"] == "TEST:child"
+    assert base["qualifiers"]
+    inferred = _inferred_edges(response)
+    assert len(inferred) == 1
+    (edge,) = inferred.values()
+    assert (edge["subject"], edge["object"]) == ("TEST:parent", "TEST:gene")
+    assert edge["qualifiers"] == base["qualifiers"]
