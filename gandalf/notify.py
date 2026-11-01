@@ -15,8 +15,12 @@ Who emits what, so each event fires once however many processes run:
   process of which exactly one is active at a time (a Redis lock elects it;
   if that process dies the lock expires and another takes over).  It notices
   workers that disappeared without a clean exit (an OOM kill), a backlog
-  over the threshold for longer than a moment (and its clearing), and a
-  job stuck longer than a query should take.
+  over the threshold for longer than a moment (and its clearing), a
+  job stuck longer than a query should take, and Redis itself: a restart,
+  evictions, and a configuration that can lose the queue.  It also
+  recreates the queue's consumer group if it is missing (``queue_lost``,
+  which a worker that hits ``NOGROUP`` first may report instead) and trims
+  finished jobs off the stream.
 
 Noisy kinds (``job_failed``, ``job_retried``) are throttled per kind through
 Redis; a message after a quiet period says how many were suppressed.
@@ -37,7 +41,16 @@ import orjson
 import redis
 
 from gandalf.config import settings
-from gandalf.jobs import JobQueue, WorkerRegistry, _decode, _entries, _field, _hash
+from gandalf.jobs import (
+    RECENT_RESTART_SECONDS,
+    JobQueue,
+    RedisHealth,
+    WorkerRegistry,
+    _decode,
+    _entries,
+    _field,
+    _hash,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +67,10 @@ KINDS: dict[str, str] = {
     "queue_backlog": "warning",
     "queue_backlog_cleared": "info",
     "queue_stuck": "warning",
+    "queue_lost": "critical",
+    "redis_restarted": "warning",
+    "redis_evicting": "critical",
+    "redis_unsafe": "critical",
 }
 
 #: Kinds that can fire in bursts and go through the throttle: job kinds per
@@ -86,6 +103,9 @@ BACKLOG_FLAG = "gandalf:notify:backlog"
 BACKLOG_SINCE = "gandalf:notify:backlog_since"
 STUCK_FLAG = "gandalf:notify:stuck"
 THROTTLE_PREFIX = "gandalf:notify:throttle"
+REDIS_RUN_ID = "gandalf:notify:redis_run_id"
+REDIS_EVICTED = "gandalf:notify:redis_evicted"
+REDIS_UNSAFE = "gandalf:notify:redis_unsafe"
 
 
 @dataclass(frozen=True)
@@ -377,6 +397,30 @@ class Notifier:
         return alerts
 
 
+def queue_lost_event(queue: JobQueue, cause: str) -> Event:
+    """``queue_lost``: the consumer group was gone and has been recreated."""
+    return Event(
+        "queue_lost",
+        "Job queue lost and recreated",
+        f"The consumer group {queue.group} on {queue.stream} was gone from "
+        "Redis and has been recreated; jobs that were waiting or running "
+        "then are lost and their callers will time out. "
+        f"Likely cause: {cause}.",
+        {"stream": queue.stream, "group": queue.group, "cause": cause},
+    )
+
+
+def watch_queue(queue: JobQueue, notifier: Optional["Notifier"]) -> None:
+    """Have *queue* alert through *notifier* when it recreates a lost group."""
+    if notifier is None:
+        return
+
+    def report(cause: str) -> None:
+        notifier.emit(queue_lost_event(queue, cause))
+
+    queue.on_recreated = report
+
+
 def mark_worker_leaving(client: redis.Redis, name: str) -> None:
     """Tell the monitor *name* is exiting on purpose, so it is not reported lost."""
     pipe = client.pipeline(transaction=True)
@@ -471,11 +515,90 @@ class Monitor:
         if not self.is_leader():
             return []
         now = time.time()
-        events = self._check_workers(now)
+        # The group first: every other look reads through it.  A recreated
+        # group is reported by the queue's on_recreated hook.
+        self.queue.check_group()
+        events = self._check_redis()
+        events += self._check_workers(now)
         events += self._check_backlog(now)
         events += self._check_stuck()
         for event in events:
             self.notifier.emit(event)
+        self.queue.trim()
+        return events
+
+    def _check_redis(self) -> list[Event]:
+        """Redis restarted, evicted keys, or is set up to lose the queue.
+
+        What was last seen is kept in Redis, so a new leader carries it on
+        and each change is reported once.  A Redis that comes back without
+        those keys kept no data across its restart, which the alert says.
+        """
+        health = RedisHealth.read(self._r)
+        events = []
+        seen_run = self._r.get(REDIS_RUN_ID)
+        if seen_run != health.run_id.encode():
+            self._r.set(REDIS_RUN_ID, health.run_id)
+            self._r.set(REDIS_EVICTED, health.evicted_keys)  # reset by a restart
+            restarted = seen_run is not None or health.uptime_s < RECENT_RESTART_SECONDS
+            if restarted:
+                survived = seen_run is not None
+                events.append(
+                    Event(
+                        "redis_restarted",
+                        "Redis restarted",
+                        f"Redis restarted {health.uptime_s:.0f}s ago and "
+                        + (
+                            "kept its data."
+                            if survived
+                            else "came back without Gandalf's keys: it kept no "
+                            "data (or it is a new Redis), so whatever was queued "
+                            "or running then is lost."
+                        ),
+                        {
+                            "uptime": f"{health.uptime_s:.0f}s",
+                            "data kept": "yes" if survived else "no",
+                            "persistence": {
+                                True: "on",
+                                False: "off",
+                                None: "unknown",
+                            }[health.persistent],
+                        },
+                    )
+                )
+        seen_evicted = int(self._r.get(REDIS_EVICTED) or 0)
+        if health.evicted_keys > seen_evicted:
+            self._r.set(REDIS_EVICTED, health.evicted_keys)
+            events.append(
+                Event(
+                    "redis_evicting",
+                    "Redis is evicting keys",
+                    f"Redis evicted {health.evicted_keys - seen_evicted} keys "
+                    f"at its memory limit under maxmemory-policy "
+                    f"{health.maxmemory_policy}. Results waiting to be collected, "
+                    "and with an allkeys-* policy the job queue itself, can go.",
+                    {
+                        "evicted since start": health.evicted_keys,
+                        "used": f"{health.used_memory // 2**20} MB",
+                        "maxmemory": f"{health.maxmemory // 2**20} MB",
+                        "policy": health.maxmemory_policy,
+                    },
+                )
+            )
+        problems = health.problems()
+        signature = "\n".join(problems).encode()
+        if not problems:
+            self._r.delete(REDIS_UNSAFE)
+        elif self._r.get(REDIS_UNSAFE) != signature:
+            self._r.set(REDIS_UNSAFE, signature)
+            events.append(
+                Event(
+                    "redis_unsafe",
+                    "Redis can lose the job queue",
+                    " ".join(f"{p[0].upper()}{p[1:]}." for p in problems),
+                    {"problems": len(problems)},
+                )
+            )
         return events
 
     def _check_workers(self, now: float) -> list[Event]:

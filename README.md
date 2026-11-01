@@ -748,15 +748,42 @@ link back to the status page:
 | `job_failed` | warning | A query raised; the client got an Error response |
 | `queue_backlog` / `queue_backlog_cleared` | warning / info | Jobs waiting for a worker stayed at or over `GANDALF_ALERT_QUEUE_LAG_PER_WORKER` × the live workers for `GANDALF_ALERT_QUEUE_BACKLOG_SECONDS`, then dropped to zero |
 | `queue_stuck` | warning | A job has been with one worker longer than `GANDALF_ALERT_STUCK_SECONDS` |
+| `queue_lost` | critical | The job stream's consumer group was gone from Redis and has been recreated. Says the likely cause: a Redis restart without persistence, evictions, or a `FLUSHALL`/`FLUSHDB`/`XGROUP DESTROY` |
+| `redis_restarted` | warning | Redis restarted; says whether it kept its data |
+| `redis_evicting` | critical | Redis evicted keys at its memory limit |
+| `redis_unsafe` | critical | Redis is configured so it can lose the queue: an `allkeys-*` eviction policy, or no append-only file. Sent once per configuration |
 
 A worker never dies of Redis trouble: a timeout, an outage or a restart
 of Redis is logged and retried with backoff, and a job that was not
 acknowledged is redelivered.  When the API cannot reach Redis, `/query`,
 `/asyncquery` and `/status.json` answer 503 and `/ready` reports it.
 
+#### Redis must keep the queue
+
+The job stream and its consumer group live only in Redis, so Redis must
+**persist** (`appendonly yes`; with no persistence a restart empties it)
+and **never evict** (`maxmemory-policy noeviction`; an `allkeys-*` policy
+evicts the stream under memory pressure).  `compose.yml` and
+`deploy/k8s/redis.yaml` run Redis that way.  Gandalf checks:
+
+- at startup, the API and every worker log an error for each way the
+  configured Redis can lose the queue; the monitor alerts on it
+  (`redis_unsafe`) and `/status` shows it in the Redis tile;
+- the monitor alerts when Redis restarts (`redis_restarted`, saying
+  whether its data survived) or evicts keys (`redis_evicting`);
+- if the stream or group is gone anyway, the first process to notice
+  (a worker's next read, or the monitor within one interval) recreates it,
+  logs an error with the likely cause, and alerts (`queue_lost`).  Jobs
+  added since are delivered; jobs that were waiting or running when it
+  went are lost.
+
+Finished jobs are trimmed off the stream by the monitor, so the stream
+holds only jobs waiting or running and Redis's memory does not grow with
+every job ever run.
+
 Each event is emitted exactly once however many pods run.  The worker
 events come from the worker that saw them.  The threshold events
-(`worker_lost`, `queue_backlog`, `queue_stuck`) come from a monitor thread
+(`worker_lost`, `queue_backlog`, `queue_stuck`, the `redis_*` kinds) come from a monitor thread
 that every API process runs but only one, elected through a Redis lock, is
 active; if that pod dies another takes over within a few intervals.
 `job_failed` and `job_retried` can come in bursts, so Slack gets at most

@@ -47,6 +47,7 @@ from gandalf.notify import (
     mark_worker_leaving,
     mark_worker_recycled,
     was_worker_recycled,
+    watch_queue,
 )
 from gandalf.metrics import (
     JOB_DURATION,
@@ -69,6 +70,7 @@ from gandalf.jobs import (
     WorkerRegistry,
     default_consumer_name,
     keepalive,
+    log_redis_problems,
     redis_client,
     summarize_query,
 )
@@ -125,6 +127,8 @@ class Worker:
         self.registry = registry
         self.history = history
         self.notifier = notifier
+        if queue.on_recreated is None:
+            watch_queue(queue, notifier)
         self.jobs_done = 0
         self.started_at = time.time()
         # What this process cost before its first job, and where it went,
@@ -177,7 +181,8 @@ class Worker:
         Returns:
             How many jobs this worker finished.
         """
-        self.queue.ensure_group()
+        log_redis_problems(self.queue.client)
+        self.queue.ensure_group_at_startup()
         logger.info(
             "Worker %s consuming %s as %s (PID=%d)",
             self.consumer,

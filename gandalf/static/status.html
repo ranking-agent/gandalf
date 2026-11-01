@@ -185,6 +185,14 @@
         tile("Queue wait p95, 1h", fmtS(h.wait_p95_s), "p50 " + fmtS(h.wait_p50_s), h.wait_p95_s > 30 ? "warn" : "");
       }
       tile("Dead letters", fmtN(q.dead_letters), "jobs that killed a worker", q.dead_letters ? "bad" : "");
+      const r = d.redis;
+      if (r) {
+        const unsafe = r.problems.length > 0 || r.evicted_keys > 0;
+        tile("Redis", unsafe ? "at risk" : "durable",
+          unsafe ? r.problems.concat(r.evicted_keys ? [`${fmtN(r.evicted_keys)} keys evicted since start`] : []).map(esc).join("<br>")
+                 : `persistent · ${esc(r.maxmemory_policy)} · up ${fmtS(r.uptime_s)}`,
+          unsafe ? "bad" : "");
+      }
     } else {
       tile("Mode", "in-process", "queries run inside this process");
     }

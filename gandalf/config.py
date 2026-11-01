@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     slack_events: str = (
         "worker_started,worker_stopped,worker_restarted,worker_lost,job_retried,"
         "job_dead_lettered,job_failed,queue_backlog,queue_backlog_cleared,"
-        "queue_stuck"
+        "queue_stuck,queue_lost,redis_restarted,redis_evicting,redis_unsafe"
     )
     slack_environment: str = ""  # label in front of every title, e.g. "prod"
     slack_status_url: str = ""  # linked from messages; default <server_url>/status

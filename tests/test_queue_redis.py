@@ -37,6 +37,7 @@ from gandalf.jobs import (
     Job,
     JobHistory,
     JobQueue,
+    RedisHealth,
     ResultReader,
     ResultStore,
     WorkerRegistry,
@@ -167,6 +168,74 @@ def test_enqueue_receive_ack(queue):
     queue.ack(delivery.entry_id)
     assert queue.stats().pending == 0
     assert queue.receive("a", block_seconds=0.05) is None
+
+
+def test_queue_recreates_a_group_redis_lost(queue, client):
+    """A Redis restart or flush mid-run takes the group away; it comes back."""
+    client.flushdb()
+    # Nothing there at all: the counts read as empty rather than failing.
+    assert queue.stats() == queue.stats().__class__(lag=0, pending=0)
+    assert queue.oldest_waiting_s() == 0.0
+    assert queue.pending_entries() == []
+    assert queue.receive("a", block_seconds=0.05) is None
+
+    # The API adds a job to the stream (XADD recreates it, but not the group).
+    client.flushdb()
+    job = Job.new(dict(ONE_HOP), budget=5.0)
+    queue.enqueue(job)
+    assert queue.pending_entries() == []  # NOGROUP before; group made here
+    delivery = queue.receive("a", block_seconds=0.1)
+    assert delivery is not None and delivery.job == job
+
+    client.flushdb()
+    queue.touch(delivery.entry_id, "a")  # no NOGROUP
+    queue.ack(delivery.entry_id)
+
+
+def test_a_recreated_group_is_reported_once_with_its_cause(queue, client):
+    causes = []
+    queue.on_recreated = causes.append
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    client.flushdb()
+    assert queue.receive("a", block_seconds=0.05) is None
+    assert queue.receive("a", block_seconds=0.05) is None  # group there now
+    assert queue.check_group() is None
+    assert len(causes) == 1
+    assert "FLUSHDB was called" in causes[0]
+
+
+def test_redis_health_flags_a_redis_that_can_lose_the_queue(client):
+    health = RedisHealth.read(client)
+    assert health.run_id and health.uptime_s >= 0
+    if health.aof_enabled:
+        pytest.skip("GANDALF_TEST_REDIS_URL points at a persistent Redis")
+    assert health.persistent is False  # the local server: --save "" --appendonly no
+    assert any("persistence is off" in p for p in health.problems())
+    assert health.as_dict()["problems"] == health.problems()
+
+
+def test_trim_keeps_waiting_and_running_jobs(queue):
+    for _ in range(4):
+        queue.enqueue(Job.new(dict(ONE_HOP)))
+    first = queue.receive("a", block_seconds=0.1)  # still running
+    second = queue.receive("a", block_seconds=0.1)
+    queue.ack(second.entry_id)
+    assert queue.trim() == 0  # everything after the running one is kept
+    queue.ack(first.entry_id)
+    third = queue.receive("a", block_seconds=0.1)  # running
+    assert queue.trim() == 2  # the two finished ones
+    assert queue.length() == 2
+    # The group's lag, KEDA's scaling signal, stays exact.
+    assert queue.stats().lag == 1 and queue.stats().pending == 1
+    queue.ack(third.entry_id)
+    assert queue.receive("a", block_seconds=0.1) is not None
+
+
+def test_trim_without_a_group_or_deliveries_does_nothing(queue, client):
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    assert queue.trim() == 0
+    client.flushdb()
+    assert queue.trim() == 0
 
 
 def test_oldest_waiting_counts_only_jobs_no_worker_has_taken(queue):
@@ -1034,6 +1103,7 @@ from gandalf.notify import (  # noqa: E402
     Notifier,
     SlackWebhook,
     mark_worker_leaving,
+    watch_queue,
 )
 from tests.test_notify import webhook_server  # noqa: E402, F401
 
@@ -1101,7 +1171,7 @@ def test_unthrottled_kinds_always_send(notifier):
 @pytest.fixture
 def monitor(client, queue, registry, notifier):
     n, _ = notifier
-    return Monitor(
+    m = Monitor(
         client,
         queue,
         registry,
@@ -1111,6 +1181,10 @@ def monitor(client, queue, registry, notifier):
         backlog_seconds=0.3,
         stuck_seconds=0.3,
     )
+    # The test Redis has no persistence and has just been flushed: take the
+    # one-off Redis alerts that causes here, so each test sees only its own.
+    m._check_redis()
+    return m
 
 
 def test_monitor_reports_a_worker_that_vanished(monitor, registry):
@@ -1225,6 +1299,50 @@ def test_monitor_alerts_on_a_stuck_job(monitor, queue):
     assert monitor.tick() == []
 
 
+def test_monitor_recreates_a_lost_queue_and_says_why(monitor, queue, client):
+    watch_queue(queue, monitor.notifier)
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    client.flushdb()
+    queue.enqueue(Job.new(dict(ONE_HOP)))  # the API's XADD: stream back, group not
+    kinds = [e.kind for e in monitor.tick()]
+    # The flush took the monitor's own record of Redis too, which reads as
+    # a Redis that kept no data; the loss itself comes through the hook.
+    assert set(kinds) <= {"redis_restarted", "redis_unsafe"}
+    lost = [a for a in monitor.notifier.recent() if a["kind"] == "queue_lost"]
+    assert len(lost) == 1
+    assert "FLUSHDB was called" in lost[0]["fields"]["cause"]
+    assert queue.stats().lag == 1  # the job added after the loss is delivered
+    assert monitor.tick() == []
+    assert len([a for a in monitor.notifier.recent() if a["kind"] == "queue_lost"]) == 1
+
+
+def test_monitor_reports_a_redis_restart_once(monitor, client):
+    client.set("gandalf:notify:redis_run_id", "an-earlier-run")
+    events = monitor.tick()
+    assert [e.kind for e in events] == ["redis_restarted"]
+    assert events[0].fields["data kept"] == "yes"
+    assert monitor.tick() == []
+
+
+def test_monitor_reports_evictions(monitor, client):
+    # A baseline above zero stands in for evictions: Redis's counter is
+    # what it is; the alert is on the counter passing what was last seen.
+    client.set("gandalf:notify:redis_evicted", -3)
+    events = monitor.tick()
+    assert [e.kind for e in events] == ["redis_evicting"]
+    assert "evicted 3 keys" in events[0].detail
+    assert monitor.tick() == []
+
+
+def test_monitor_trims_finished_jobs(monitor, queue):
+    for _ in range(3):
+        queue.enqueue(Job.new(dict(ONE_HOP)))
+    done = queue.receive("a", block_seconds=0.1)
+    queue.ack(done.entry_id)
+    monitor.tick()
+    assert queue.length() == 2
+
+
 def test_only_one_monitor_is_active(client, queue, registry, notifier):
     n, _ = notifier
     first = Monitor(
@@ -1245,6 +1363,7 @@ def test_only_one_monitor_is_active(client, queue, registry, notifier):
         lag_per_worker=1,
         backlog_seconds=0,
     )
+    first._check_redis()  # the test Redis's one-off alerts
     queue.enqueue(Job.new(dict(ONE_HOP)))
     assert first.is_leader() is True
     assert second.is_leader() is False
