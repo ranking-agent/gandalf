@@ -9,3 +9,4 @@ docs/
 *.tar.zst
 venv/
 .venv/
+queue_data/
