@@ -169,6 +169,28 @@ def test_enqueue_receive_ack(queue):
     assert queue.receive("a", block_seconds=0.05) is None
 
 
+def test_queue_recreates_a_group_redis_lost(queue, client):
+    """A Redis restart or flush mid-run takes the group away; it comes back."""
+    client.flushdb()
+    # Nothing there at all: the counts read as empty rather than failing.
+    assert queue.stats() == queue.stats().__class__(lag=0, pending=0)
+    assert queue.oldest_waiting_s() == 0.0
+    assert queue.pending_entries() == []
+    assert queue.receive("a", block_seconds=0.05) is None
+
+    # The API adds a job to the stream (XADD recreates it, but not the group).
+    client.flushdb()
+    job = Job.new(dict(ONE_HOP), budget=5.0)
+    queue.enqueue(job)
+    assert queue.pending_entries() == []  # NOGROUP before; group made here
+    delivery = queue.receive("a", block_seconds=0.1)
+    assert delivery is not None and delivery.job == job
+
+    client.flushdb()
+    queue.touch(delivery.entry_id, "a")  # no NOGROUP
+    queue.ack(delivery.entry_id)
+
+
 def test_oldest_waiting_counts_only_jobs_no_worker_has_taken(queue):
     assert queue.oldest_waiting_s() == 0.0  # empty stream
     queue.enqueue(Job.new(dict(ONE_HOP)))
@@ -1222,6 +1244,14 @@ def test_monitor_alerts_on_a_stuck_job(monitor, queue):
     assert events[0].fields["worker"] == "slow"
     assert monitor.tick() == []  # the same stuck job is not repeated
     queue.ack(d.entry_id)
+    assert monitor.tick() == []
+
+
+def test_monitor_keeps_looking_after_redis_loses_the_group(monitor, queue, client):
+    queue.enqueue(Job.new(dict(ONE_HOP)))
+    client.flushdb()
+    assert monitor.tick() == []
+    queue.enqueue(Job.new(dict(ONE_HOP)))  # stream back, group not
     assert monitor.tick() == []
 
 

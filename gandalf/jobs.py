@@ -543,6 +543,30 @@ class JobQueue:
             if "BUSYGROUP" not in str(exc):
                 raise
 
+    def _regrouping(self, command: Callable[[], Any]) -> Any:
+        """Run *command*, recreating the group once if Redis lost it.
+
+        The stream and group are made at startup (:meth:`ensure_group`), but
+        a Redis restart without persistence, a ``FLUSHALL`` or an evicted key
+        takes both away while the processes run.  Every group command then
+        fails with ``NOGROUP``, forever: workers take nothing and the monitor
+        cannot look.  Recreating the group here lets them carry on; jobs the
+        API added since are on the stream and are delivered from its start.
+        """
+        try:
+            return command()
+        except redis.ResponseError as exc:
+            if not _is_nogroup(exc):
+                raise
+            logger.warning(
+                "Consumer group %s on %s is gone (Redis restarted or was "
+                "flushed?); recreating it",
+                self.group,
+                self.stream,
+            )
+            self.ensure_group()
+            return command()
+
     def enqueue(self, job: Job) -> str:
         """Put *job* on the stream and return its entry id."""
         entry_id = _bytes(self._r.xadd(self.stream, {b"job": job.to_bytes()}))
@@ -555,16 +579,18 @@ class JobQueue:
         ``claim_idle_seconds`` is taken first; otherwise the call blocks up to
         *block_seconds* for a new entry.
         """
-        stale = self._claim_stale(consumer)
+        stale = self._regrouping(lambda: self._claim_stale(consumer))
         if stale is not None:
             return stale
         response = _read_entries(
-            self._r.xreadgroup(
-                self.group,
-                consumer,
-                {self.stream: ">"},
-                count=1,
-                block=int(blocking_slice(self._r, block_seconds) * 1000),
+            self._regrouping(
+                lambda: self._r.xreadgroup(
+                    self.group,
+                    consumer,
+                    {self.stream: ">"},
+                    count=1,
+                    block=int(blocking_slice(self._r, block_seconds) * 1000),
+                )
             )
         )
         if not response:
@@ -668,18 +694,20 @@ class JobQueue:
         ``XCLAIM ... JUSTID`` re-assigns the entry to the same consumer and
         resets its idle clock without counting as a delivery.
         """
-        self._r.xclaim(
-            self.stream,
-            self.group,
-            consumer,
-            min_idle_time=0,
-            message_ids=[entry_id],
-            justid=True,
+        self._regrouping(
+            lambda: self._r.xclaim(
+                self.stream,
+                self.group,
+                consumer,
+                min_idle_time=0,
+                message_ids=[entry_id],
+                justid=True,
+            )
         )
 
     def ack(self, entry_id: bytes) -> None:
         """Mark a job done: its result has been delivered."""
-        self._r.xack(self.stream, self.group, entry_id)
+        self._regrouping(lambda: self._r.xack(self.stream, self.group, entry_id))
 
     def length(self) -> int:
         """Entries on the stream, delivered or not (acknowledged ones are kept)."""
@@ -693,7 +721,7 @@ class JobQueue:
         skew between hosts.  Zero when every job has been taken.
         """
         last_delivered = b"0-0"
-        for group in self._r.xinfo_groups(self.stream):
+        for group in _groups_or_none(lambda: self._r.xinfo_groups(self.stream)):
             if group["name"] == self.group.encode():
                 last_delivered = group["last-delivered-id"]
         entries = _entries(
@@ -719,8 +747,10 @@ class JobQueue:
                 "deliveries": entry["times_delivered"],
             }
             for entry in _pending(
-                self._r.xpending_range(
-                    self.stream, self.group, min="-", max="+", count=count
+                self._regrouping(
+                    lambda: self._r.xpending_range(
+                        self.stream, self.group, min="-", max="+", count=count
+                    )
                 )
             )
         ]
@@ -756,7 +786,29 @@ class JobQueue:
 
     def stats(self) -> QueueStats:
         """Lag and pending counts of the consumer group (zero before it exists)."""
-        return _group_stats(self._r.xinfo_groups(self.stream), self.group)
+        return _group_stats(
+            _groups_or_none(lambda: self._r.xinfo_groups(self.stream)), self.group
+        )
+
+
+def _is_nogroup(exc: redis.ResponseError) -> bool:
+    """Whether *exc* is Redis saying the stream or its consumer group is missing."""
+    return str(exc).startswith("NOGROUP")
+
+
+def _is_no_such_key(exc: redis.ResponseError) -> bool:
+    """Whether *exc* is ``XINFO`` saying the stream does not exist."""
+    return "no such key" in str(exc).lower() and not _is_nogroup(exc)
+
+
+def _groups_or_none(command: Callable[[], Any]) -> list[dict]:
+    """An ``XINFO GROUPS`` reply, empty when the stream does not exist."""
+    try:
+        return list(command())
+    except redis.ResponseError as exc:
+        if not _is_no_such_key(exc):
+            raise
+        return []
 
 
 def _group_stats(groups: list[dict], group: str) -> QueueStats:
@@ -834,7 +886,13 @@ class AsyncJobQueue:
 
     async def stats(self) -> QueueStats:
         """Lag and pending counts of the consumer group (zero before it exists)."""
-        return _group_stats(await self._r.xinfo_groups(self.stream), self.group)
+        try:
+            groups = await self._r.xinfo_groups(self.stream)
+        except redis.ResponseError as exc:
+            if not _is_no_such_key(exc):
+                raise
+            groups = []
+        return _group_stats(groups, self.group)
 
 
 # ---------------------------------------------------------------------------
