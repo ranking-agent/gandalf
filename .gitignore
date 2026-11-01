@@ -7,6 +7,8 @@
 *.zst
 *.mdb
 .env
+# Redis's files from `docker compose --profile queue up`
+queue_data/
 
 # Python
 __pycache__/

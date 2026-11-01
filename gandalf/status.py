@@ -21,7 +21,7 @@ from typing import Any, Optional
 from gandalf import __version__
 from gandalf.config import settings
 from gandalf.metrics import metrics_registry, rss_anon_kb, rss_kb
-from gandalf.jobs import JobHistory, JobQueue, WorkerRegistry
+from gandalf.jobs import JobHistory, JobQueue, RedisHealth, WorkerRegistry
 from gandalf.notify import Notifier
 
 #: Outcomes a job can end with, in the order the page lists them.
@@ -207,6 +207,7 @@ def snapshot(
         "dead_letters": queue.dead_letter_count(),
         "recent_dead_letters": queue.dead_letters(),
     }
+    data["redis"] = RedisHealth.read(queue.client).as_dict()
     if workers is not None:
         reports = workers.workers()
         for report in reports:

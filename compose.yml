@@ -26,10 +26,27 @@ services:
   # --- Queue mode -----------------------------------------------------------
   # docker compose --profile queue up --build
   # with GANDALF_QUEUE_URL=redis://redis:6379/0 in the environment or .env.
+  # The queue must survive a Redis restart and must never be evicted:
+  # every write goes to the append-only file in a host directory, and at a
+  # memory limit Redis refuses writes (the API answers 503) rather than
+  # dropping keys.  Gandalf logs and alerts (redis_unsafe) if either is off.
   gandalf_queue:
     image: redis:7-alpine
     profiles: [queue]
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      # Host directory for Redis's files (appendonlydir/, dump.rdb);
+      # override with GANDALF_QUEUE_DATA_DIR.  Redis's image makes it owned
+      # by its redis user (uid 999) on start.
+      - ${GANDALF_QUEUE_DATA_DIR:-./queue_data}:/data
     networks:
       - shepherd
 
