@@ -26,10 +26,24 @@ services:
   # --- Queue mode -----------------------------------------------------------
   # docker compose --profile queue up --build
   # with GANDALF_QUEUE_URL=redis://redis:6379/0 in the environment or .env.
+  # The queue must survive a Redis restart and must never be evicted:
+  # every write goes to the append-only file on a named volume, and at a
+  # memory limit Redis refuses writes (the API answers 503) rather than
+  # dropping keys.  Gandalf logs and alerts (redis_unsafe) if either is off.
   gandalf_queue:
     image: redis:7-alpine
     profiles: [queue]
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - gandalf_queue_data:/data
     networks:
       - shepherd
 
@@ -52,6 +66,9 @@ services:
       - ${GANDALF_GRAPH_DIR:-./translatorkg/gandalf_mmap}:/data/graph:ro
     networks:
       - shepherd
+
+volumes:
+  gandalf_queue_data:
 
 networks:
   # Shepherd's compose network, so Gandalf can reach its `jaeger` service and

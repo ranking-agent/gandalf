@@ -18,6 +18,7 @@ matter are called out inline.
 |---|---|
 | `api.yaml` | The HTTP tier: validates requests, enqueues jobs, waits for `/query` results, serves the light endpoints. Two replicas; scale on CPU or request rate if ever needed. |
 | `worker.yaml` | The query executors: one job at a time each, graph mounted read-only, Prometheus on port 9100. No Service; nothing calls a worker. |
+| `redis.yaml` | The Redis the queue lives in: append-only file on a volume, `noeviction`, `maxmemory` under the container limit. Use it, or a managed Redis set up the same way; Gandalf alerts (`redis_unsafe`) if it is not. |
 | `keda.yaml` | The `ScaledObject` that adds workers when the stream's lag (jobs not yet taken by any worker) grows. |
 
 Both tiers run the same image; the worker overrides the command with

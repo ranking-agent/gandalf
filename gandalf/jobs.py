@@ -54,7 +54,16 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Iterator, Mapping, Optional, TypedDict, cast
+from typing import (
+    Any,
+    Callable,
+    Iterator,
+    Mapping,
+    Optional,
+    TypedDict,
+    TypeVar,
+    cast,
+)
 
 import orjson
 import redis
@@ -67,6 +76,8 @@ from gandalf.config import settings
 from gandalf.trapi import Deadline
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +483,204 @@ def _pending(reply: object) -> list[PendingEntry]:
 
 
 # ---------------------------------------------------------------------------
+# Redis health: is the queue safe in this Redis, and what took it if not
+# ---------------------------------------------------------------------------
+
+#: Commands that remove a stream or its group wholesale.  Gandalf itself never
+#: sends them (it deletes only its own result and bookkeeping keys), so a
+#: non-zero count since Redis started points at a person or another client.
+_DESTRUCTIVE_COMMANDS = ("flushall", "flushdb", "xgroup|destroy")
+
+#: A Redis that started less than this long before the queue was found
+#: missing is taken to have lost it by restarting.
+RECENT_RESTART_SECONDS = 600.0
+
+
+@dataclass(frozen=True)
+class RedisHealth:
+    """What Redis says about itself that decides whether the queue survives.
+
+    Attributes:
+        run_id: Changes every time the server process starts.
+        uptime_s: Seconds since it started.
+        evicted_keys: Keys removed under ``maxmemory`` since it started.
+        maxmemory: The memory limit in bytes, 0 for none.
+        maxmemory_policy: What Redis does at that limit.
+        aof_enabled: Whether every write goes to the append-only file.
+        save: The RDB snapshot schedule (``""`` for none), or None when
+            ``CONFIG GET`` is not allowed (some managed Redis services).
+        used_memory: Bytes in use.
+        destructive_calls: Calls since start of each of
+            ``FLUSHALL``, ``FLUSHDB`` and ``XGROUP DESTROY`` that were made.
+    """
+
+    run_id: str
+    uptime_s: float
+    evicted_keys: int
+    maxmemory: int
+    maxmemory_policy: str
+    aof_enabled: bool
+    save: Optional[str]
+    used_memory: int = 0
+    destructive_calls: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def read(cls, client: redis.Redis) -> "RedisHealth":
+        """Ask *client*'s server (``INFO``, and ``CONFIG GET save`` if allowed)."""
+        info = client.info("everything")
+        try:
+            save: Optional[str] = _decode_str(client.config_get("save").get("save"))
+        except redis.ResponseError:
+            save = None
+        calls = {}
+        for command in _DESTRUCTIVE_COMMANDS:
+            stat = info.get(f"cmdstat_{command}")
+            if stat and int(stat.get("calls", 0)):
+                calls[command.replace("|", " ").upper()] = int(stat["calls"])
+        return cls(
+            run_id=str(info.get("run_id", "")),
+            uptime_s=float(info.get("uptime_in_seconds", 0)),
+            evicted_keys=int(info.get("evicted_keys", 0)),
+            maxmemory=int(info.get("maxmemory", 0)),
+            maxmemory_policy=str(info.get("maxmemory_policy", "")),
+            aof_enabled=bool(int(info.get("aof_enabled", 0))),
+            save=save,
+            used_memory=int(info.get("used_memory", 0)),
+            destructive_calls=calls,
+        )
+
+    @property
+    def persistent(self) -> Optional[bool]:
+        """Whether the data survives a restart: None when it cannot be told.
+
+        Examples:
+            >>> RedisHealth("r", 1, 0, 0, "noeviction", True, "").persistent
+            True
+            >>> RedisHealth("r", 1, 0, 0, "noeviction", False, "").persistent
+            False
+            >>> RedisHealth("r", 1, 0, 0, "noeviction", False, None).persistent is None
+            True
+        """
+        if self.aof_enabled:
+            return True
+        if self.save is None:
+            return None
+        return bool(self.save.strip())
+
+    def problems(self) -> list[str]:
+        """What, in this configuration, can make Redis lose the queue.
+
+        The queue's stream has no TTL, so a ``volatile-*`` policy never
+        evicts it; ``allkeys-*`` can, and does under memory pressure.
+
+        Examples:
+            >>> RedisHealth("r", 1, 0, 0, "noeviction", True, "").problems()
+            []
+            >>> for p in RedisHealth("r", 1, 0, 2**30, "allkeys-lru", False, "").problems():
+            ...     print(p)
+            maxmemory-policy is allkeys-lru: Redis evicts any key, the job stream and its consumer group included, when it reaches maxmemory; set it to noeviction
+            persistence is off (appendonly no, no RDB snapshots): a Redis restart empties the queue; set appendonly yes
+        """
+        problems = []
+        if self.maxmemory_policy.startswith("allkeys-"):
+            problems.append(
+                f"maxmemory-policy is {self.maxmemory_policy}: Redis evicts any "
+                "key, the job stream and its consumer group included, when it "
+                "reaches maxmemory; set it to noeviction"
+            )
+        if not self.aof_enabled:
+            if self.save is None:
+                problems.append(
+                    "appendonly is off and the RDB schedule cannot be read "
+                    "(CONFIG GET refused): a Redis restart may lose the queue; "
+                    "set appendonly yes"
+                )
+            elif not self.save.strip():
+                problems.append(
+                    "persistence is off (appendonly no, no RDB snapshots): a "
+                    "Redis restart empties the queue; set appendonly yes"
+                )
+            else:
+                problems.append(
+                    f"appendonly is off (RDB snapshots only, save {self.save!r}): "
+                    "a Redis restart loses every job added since the last "
+                    "snapshot; set appendonly yes"
+                )
+        return problems
+
+    def explain_loss(self) -> str:
+        """The likeliest reason the queue's keys are gone, given this state.
+
+        Examples:
+            >>> RedisHealth("r", 30, 0, 0, "noeviction", False, "").explain_loss()
+            'Redis restarted 30s ago and keeps no data across restarts (persistence is off)'
+            >>> RedisHealth("r", 9e5, 4, 1, "allkeys-lru", True, "").explain_loss()
+            'Redis has evicted 4 keys since it started (maxmemory-policy allkeys-lru)'
+            >>> RedisHealth("r", 9e5, 0, 0, "noeviction", True, "",
+            ...     destructive_calls={"FLUSHALL": 1}).explain_loss()
+            'a client deleted it: FLUSHALL was called 1 time since Redis started'
+        """
+        reasons = []
+        if self.uptime_s < RECENT_RESTART_SECONDS:
+            kept = {
+                True: "with persistence on, so it was gone before the restart "
+                "or the data files were not kept",
+                False: "and keeps no data across restarts (persistence is off)",
+                None: "(persistence could not be read)",
+            }[self.persistent]
+            reasons.append(f"Redis restarted {self.uptime_s:.0f}s ago {kept}")
+        if self.evicted_keys:
+            reasons.append(
+                f"Redis has evicted {self.evicted_keys} keys since it started "
+                f"(maxmemory-policy {self.maxmemory_policy})"
+            )
+        if self.destructive_calls:
+            reasons.append(
+                "a client deleted it: "
+                + ", ".join(
+                    f"{command} was called {n} time{'s' if n != 1 else ''}"
+                    for command, n in self.destructive_calls.items()
+                )
+                + " since Redis started"
+            )
+        if not reasons:
+            return (
+                "no restart, eviction or flush seen: a client deleted the key "
+                "(DEL/UNLINK/RENAME, or EXPIRE on it)"
+            )
+        return "; ".join(reasons)
+
+    def as_dict(self) -> dict:
+        """JSON-able, with :meth:`problems`, for the status page."""
+        data = asdict(self)
+        data["persistent"] = self.persistent
+        data["problems"] = self.problems()
+        return data
+
+
+def _decode_str(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode()
+    return "" if value is None else str(value)
+
+
+def log_redis_problems(client: redis.Redis) -> Optional[RedisHealth]:
+    """Log, as errors, every way this Redis can lose the queue; at startup.
+
+    Returns the health read, or None if Redis could not be asked (that is
+    the caller's Redis-unavailable path, not this check's).
+    """
+    try:
+        health = RedisHealth.read(client)
+    except redis.RedisError as exc:
+        logger.warning("Could not read Redis's configuration: %s", exc)
+        return None
+    for problem in health.problems():
+        logger.error("Redis can lose the job queue: %s", problem)
+    return health
+
+
+# ---------------------------------------------------------------------------
 # Queue
 # ---------------------------------------------------------------------------
 
@@ -508,6 +717,9 @@ class JobQueue:
         self.max_deliveries = max_deliveries
         self.claim_idle_ms = int(claim_idle_seconds * 1000)
         self.quarantine_ms = int(quarantine_seconds * 1000)
+        #: Called with the likely cause when this process finds the group
+        #: gone and recreates it; the API and the worker post an alert.
+        self.on_recreated: Optional[Callable[[str], None]] = None
 
     @classmethod
     def from_settings(cls, client: Optional[redis.Redis] = None) -> "JobQueue":
@@ -531,19 +743,82 @@ class JobQueue:
         """Whether Redis answers; the API's readiness check."""
         return bool(self._r.ping())
 
-    def ensure_group(self) -> None:
+    def ensure_group(self) -> bool:
         """Create the stream and consumer group if they do not exist yet.
 
         Idempotent: Redis answers ``BUSYGROUP`` for a group that exists, and
-        that is the only error swallowed here.
+        that is the only error swallowed here.  The group starts at the
+        stream's beginning, so jobs added to a stream that had no group
+        (the API's ``XADD`` recreates a lost stream, but not its group) are
+        delivered.
+
+        Returns:
+            Whether this call created the group.  When several processes
+            race to recreate a lost group exactly one gets True.
         """
         try:
             self._r.xgroup_create(self.stream, self.group, id="0", mkstream=True)
         except redis.ResponseError as exc:
             if "BUSYGROUP" not in str(exc):
                 raise
+            return False
+        return True
 
-    def _regrouping(self, command: Callable[[], Any]) -> Any:
+    def ensure_group_at_startup(self) -> None:
+        """:meth:`ensure_group`, logging whether the group was there already."""
+        if self.ensure_group():
+            logger.info(
+                "Created consumer group %s on %s (a new Redis, or one that "
+                "lost the queue while nothing was running)",
+                self.group,
+                self.stream,
+            )
+
+    def recover_group(self) -> Optional[str]:
+        """Recreate a lost group, and say (log, alert) why it was lost.
+
+        Called when a group command answers ``NOGROUP`` or the monitor
+        finds the group missing.  Only the process whose ``XGROUP CREATE``
+        wins reports it, so a loss is one log line and one alert however
+        many processes notice it.
+
+        Returns:
+            The likely cause if this call recreated the group, else None.
+        """
+        if not self.ensure_group():
+            return None
+        try:
+            cause = RedisHealth.read(self._r).explain_loss()
+        except redis.RedisError as exc:
+            cause = f"unknown (could not read Redis's state: {exc})"
+        logger.error(
+            "The job queue's consumer group %s on %s was gone and has been "
+            "recreated; any job that was waiting or running when it went is "
+            "lost. Likely cause: %s",
+            self.group,
+            self.stream,
+            cause,
+        )
+        if self.on_recreated is not None:
+            try:
+                self.on_recreated(cause)
+            except Exception:  # an alert failing must not stop the queue
+                logger.exception("Reporting the recreated queue failed")
+        return cause
+
+    def check_group(self) -> Optional[str]:
+        """Recreate the group if it is missing; the monitor's look.
+
+        Returns:
+            The likely cause if the group was missing and this call
+            recreated it, else None.
+        """
+        groups = _groups_or_none(lambda: self._r.xinfo_groups(self.stream))
+        if any(g["name"] == self.group.encode() for g in groups):
+            return None
+        return self.recover_group()
+
+    def _regrouping(self, command: Callable[[], _T]) -> _T:
         """Run *command*, recreating the group once if Redis lost it.
 
         The stream and group are made at startup (:meth:`ensure_group`), but
@@ -558,14 +833,37 @@ class JobQueue:
         except redis.ResponseError as exc:
             if not _is_nogroup(exc):
                 raise
-            logger.warning(
-                "Consumer group %s on %s is gone (Redis restarted or was "
-                "flushed?); recreating it",
-                self.group,
-                self.stream,
-            )
-            self.ensure_group()
+            self.recover_group()
             return command()
+
+    def trim(self) -> int:
+        """Drop entries every worker is done with; returns how many went.
+
+        An acknowledged entry stays on a stream until it is trimmed, so
+        without this the stream grows by every job ever run, and with it
+        Redis's memory, toward ``maxmemory`` (where an ``allkeys-*`` policy
+        evicts the stream itself) or the container's limit.  Kept: every
+        entry not yet delivered and every one still pending, i.e. everything
+        from the oldest pending entry, or from just after the group's
+        last-delivered id if nothing is pending.  Never trimming past the
+        last-delivered id also keeps the group's ``lag``, which KEDA scales
+        on, exact.
+        """
+        groups = _groups_or_none(lambda: self._r.xinfo_groups(self.stream))
+        info = next((g for g in groups if g["name"] == self.group.encode()), None)
+        if info is None:
+            return 0  # no group: nothing is known to be done with
+        last_delivered = _bytes(info["last-delivered-id"])
+        if last_delivered == b"0-0":
+            return 0  # nothing delivered yet
+        ms, seq = _stream_id(last_delivered)
+        keep_from = (ms, seq + 1)  # everything delivered is done ...
+        if int(info["pending"]):
+            oldest = self._r.xpending(self.stream, self.group).get("min")
+            if oldest is not None:  # ... except what is still running
+                keep_from = min(keep_from, _stream_id(_bytes(oldest)))
+        minid = f"{keep_from[0]}-{keep_from[1]}"
+        return int(self._r.xtrim(self.stream, minid=minid, approximate=False))
 
     def enqueue(self, job: Job) -> str:
         """Put *job* on the stream and return its entry id."""
@@ -710,7 +1008,7 @@ class JobQueue:
         self._regrouping(lambda: self._r.xack(self.stream, self.group, entry_id))
 
     def length(self) -> int:
-        """Entries on the stream, delivered or not (acknowledged ones are kept)."""
+        """Entries on the stream: waiting, running, and finished but not yet trimmed."""
         return int(self._r.xlen(self.stream))
 
     def oldest_waiting_s(self) -> float:
@@ -794,6 +1092,17 @@ class JobQueue:
 def _is_nogroup(exc: redis.ResponseError) -> bool:
     """Whether *exc* is Redis saying the stream or its consumer group is missing."""
     return str(exc).startswith("NOGROUP")
+
+
+def _stream_id(entry_id: bytes) -> tuple[int, int]:
+    """A stream entry id as a comparable pair.
+
+    Examples:
+        >>> _stream_id(b"1700000000000-12") < _stream_id(b"1700000000001-0")
+        True
+    """
+    ms, _, seq = entry_id.partition(b"-")
+    return int(ms), int(seq or 0)
 
 
 def _is_no_such_key(exc: redis.ResponseError) -> bool:

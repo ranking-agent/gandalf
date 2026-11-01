@@ -66,9 +66,10 @@ from gandalf.jobs import (
     StoredResult,
     WorkerRegistry,
     async_redis_client,
+    log_redis_problems,
     redis_client,
 )
-from gandalf.notify import Monitor, Notifier
+from gandalf.notify import Monitor, Notifier, watch_queue
 from gandalf.status import snapshot
 from translator_tom import TOMBase
 from translator_tom.model_dicts import QueryDict
@@ -296,6 +297,7 @@ def open_queue() -> None:
     WORKERS = WorkerRegistry.from_settings(client)
     HISTORY = JobHistory.from_settings(client)
     NOTIFIER = Notifier.from_settings(client)
+    watch_queue(QUEUE, NOTIFIER)
     # Every API process runs a monitor thread; the Redis lock inside makes
     # exactly one of them, across all pods, the one that looks and alerts.
     MONITOR = Monitor(
@@ -308,8 +310,9 @@ def open_queue() -> None:
         backlog_seconds=settings.alert_queue_backlog_seconds,
         stuck_seconds=settings.alert_stuck_seconds,
     )
+    log_redis_problems(client)
+    QUEUE.ensure_group_at_startup()
     MONITOR.start()
-    QUEUE.ensure_group()
     logger.info(
         "Queue mode: jobs go to %s on %s", settings.queue_stream, settings.queue_url
     )

@@ -1,0 +1,91 @@
+# The Redis the queue lives in.  Gandalf keeps its job stream, consumer
+# group, results and bookkeeping here, so this Redis must
+#
+#   * persist: every write goes to the append-only file on a volume, so a
+#     restart (a rollout, a node drain, an OOM kill) loses at most a second
+#     of writes instead of the whole queue;
+#   * never evict: maxmemory-policy noeviction.  At maxmemory Redis refuses
+#     writes (the API answers 503 until results are collected) instead of
+#     dropping keys; an allkeys-* policy drops the job stream itself.
+#     maxmemory sits below the container limit so Redis refuses writes
+#     before the kernel kills it.
+#
+# A managed Redis works as well if it is set up the same way.  Gandalf
+# checks on startup and on every monitor look, logs an error and alerts
+# (redis_unsafe) when either is off, and alerts on a restart
+# (redis_restarted), on evictions (redis_evicting) and when it had to
+# recreate the queue (queue_lost).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gandalf-redis
+  labels: {app: gandalf, tier: redis}
+data:
+  redis.conf: |
+    appendonly yes
+    appendfsync everysec
+    dir /data
+    maxmemory 3gb
+    maxmemory-policy noeviction
+    # Above Gandalf's waiting /query connections: API processes x
+    # GANDALF_QUEUE_MAX_WAITING plus workers and probes.
+    maxclients 10000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels: {app: gandalf, tier: redis}
+spec:
+  selector: {app: gandalf, tier: redis}
+  ports:
+    - {name: redis, port: 6379, targetPort: 6379}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gandalf-redis
+  labels: {app: gandalf, tier: redis}
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels: {app: gandalf, tier: redis}
+  template:
+    metadata:
+      labels: {app: gandalf, tier: redis}
+    spec:
+      # Lets Redis finish writing the append-only file on SIGTERM.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          command: ["redis-server", "/etc/redis/redis.conf"]
+          ports:
+            - {name: redis, containerPort: 6379}
+          resources:
+            # maxmemory (3gb) plus room for the AOF rewrite's fork and
+            # buffers.  Size maxmemory for a few in-flight /query results,
+            # compressed (see README.md, "What to size").
+            requests: {cpu: 500m, memory: 4Gi}
+            limits: {memory: 4Gi}
+          readinessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            periodSeconds: 10
+            failureThreshold: 6
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /etc/redis}
+      volumes:
+        - name: config
+          configMap: {name: gandalf-redis}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 20Gi}
