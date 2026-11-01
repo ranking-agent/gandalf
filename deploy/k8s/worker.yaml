@@ -41,8 +41,11 @@ spec:
             # The pod name makes the consumer name unique and traceable.
             - name: GANDALF_WORKER_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
-            # Recycle after this many jobs to return memory glibc holds on
-            # to after large queries (the gunicorn max_requests trick).
+            # Recycle after this many jobs (plus a random 0-200, so the pods
+            # do not all go together) to return memory glibc holds on to
+            # after large queries.  The process exec's a fresh copy of itself
+            # in the same container, so this is not a container restart and
+            # never puts the pod into CrashLoopBackOff.
             - {name: GANDALF_WORKER_MAX_JOBS, value: "2000"}
             - {name: GANDALF_WORKER_METRICS_PORT, value: "9100"}
             # Its spans join the API's traces as their own service; see

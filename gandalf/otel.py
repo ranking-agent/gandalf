@@ -257,3 +257,17 @@ def init_otel(app=None) -> None:
         os.getpid(),
         settings.otel_service_name,
     )
+
+
+def flush(timeout_millis: int = 5000) -> None:
+    """Export the spans still waiting in the batch processor.
+
+    The provider exports them at interpreter exit on its own, but a worker
+    that recycles by ``exec`` never exits, so it calls this first.
+    """
+    if _provider is None:
+        return
+    try:
+        _provider.force_flush(timeout_millis)
+    except Exception:  # an exporter that cannot reach the collector
+        logger.warning("Flushing traces failed", exc_info=True)

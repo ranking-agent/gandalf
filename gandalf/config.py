@@ -182,9 +182,20 @@ class Settings(BaseSettings):
 
     # Worker process (python -m gandalf.worker)
     worker_name: str = ""  # consumer name; default "<hostname>-<pid>"
-    # Exit after this many jobs so Kubernetes restarts the process and
-    # returns the memory glibc holds after large queries (0 = never).
+    # Start a fresh process after this many jobs, returning the memory glibc
+    # holds after large queries (0 = never).
     worker_max_jobs: int = 2000
+    # Each process adds a random 0..jitter to worker_max_jobs, so workers
+    # that started together and share the load evenly do not all recycle at
+    # once and leave the queue with nobody to run it.
+    worker_max_jobs_jitter: int = 200
+    # Recycle by replacing the process in place (exec) rather than exiting.
+    # The container keeps running, so Kubernetes never counts a restart and
+    # never applies its crash-loop backoff (10s doubling to 5 minutes, reset
+    # only after 10 minutes up), which a worker recycling every few minutes
+    # otherwise climbs into.  False exits and leaves the restart to the
+    # orchestrator.
+    worker_recycle_in_place: bool = True
     # Prometheus /metrics port for the worker (0 = disabled).
     worker_metrics_port: int = 9100
     # Touched on every loop iteration; a liveness probe checks its age.

@@ -17,6 +17,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -885,6 +886,7 @@ def test_a_failing_job_is_answered_and_the_worker_lives_on(
     queue.enqueue(good)
 
     assert w.run() == 2  # stopped by max_jobs after both
+    assert w.recycled  # main() execs a fresh process for it
 
     failed = _read(redis_url, lambda r: r.get(broken.job_id))
     assert failed is not None and failed.http_status == 500
@@ -1704,7 +1706,7 @@ def test_api_answers_503_when_redis_is_gone(api, graph, bmt, monkeypatch):  # no
 def test_worker_back_after_recycling_is_not_a_slack_start(
     graph, bmt, queue, store, registry, notifier
 ):  # noqa: F811
-    """The process Kubernetes starts after a recycle is routine, not a new worker."""
+    """The process that takes over after a recycle is routine, not a new worker."""
     n, hook = notifier
 
     def worker() -> Worker:
@@ -1734,3 +1736,77 @@ def test_worker_back_after_recycling_is_not_a_slack_start(
     assert n.recent()[1]["title"] == "Worker back after recycling"
     assert n.webhook.flush(5.0)
     assert sum("Worker started" in r["text"] for r in hook.received) == 1
+
+
+def test_a_stopped_worker_is_not_recycled(graph, bmt, queue, store):  # noqa: F811
+    """SIGTERM (scale-down, rollout) exits; only the job limit recycles."""
+    w = Worker(graph, bmt, queue, store, consumer="w", max_jobs=5, block_seconds=0.05)
+    w.stop()
+    assert w.run() == 0
+    assert not w.recycled
+
+
+def test_a_recycling_worker_process_execs_in_place(redis_url, client, tmp_path):
+    """The real process: at its job limit it replaces itself, same PID.
+
+    The container never stops, so Kubernetes counts no restart and applies
+    no crash-loop backoff; the next job is taken by the new image.
+    """
+    from tests.search_fixtures import EDGES_FILE, NODES_FILE
+    from gandalf.loader import build_graph_from_jsonl
+
+    graph_dir = tmp_path / "graph"
+    build_graph_from_jsonl(EDGES_FILE, NODES_FILE).save_mmap(graph_dir)
+    heartbeat = tmp_path / "heartbeat"
+    env = {
+        **os.environ,
+        "GANDALF_GRAPH_PATH": str(graph_dir),
+        "GANDALF_QUEUE_URL": redis_url,
+        "GANDALF_QUEUE_STREAM": "e2e:jobs",
+        "GANDALF_QUEUE_GROUP": "e2e:workers",
+        "GANDALF_WORKER_NAME": "e2e",
+        "GANDALF_WORKER_MAX_JOBS": "1",
+        "GANDALF_WORKER_MAX_JOBS_JITTER": "0",
+        "GANDALF_WORKER_METRICS_PORT": "0",
+        "GANDALF_WORKER_HEARTBEAT_FILE": str(heartbeat),
+        "GANDALF_QUEUE_BLOCK_SECONDS": "0.2",
+        "GANDALF_OTEL_ENABLED": "false",
+    }
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "gandalf.worker"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        queue = JobQueue(
+            client,
+            stream="e2e:jobs",
+            group="e2e:workers",
+            dead_stream="e2e:dead",
+            max_deliveries=3,
+            claim_idle_seconds=45,
+        )
+        store = ResultStore.from_settings(client)
+        registry = WorkerRegistry(client, ttl_seconds=45)
+        first, second = Job.new(dict(ONE_HOP)), Job.new(dict(ONE_HOP))
+        queue.ensure_group()
+        queue.enqueue(first)
+        queue.enqueue(second)
+
+        def answered(job: Job) -> bool:
+            return client.exists(store._key(job.job_id, "meta")) > 0
+
+        assert _wait_for(lambda: answered(first) and answered(second), 120.0)
+        # Both jobs ran, one per process image, and the process never exited.
+        assert proc.poll() is None
+        assert _wait_for(lambda: registry.get("e2e") is not None, 30.0)
+        report = registry.get("e2e")
+        assert report["pid"] == proc.pid
+        assert report["jobs_done"] in (0, 1)  # a fresh image's own count
+    finally:
+        proc.terminate()
+        _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err.decode()[-3000:]
+    # Each new image saw the recycle note and reported a routine comeback.
+    assert err.count(b"Worker back after recycling") == 2
