@@ -12,8 +12,12 @@ Lifecycle, all driven by settings:
 
 * ``SIGTERM`` (a scale-down or rollout) stops the loop after the current job,
   so the pod's ``terminationGracePeriodSeconds`` should cover one query.
-* After ``worker_max_jobs`` jobs the process exits on its own and Kubernetes
-  restarts it, returning the memory glibc holds after large queries.
+* After ``worker_max_jobs`` jobs (plus up to ``worker_max_jobs_jitter``, so
+  workers do not all go at once) the process recycles to return the memory
+  glibc holds after large queries.  It replaces itself with ``exec`` rather
+  than exiting (``worker_recycle_in_place``): the container never stops, so
+  Kubernetes counts no restart and adds no crash-loop backoff, and the new
+  process is taking jobs again as soon as it has opened the graph.
 * ``worker_heartbeat_file`` is touched on every loop iteration and every
   keepalive tick while a job runs; a liveness probe checks its age.
 * ``worker_metrics_port`` serves Prometheus metrics (``gandalf.metrics``).
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import signal
 import socket
 import sys
@@ -137,6 +142,8 @@ class Worker:
         ledger = getattr(graph, "load_memory", None)
         self.startup_memory = ledger.summary() if ledger is not None else ""
         self.last_outcome = ""
+        #: Whether :meth:`run` ended at ``max_jobs`` (rather than on a signal).
+        self.recycled = False
         self._current: dict = {}  # the running job's report fields
         self._stop = threading.Event()
 
@@ -199,7 +206,7 @@ class Worker:
                 logger.info(
                     "Worker %s done %d jobs; recycling", self.consumer, self.jobs_done
                 )
-                recycled = True
+                self.recycled = recycled = True
                 break
             # Redis trouble (a timeout, an outage, a restart) is waited out
             # here rather than ending the process: the graph took seconds to
@@ -234,11 +241,13 @@ class Worker:
             Event(
                 "worker_recycled" if recycled else "worker_stopped",
                 "Worker recycled" if recycled else "Worker stopped",
-                f"Worker {self.consumer} exited after {self.jobs_done} jobs "
+                f"Worker {self.consumer} "
                 + (
-                    f"(its {self.max_jobs}-job limit); Kubernetes restarts it."
+                    f"recycled after {self.jobs_done} jobs (its "
+                    f"{self.max_jobs}-job limit); a fresh process takes over."
                     if recycled
-                    else "on SIGTERM (a scale-down or a rollout)."
+                    else f"exited after {self.jobs_done} jobs on SIGTERM "
+                    "(a scale-down or a rollout)."
                 )
                 + f" {pool} alive.",
                 {"worker": self.consumer, "jobs done": self.jobs_done, "pool": pool},
@@ -553,6 +562,40 @@ class Worker:
             self.store.put(job.job_id, body, http_status=http_status)
 
 
+def jittered_max_jobs(max_jobs: int, jitter: int) -> int:
+    """*max_jobs* plus a random 0..*jitter*; 0 (never recycle) stays 0.
+
+    Workers started together share the stream evenly, so with one limit
+    they all reach it within a few jobs of each other and recycle at once.
+
+        >>> jittered_max_jobs(0, 100)
+        0
+        >>> 2000 <= jittered_max_jobs(2000, 200) <= 2200
+        True
+    """
+    if max_jobs <= 0:
+        return 0
+    return max_jobs + random.randint(0, max(jitter, 0))
+
+
+def restart_in_place(heartbeat_file: str = "") -> None:
+    """Replace this process with a fresh worker; does not return.
+
+    ``exec`` keeps the PID and the container, so Kubernetes sees no exit and
+    applies no restart backoff, while the new image starts with none of the
+    old one's heap.  Everything buffered is flushed first, since nothing runs
+    at exit.  The new process reopens the graph, which is memory-mapped and
+    quick; the heartbeat is touched so the liveness probe allows it that.
+    """
+    if heartbeat_file:
+        Path(heartbeat_file).touch()
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable, "-m", "gandalf.worker"])
+
+
 def main() -> int:
     """Entry point for ``python -m gandalf.worker``."""
     configure_logging(
@@ -570,7 +613,9 @@ def main() -> int:
         JobQueue.from_settings(client),
         ResultStore.from_settings(client),
         consumer=settings.worker_name or default_consumer_name(),
-        max_jobs=settings.worker_max_jobs,
+        max_jobs=jittered_max_jobs(
+            settings.worker_max_jobs, settings.worker_max_jobs_jitter
+        ),
         block_seconds=settings.queue_block_seconds,
         keepalive_seconds=settings.queue_keepalive_seconds,
         heartbeat_file=settings.worker_heartbeat_file,
@@ -608,6 +653,10 @@ def main() -> int:
         raise
     if worker.notifier is not None and worker.notifier.webhook is not None:
         worker.notifier.webhook.flush()
+    otel.flush()
+    if worker.recycled and settings.worker_recycle_in_place:
+        logger.info("Worker recycling in place after %d jobs", done)
+        restart_in_place(settings.worker_heartbeat_file)
     logger.info("Worker exiting after %d jobs", done)
     return 0
 

@@ -17,6 +17,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -885,6 +886,7 @@ def test_a_failing_job_is_answered_and_the_worker_lives_on(
     queue.enqueue(good)
 
     assert w.run() == 2  # stopped by max_jobs after both
+    assert w.recycled  # main() execs a fresh process for it
 
     failed = _read(redis_url, lambda r: r.get(broken.job_id))
     assert failed is not None and failed.http_status == 500
@@ -972,6 +974,86 @@ def test_history_keeps_newest_first_and_types_numbers(history):
     assert records[0]["duration_s"] == 1.0 and records[0]["bytes"] == 200
     assert records[0]["query"] == {"nodes": 1}
     assert history.recent(1)[0]["job_id"] == "j2"
+
+
+def test_history_counts_every_job_per_minute(history, client):
+    minute = int(time.time() // 60) * 60
+    history.record(
+        job_id="a",
+        outcome="ok",
+        finished_at=minute + 1,
+        duration_s=2.0,
+        wait_s=0.5,
+        bytes=10,
+    )
+    history.record(
+        job_id="b",
+        outcome="timeout",
+        finished_at=minute + 2,
+        duration_s=30.0,
+        wait_s=0.1,
+        bytes=5,
+    )
+    history.record(job_id="c", outcome="refused", finished_at=minute + 3, bytes=0)
+    before, counted = history.minutes(minute - 60, 2)
+    assert before["jobs"] == 0 and before["duration_max_s"] is None
+    assert counted["start"] == minute
+    (hour,) = history.hours(minute // 3600 * 3600, 1)
+    assert hour["jobs"] == 3 and hour["duration_max_s"] == 30.0
+    assert counted["jobs"] == 3
+    assert counted["outcomes"] == {"ok": 1, "timeout": 1, "refused": 1}
+    assert counted["bytes"] == 15
+    assert sum(counted["duration_hist"].values()) == 2  # "c" had no latencies
+    assert counted["duration_max_s"] == 30.0 and counted["wait_max_s"] == 0.5
+    ttl = client.ttl(f"t:history:m:{minute}")
+    assert 24 * 3600 < ttl <= 25 * 3600
+    assert client.ttl(f"t:history:h:{minute // 3600 * 3600}") > 24 * 3600
+
+
+def test_job_counts_are_not_capped_by_the_history_length(client):
+    """The bug: past history_maxlen jobs an hour, "last hour" stopped growing."""
+    from gandalf.status import job_statistics
+
+    history = JobHistory(client, stream="t:history", maxlen=50)
+    now = time.time()
+    # 3000 jobs over the last 50 minutes: far more than the stream keeps.
+    for i in range(3000):
+        history.record(
+            job_id=f"j{i}",
+            outcome="ok" if i % 10 else "error",
+            finished_at=now - 3000 + i,
+            duration_s=1.0 + (i % 100) / 100,
+            wait_s=0.2,
+            bytes=1,
+        )
+    assert client.xlen("t:history") < 3000  # the stream was trimmed...
+    stats = job_statistics(history, recent=20, now=now)
+    hour = stats["windows"]["1h"]
+    assert hour["jobs"] == 3000  # ...but every job is counted
+    assert hour["failed"] == 300 and hour["bytes"] == 3000
+    assert stats["windows"]["24h"]["jobs"] == 3000
+    # p95 of 1.00..1.99 s is 1.95 s; the histogram is within its 6%.
+    assert hour["duration_p95_s"] == pytest.approx(1.95, rel=0.07)
+    assert hour["duration_max_s"] == 1.99
+    chart = stats["per_minute"]
+    assert len(chart) == 60
+    assert sum(b["ok"] + b["timed_out"] + b["failed"] for b in chart) == 3000
+    assert [r["job_id"] for r in stats["recent"][:2]] == ["j2999", "j2998"]
+    assert len(stats["recent"]) == stats["history_size"] == 20
+
+
+def test_the_day_counts_the_partial_hour_by_minute(client):
+    """24h is whole hours plus the minutes before them: no hour lost or doubled."""
+    from gandalf.status import job_statistics
+
+    history = JobHistory(client, stream="t:history", maxlen=50)
+    now = (time.time() // 3600) * 3600 + 1800  # half past an hour
+    # One job every ten minutes for 25 hours: 6 an hour.
+    for i in range(150):
+        history.record(job_id=f"j{i}", outcome="ok", finished_at=now - 600 * i - 1)
+    day = job_statistics(history, recent=5, now=now)["windows"]["24h"]
+    assert day["jobs"] == 144  # jobs within the last 86400 s, exactly
+    assert day["per_minute"] == pytest.approx(144 / 1440, rel=0.01)
 
 
 @pytest.fixture
@@ -1704,7 +1786,7 @@ def test_api_answers_503_when_redis_is_gone(api, graph, bmt, monkeypatch):  # no
 def test_worker_back_after_recycling_is_not_a_slack_start(
     graph, bmt, queue, store, registry, notifier
 ):  # noqa: F811
-    """The process Kubernetes starts after a recycle is routine, not a new worker."""
+    """The process that takes over after a recycle is routine, not a new worker."""
     n, hook = notifier
 
     def worker() -> Worker:
@@ -1734,3 +1816,77 @@ def test_worker_back_after_recycling_is_not_a_slack_start(
     assert n.recent()[1]["title"] == "Worker back after recycling"
     assert n.webhook.flush(5.0)
     assert sum("Worker started" in r["text"] for r in hook.received) == 1
+
+
+def test_a_stopped_worker_is_not_recycled(graph, bmt, queue, store):  # noqa: F811
+    """SIGTERM (scale-down, rollout) exits; only the job limit recycles."""
+    w = Worker(graph, bmt, queue, store, consumer="w", max_jobs=5, block_seconds=0.05)
+    w.stop()
+    assert w.run() == 0
+    assert not w.recycled
+
+
+def test_a_recycling_worker_process_execs_in_place(redis_url, client, tmp_path):
+    """The real process: at its job limit it replaces itself, same PID.
+
+    The container never stops, so Kubernetes counts no restart and applies
+    no crash-loop backoff; the next job is taken by the new image.
+    """
+    from tests.search_fixtures import EDGES_FILE, NODES_FILE
+    from gandalf.loader import build_graph_from_jsonl
+
+    graph_dir = tmp_path / "graph"
+    build_graph_from_jsonl(EDGES_FILE, NODES_FILE).save_mmap(graph_dir)
+    heartbeat = tmp_path / "heartbeat"
+    env = {
+        **os.environ,
+        "GANDALF_GRAPH_PATH": str(graph_dir),
+        "GANDALF_QUEUE_URL": redis_url,
+        "GANDALF_QUEUE_STREAM": "e2e:jobs",
+        "GANDALF_QUEUE_GROUP": "e2e:workers",
+        "GANDALF_WORKER_NAME": "e2e",
+        "GANDALF_WORKER_MAX_JOBS": "1",
+        "GANDALF_WORKER_MAX_JOBS_JITTER": "0",
+        "GANDALF_WORKER_METRICS_PORT": "0",
+        "GANDALF_WORKER_HEARTBEAT_FILE": str(heartbeat),
+        "GANDALF_QUEUE_BLOCK_SECONDS": "0.2",
+        "GANDALF_OTEL_ENABLED": "false",
+    }
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "gandalf.worker"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        queue = JobQueue(
+            client,
+            stream="e2e:jobs",
+            group="e2e:workers",
+            dead_stream="e2e:dead",
+            max_deliveries=3,
+            claim_idle_seconds=45,
+        )
+        store = ResultStore.from_settings(client)
+        registry = WorkerRegistry(client, ttl_seconds=45)
+        first, second = Job.new(dict(ONE_HOP)), Job.new(dict(ONE_HOP))
+        queue.ensure_group()
+        queue.enqueue(first)
+        queue.enqueue(second)
+
+        def answered(job: Job) -> bool:
+            return client.exists(store._key(job.job_id, "meta")) > 0
+
+        assert _wait_for(lambda: answered(first) and answered(second), 120.0)
+        # Both jobs ran, one per process image, and the process never exited.
+        assert proc.poll() is None
+        assert _wait_for(lambda: registry.get("e2e") is not None, 30.0)
+        report = registry.get("e2e")
+        assert report["pid"] == proc.pid
+        assert report["jobs_done"] in (0, 1)  # a fresh image's own count
+    finally:
+        proc.terminate()
+        _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err.decode()[-3000:]
+    # Each new image saw the recycle note and reported a routine comeback.
+    assert err.count(b"Worker back after recycling") == 2

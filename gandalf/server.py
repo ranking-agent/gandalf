@@ -626,7 +626,9 @@ async def status_page() -> HTMLResponse:
 
 
 @APP.get("/status.json", include_in_schema=False)
-def status_json(recent: int = Query(50, ge=1, le=500)) -> dict:
+def status_json(
+    recent: int = Query(50, ge=1, le=max(1, settings.history_maxlen))
+) -> dict:
     """The data behind ``/status``; see :mod:`gandalf.status`."""
     try:
         return snapshot(GRAPH, QUEUE, WORKERS, HISTORY, NOTIFIER, recent=recent)

@@ -502,7 +502,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_QUEUE_SYNC_GRACE_SECONDS` | `30` | Added to the query's timeout for the worker's own Timeout response to arrive |
 | `GANDALF_RESULT_TTL_SECONDS` | `900` | How long an uncollected `/query` result lives in Redis |
 | `GANDALF_RESULT_CHUNK_BYTES` | `67108864` | Largest value written to one Redis key |
-| `GANDALF_HISTORY_MAXLEN` | `2000` | Finished jobs the status page's history keeps |
+| `GANDALF_HISTORY_MAXLEN` | `500` | Finished jobs kept for the status page's recent-jobs table (the most `/status.json?recent=` returns); its counts and latencies come from per-minute and per-hour counters of every job, kept 25 hours |
 | `GANDALF_HEAP_TRIM_THRESHOLD_MB` | `512` | Return freed heap to the OS after a job (worker) or before a query (API) when the process's anonymous RSS is above this; 0 disables |
 | `GANDALF_SLACK_WEBHOOK_URL` | _(empty)_ | Slack incoming-webhook URL; set it to post alerts to its channel |
 | `GANDALF_SLACK_EVENTS` | all but `worker_recycled` | Comma-separated event kinds Slack receives, or `all` |
@@ -515,7 +515,9 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_ALERT_STUCK_SECONDS` | `1800` | A job delivered and unfinished this long fires `queue_stuck` |
 | `GANDALF_ALERT_LOG_MAXLEN` | `500` | Alerts the status page keeps |
 | `GANDALF_WORKER_NAME` | `<hostname>-<pid>` | The worker's consumer name |
-| `GANDALF_WORKER_MAX_JOBS` | `2000` | A worker exits after this many jobs (0 = never) |
+| `GANDALF_WORKER_MAX_JOBS` | `2000` | A worker recycles (starts a fresh process) after this many jobs (0 = never) |
+| `GANDALF_WORKER_MAX_JOBS_JITTER` | `200` | Each process adds a random 0..N to the job limit, so workers do not all recycle at once |
+| `GANDALF_WORKER_RECYCLE_IN_PLACE` | `true` | Recycle by `exec`ing a fresh process in the same container, so Kubernetes sees no restart and applies no crash-loop backoff; `false` exits and leaves the restart to the orchestrator |
 | `GANDALF_WORKER_METRICS_PORT` | `9100` | Worker Prometheus port (0 = off) |
 | `GANDALF_WORKER_HEARTBEAT_FILE` | `/tmp/gandalf-worker-heartbeat` | Touched while the worker is alive, for a liveness probe |
 
@@ -740,7 +742,7 @@ link back to the status page:
 |---|---|---|
 | `worker_started` | info | A worker joined the pool (a scale-up, a rollout, a restart) |
 | `worker_stopped` | info | A worker left on SIGTERM (a scale-down or a rollout) |
-| `worker_recycled` | info | A worker exited after its `GANDALF_WORKER_MAX_JOBS`, or came back after doing so (routine; off by default) |
+| `worker_recycled` | info | A worker recycled at its `GANDALF_WORKER_MAX_JOBS`, or came back after doing so (routine; off by default) |
 | `worker_restarted` | critical | A worker came back under a name whose last instance never exited cleanly. Says how long it lived, what it was running, and the error it died with, or that it recorded none and was killed from outside (an OOM kill, a probe) |
 | `worker_lost` | critical | A worker stopped reporting without a clean exit: an OOM kill, usually. Says what it was running |
 | `job_retried` | warning | A job abandoned by a dead worker is being run again |
