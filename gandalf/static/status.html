@@ -181,10 +181,8 @@
       if (h) {
         tile("Jobs, last hour", fmtN(h.jobs), h.per_minute.toFixed(2) + " / min");
         tile("Failed, last hour", fmtN(h.failed), `${fmtN(h.outcomes.timeout + h.outcomes.expired)} timed out`, h.failed ? "bad" : "");
-        // From per-minute histograms once the hour held more jobs than the
-        // history keeps: within ~6%, so marked as approximate.
-        const approx = h.source === "counters" ? "≈" : "";
-        const fmtA = (s) => s == null ? "–" : approx + fmtS(s);
+        // From per-minute latency histograms: within ~6%, so marked as such.
+        const fmtA = (s) => s == null ? "–" : "≈" + fmtS(s);
         tile("Duration p95, 1h", fmtA(h.duration_p95_s), "p50 " + fmtA(h.duration_p50_s) + " · max " + fmtS(h.duration_max_s));
         tile("Queue wait p95, 1h", fmtA(h.wait_p95_s), "p50 " + fmtA(h.wait_p50_s), h.wait_p95_s > 30 ? "warn" : "");
       }

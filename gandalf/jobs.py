@@ -1608,16 +1608,15 @@ return 1
 
 
 class JobHistory:
-    """The last few thousand finished jobs, and per-minute counts of all of them.
+    """The latest finished jobs, and per-minute and per-hour counts of all of them.
 
     The jobs themselves go on a capped Redis Stream, newest kept, for the
-    status page's table and its exact statistics.  Under load the cap is
-    reached in well under an hour, so every job is also counted into a hash
+    status page's recent-jobs table.  Every job is also counted into a hash
     per minute and one per hour (``<stream>:m:<epoch minute>``,
     ``<stream>:h:<epoch hour>``, kept ``counter_ttl_seconds``): its outcome,
-    result bytes and latency histograms.  Those give the page's counts over
-    any window, however many jobs it held; the hours keep a day's window to
-    a couple of dozen reads.
+    result bytes and latency histograms.  Those give the page's counts and
+    latencies over any window, however many jobs it held; the hours keep a
+    day's window to a couple of dozen reads.
 
     Args:
         client: A ``redis.Redis`` returning bytes.

@@ -1024,56 +1024,34 @@ def test_job_counts_are_not_capped_by_the_history_length(client):
             wait_s=0.2,
             bytes=1,
         )
+    assert client.xlen("t:history") < 3000  # the stream was trimmed...
     stats = job_statistics(history, recent=20, now=now)
-    assert stats["history_size"] < 3000  # the stream was trimmed...
     hour = stats["windows"]["1h"]
-    assert hour["source"] == "counters"
     assert hour["jobs"] == 3000  # ...but every job is counted
     assert hour["failed"] == 300 and hour["bytes"] == 3000
     assert stats["windows"]["24h"]["jobs"] == 3000
     # p95 of 1.00..1.99 s is 1.95 s; the histogram is within its 6%.
     assert hour["duration_p95_s"] == pytest.approx(1.95, rel=0.07)
     assert hour["duration_max_s"] == 1.99
-    # The newest minutes, inside the sample, stay exact; the chart's bars add
-    # up to every job in the hour, whichever source each minute came from.
     chart = stats["per_minute"]
+    assert len(chart) == 60
     assert sum(b["ok"] + b["timed_out"] + b["failed"] for b in chart) == 3000
-    assert len(stats["recent"]) == 20
+    assert [r["job_id"] for r in stats["recent"][:2]] == ["j2999", "j2998"]
+    assert len(stats["recent"]) == stats["history_size"] == 20
 
 
-def test_job_statistics_use_the_exact_sample_while_it_reaches(client):
-    from gandalf.status import job_statistics
-
-    history = JobHistory(client, stream="t:history", maxlen=1000)
-    now = time.time()
-    for i, duration in enumerate([1.0, 2.0, 3.0, 4.0]):
-        history.record(
-            job_id=f"j{i}",
-            outcome="ok",
-            finished_at=now - 10 * i,
-            duration_s=duration,
-            wait_s=0.1,
-            bytes=1,
-        )
-    stats = job_statistics(history, recent=20, now=now)
-    hour = stats["windows"]["1h"]
-    assert hour["source"] == "sample"
-    assert hour["jobs"] == 4 and hour["duration_p50_s"] == 2.0  # exact
-
-
-def test_job_statistics_fall_back_to_the_sample_without_counters(client):
-    """Counters newer than the history (just deployed) never lower a count."""
+def test_the_day_counts_the_partial_hour_by_minute(client):
+    """24h is whole hours plus the minutes before them: no hour lost or doubled."""
     from gandalf.status import job_statistics
 
     history = JobHistory(client, stream="t:history", maxlen=50)
-    now = time.time()
-    for i in range(500):
-        history.record(job_id=f"j{i}", outcome="ok", finished_at=now - 500 + i)
-    for key in client.scan_iter("t:history:[mh]:*"):
-        client.delete(key)
-    hour = job_statistics(history, recent=20, now=now)["windows"]["1h"]
-    assert hour["source"] == "sample"
-    assert hour["jobs"] == job_statistics(history, 20, now)["history_size"]
+    now = (time.time() // 3600) * 3600 + 1800  # half past an hour
+    # One job every ten minutes for 25 hours: 6 an hour.
+    for i in range(150):
+        history.record(job_id=f"j{i}", outcome="ok", finished_at=now - 600 * i - 1)
+    day = job_statistics(history, recent=5, now=now)["windows"]["24h"]
+    assert day["jobs"] == 144  # jobs within the last 86400 s, exactly
+    assert day["per_minute"] == pytest.approx(144 / 1440, rel=0.01)
 
 
 @pytest.fixture
