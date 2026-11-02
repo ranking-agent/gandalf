@@ -21,7 +21,13 @@ from typing import Any, Optional
 from gandalf import __version__
 from gandalf.config import settings
 from gandalf.metrics import metrics_registry, rss_anon_kb, rss_kb
-from gandalf.jobs import JobHistory, JobQueue, RedisHealth, WorkerRegistry
+from gandalf.jobs import (
+    JobHistory,
+    JobQueue,
+    RedisHealth,
+    WorkerRegistry,
+    latency_bucket_value,
+)
 from gandalf.notify import Notifier
 
 #: Outcomes a job can end with, in the order the page lists them.
@@ -91,7 +97,127 @@ def aggregate(records: list[dict], window_s: float, now: float) -> dict:
         "wait_p50_s": percentile(waits, 0.5),
         "wait_p95_s": percentile(waits, 0.95),
         "bytes": sum(int(r.get("bytes", 0)) for r in within),
+        "source": "sample",
     }
+
+
+def histogram_percentile(
+    hist: dict[int, int], fraction: float, top: Optional[float] = None
+) -> Optional[float]:
+    """The nearest-rank percentile of a latency histogram, or None if empty.
+
+    The answer is the middle of the bucket the rank falls in (within about
+    6% of the true value; see :func:`gandalf.jobs.latency_bucket`), never
+    above *top*, the largest value seen.
+
+    Examples:
+        >>> from gandalf.jobs import latency_bucket
+        >>> hist = {latency_bucket(1.0): 90, latency_bucket(10.0): 10}
+        >>> round(histogram_percentile(hist, 0.5), 2), round(histogram_percentile(hist, 0.95), 1)
+        (1.06, 10.6)
+        >>> histogram_percentile(hist, 0.95, top=10.0)
+        10.0
+        >>> histogram_percentile({}, 0.5) is None
+        True
+    """
+    total = sum(hist.values())
+    if not total:
+        return None
+    rank = max(1, math.ceil(fraction * total))
+    seen = 0
+    for index in sorted(hist):
+        seen += hist[index]
+        if seen >= rank:
+            value = latency_bucket_value(index)
+            return min(value, top) if top is not None else value
+    return None  # unreachable: the ranks add up to total
+
+
+def _merge_hist(target: dict[int, int], hist: dict[int, int]) -> None:
+    for index, count in hist.items():
+        target[index] = target.get(index, 0) + count
+
+
+def _max(values: list[Optional[float]]) -> Optional[float]:
+    present = [v for v in values if v is not None]
+    return max(present) if present else None
+
+
+def aggregate_counters(buckets: list[dict], window_s: float, now: float) -> dict:
+    """:func:`aggregate`'s figures from counter buckets (every job counted).
+
+    *buckets* are :meth:`JobHistory.minutes` or ``hours`` entries.  The
+    window is whole buckets: those starting within it, so the oldest,
+    partly-outside bucket is left out and the rate is over the time the
+    counted buckets span.  Latency percentiles come from histograms, so are
+    close, not exact.
+
+    Examples:
+        >>> m = {"jobs": 2, "outcomes": {"ok": 1, "timeout": 1}, "bytes": 5,
+        ...      "duration_hist": {0: 2}, "wait_hist": {-20: 2},
+        ...      "duration_max_s": 1.0, "wait_max_s": 0.1}
+        >>> agg = aggregate_counters([dict(m, start=0), dict(m, start=60)], 150, now=150)
+        >>> agg["jobs"], agg["outcomes"]["timeout"], agg["bytes"], agg["per_minute"]
+        (4, 2, 10, 1.6)
+        >>> agg["duration_max_s"], agg["source"]
+        (1.0, 'counters')
+        >>> aggregate_counters([dict(m, start=0), dict(m, start=60)], 120, now=150)["jobs"]
+        2
+    """
+    since = now - window_s
+    within = [m for m in buckets if since <= m["start"] <= now]
+    outcomes = {o: 0 for o in OUTCOMES}
+    durations: dict[int, int] = {}
+    waits: dict[int, int] = {}
+    for m in within:
+        for outcome, count in m["outcomes"].items():
+            outcomes[outcome] = outcomes.get(outcome, 0) + count
+        _merge_hist(durations, m["duration_hist"])
+        _merge_hist(waits, m["wait_hist"])
+    jobs = sum(m["jobs"] for m in within)
+    duration_max = _max([m["duration_max_s"] for m in within])
+    wait_max = _max([m["wait_max_s"] for m in within])
+    span_s = now - within[0]["start"] if within else window_s
+    return {
+        "window_s": window_s,
+        "jobs": jobs,
+        "outcomes": outcomes,
+        "failed": outcomes["error"] + outcomes["poisoned"] + outcomes["refused"],
+        "per_minute": jobs / (max(span_s, 1.0) / 60.0),
+        "duration_p50_s": histogram_percentile(durations, 0.5, duration_max),
+        "duration_p95_s": histogram_percentile(durations, 0.95, duration_max),
+        "duration_max_s": duration_max,
+        "wait_p50_s": histogram_percentile(waits, 0.5, wait_max),
+        "wait_p95_s": histogram_percentile(waits, 0.95, wait_max),
+        "bytes": sum(m["bytes"] for m in within),
+        "source": "counters",
+    }
+
+
+def _chart_class(outcome: Optional[str]) -> str:
+    """Which of the chart's three stacks an outcome is drawn in."""
+    if outcome == "ok":
+        return "ok"
+    return "timed_out" if outcome in ("timeout", "expired") else "failed"
+
+
+def minute_bucket(minute: dict) -> dict:
+    """A :func:`per_minute` bucket from one minute's counters.
+
+    Examples:
+        >>> b = minute_bucket({"start": 60, "jobs": 3, "outcomes": {"ok": 2, "refused": 1},
+        ...                    "wait_hist": {0: 3}, "wait_max_s": 1.0})
+        >>> b["ok"], b["timed_out"], b["failed"], b["wait_max_s"]
+        (2, 0, 1, 1.0)
+    """
+    bucket: dict = {"minute": minute["start"], "ok": 0, "timed_out": 0, "failed": 0}
+    for outcome, count in minute["outcomes"].items():
+        bucket[_chart_class(outcome)] += count
+    top = minute["wait_max_s"]
+    bucket["wait_p50_s"] = histogram_percentile(minute["wait_hist"], 0.5, top)
+    bucket["wait_p95_s"] = histogram_percentile(minute["wait_hist"], 0.95, top)
+    bucket["wait_max_s"] = top
+    return bucket
 
 
 def per_minute(records: list[dict], minutes: int, now: float) -> list[dict]:
@@ -122,13 +248,7 @@ def per_minute(records: list[dict], minutes: int, now: float) -> list[dict]:
     for r in records:
         index = int((r.get("finished_at", 0) - start) // 60)
         if 0 <= index < minutes:
-            outcome = r.get("outcome")
-            key = (
-                "ok"
-                if outcome == "ok"
-                else "timed_out" if outcome in ("timeout", "expired") else "failed"
-            )
-            buckets[index][key] += 1
+            buckets[index][_chart_class(r.get("outcome"))] += 1
             if "wait_s" in r:
                 waits[index].append(float(r["wait_s"]))
     for bucket, minute_waits in zip(buckets, waits):
@@ -220,16 +340,7 @@ def snapshot(
             "reports": reports,
         }
     if history is not None:
-        records = history.recent(max(recent, settings.history_maxlen))
-        data["jobs"] = {
-            "recent": records[:recent],
-            "windows": {
-                name: aggregate(records, seconds, now)
-                for name, seconds in WINDOWS.items()
-            },
-            "per_minute": per_minute(records, 60, now),
-            "history_size": len(records),
-        }
+        data["jobs"] = job_statistics(history, recent, now)
     if notifier is not None:
         data["alerts"] = {
             "slack": notifier.slack_enabled,
@@ -237,6 +348,76 @@ def snapshot(
             "recent": notifier.recent(recent),
         }
     return data
+
+
+def job_statistics(history: JobHistory, recent: int, now: float) -> dict:
+    """The page's job section: the recent table, the windows and the chart.
+
+    The history stream keeps only the newest ``history_maxlen`` jobs.  A
+    window or chart minute that sample reaches back past is computed from it
+    exactly; one it does not (more jobs than that finished since) comes from
+    the per-minute counters, which count every job.  Should the counters
+    hold fewer jobs than the sample (they began after it, or Redis lost
+    them), the sample is used: it is a floor either way.
+    """
+    wanted = max(recent, history.maxlen)
+    records = history.recent(wanted)
+    # Fewer than asked for: nothing has been trimmed, the sample is all.
+    complete = len(records) < wanted
+    oldest = float(records[-1].get("finished_at", now)) if records else now
+
+    def covers(since: float) -> bool:
+        return complete or oldest < since
+
+    windows = {
+        name: aggregate(records, seconds, now) for name, seconds in WINDOWS.items()
+    }
+    chart = per_minute(records, 60, now)
+    # Minutes for the chart and every window up to an hour; hours past that.
+    counters: dict[int, list[dict]] = {}
+
+    def buckets(size: int) -> list[dict]:
+        if size not in counters:
+            count = (3600 if size == 60 else max(WINDOWS.values())) // size + 1
+            first = int(now // size) * size - size * (count - 1)
+            counters[size] = (
+                history.minutes(first, count)
+                if size == 60
+                else history.hours(first, count)
+            )
+        return counters[size]
+
+    for name, seconds in WINDOWS.items():
+        if covers(now - seconds):
+            continue
+        since = now - seconds
+        if seconds <= 3600:
+            counted_buckets = buckets(60)
+        else:
+            # Whole hours, and the minutes of the partial hour before them.
+            first_hour = math.ceil(since / 3600) * 3600
+            first_minute = math.ceil(since / 60) * 60
+            counted_buckets = history.minutes(
+                first_minute, (first_hour - first_minute) // 60
+            ) + [h for h in buckets(3600) if h["start"] >= first_hour]
+        counted = aggregate_counters(counted_buckets, seconds, now)
+        if counted["jobs"] >= windows[name]["jobs"]:
+            windows[name] = counted
+    if not covers(chart[0]["minute"]):
+        by_minute = {m["start"]: m for m in buckets(60)}
+        for i, bucket in enumerate(chart):
+            counted_minute = by_minute.get(bucket["minute"])
+            if covers(bucket["minute"]) or counted_minute is None:
+                continue
+            sampled = bucket["ok"] + bucket["timed_out"] + bucket["failed"]
+            if counted_minute["jobs"] >= sampled:
+                chart[i] = minute_bucket(counted_minute)
+    return {
+        "recent": records[:recent],
+        "windows": windows,
+        "per_minute": chart,
+        "history_size": len(records),
+    }
 
 
 def _server_section(graph: Any) -> dict:

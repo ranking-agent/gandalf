@@ -974,6 +974,108 @@ def test_history_keeps_newest_first_and_types_numbers(history):
     assert history.recent(1)[0]["job_id"] == "j2"
 
 
+def test_history_counts_every_job_per_minute(history, client):
+    minute = int(time.time() // 60) * 60
+    history.record(
+        job_id="a",
+        outcome="ok",
+        finished_at=minute + 1,
+        duration_s=2.0,
+        wait_s=0.5,
+        bytes=10,
+    )
+    history.record(
+        job_id="b",
+        outcome="timeout",
+        finished_at=minute + 2,
+        duration_s=30.0,
+        wait_s=0.1,
+        bytes=5,
+    )
+    history.record(job_id="c", outcome="refused", finished_at=minute + 3, bytes=0)
+    before, counted = history.minutes(minute - 60, 2)
+    assert before["jobs"] == 0 and before["duration_max_s"] is None
+    assert counted["start"] == minute
+    (hour,) = history.hours(minute // 3600 * 3600, 1)
+    assert hour["jobs"] == 3 and hour["duration_max_s"] == 30.0
+    assert counted["jobs"] == 3
+    assert counted["outcomes"] == {"ok": 1, "timeout": 1, "refused": 1}
+    assert counted["bytes"] == 15
+    assert sum(counted["duration_hist"].values()) == 2  # "c" had no latencies
+    assert counted["duration_max_s"] == 30.0 and counted["wait_max_s"] == 0.5
+    ttl = client.ttl(f"t:history:m:{minute}")
+    assert 24 * 3600 < ttl <= 25 * 3600
+    assert client.ttl(f"t:history:h:{minute // 3600 * 3600}") > 24 * 3600
+
+
+def test_job_counts_are_not_capped_by_the_history_length(client):
+    """The bug: past history_maxlen jobs an hour, "last hour" stopped growing."""
+    from gandalf.status import job_statistics
+
+    history = JobHistory(client, stream="t:history", maxlen=50)
+    now = time.time()
+    # 3000 jobs over the last 50 minutes: far more than the stream keeps.
+    for i in range(3000):
+        history.record(
+            job_id=f"j{i}",
+            outcome="ok" if i % 10 else "error",
+            finished_at=now - 3000 + i,
+            duration_s=1.0 + (i % 100) / 100,
+            wait_s=0.2,
+            bytes=1,
+        )
+    stats = job_statistics(history, recent=20, now=now)
+    assert stats["history_size"] < 3000  # the stream was trimmed...
+    hour = stats["windows"]["1h"]
+    assert hour["source"] == "counters"
+    assert hour["jobs"] == 3000  # ...but every job is counted
+    assert hour["failed"] == 300 and hour["bytes"] == 3000
+    assert stats["windows"]["24h"]["jobs"] == 3000
+    # p95 of 1.00..1.99 s is 1.95 s; the histogram is within its 6%.
+    assert hour["duration_p95_s"] == pytest.approx(1.95, rel=0.07)
+    assert hour["duration_max_s"] == 1.99
+    # The newest minutes, inside the sample, stay exact; the chart's bars add
+    # up to every job in the hour, whichever source each minute came from.
+    chart = stats["per_minute"]
+    assert sum(b["ok"] + b["timed_out"] + b["failed"] for b in chart) == 3000
+    assert len(stats["recent"]) == 20
+
+
+def test_job_statistics_use_the_exact_sample_while_it_reaches(client):
+    from gandalf.status import job_statistics
+
+    history = JobHistory(client, stream="t:history", maxlen=1000)
+    now = time.time()
+    for i, duration in enumerate([1.0, 2.0, 3.0, 4.0]):
+        history.record(
+            job_id=f"j{i}",
+            outcome="ok",
+            finished_at=now - 10 * i,
+            duration_s=duration,
+            wait_s=0.1,
+            bytes=1,
+        )
+    stats = job_statistics(history, recent=20, now=now)
+    hour = stats["windows"]["1h"]
+    assert hour["source"] == "sample"
+    assert hour["jobs"] == 4 and hour["duration_p50_s"] == 2.0  # exact
+
+
+def test_job_statistics_fall_back_to_the_sample_without_counters(client):
+    """Counters newer than the history (just deployed) never lower a count."""
+    from gandalf.status import job_statistics
+
+    history = JobHistory(client, stream="t:history", maxlen=50)
+    now = time.time()
+    for i in range(500):
+        history.record(job_id=f"j{i}", outcome="ok", finished_at=now - 500 + i)
+    for key in client.scan_iter("t:history:[mh]:*"):
+        client.delete(key)
+    hour = job_statistics(history, recent=20, now=now)["windows"]["1h"]
+    assert hour["source"] == "sample"
+    assert hour["jobs"] == job_statistics(history, 20, now)["history_size"]
+
+
 @pytest.fixture
 def reporting_worker(
     graph, bmt, queue, store, registry, history, tmp_path
