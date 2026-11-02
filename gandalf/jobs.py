@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import logging
+import math
 import os
 import socket
 import threading
@@ -1549,21 +1550,95 @@ def _typed_report(report: dict) -> dict:
     return typed
 
 
+#: Latency histogram resolution: buckets per decade of seconds.  Twenty
+#: makes each bucket about 12% wide, so a percentile read from one is within
+#: about 6% of the true value.
+LATENCY_BUCKETS_PER_DECADE = 20
+_LATENCY_MIN_BUCKET = -4 * LATENCY_BUCKETS_PER_DECADE  # 0.1 ms and below
+_LATENCY_MAX_BUCKET = 6 * LATENCY_BUCKETS_PER_DECADE  # 10^6 s and above
+
+
+def latency_bucket(seconds: float) -> int:
+    """The histogram bucket *seconds* falls in: ``floor(20 log10 s)``, clamped.
+
+    Bucket ``i`` holds ``[10^(i/20), 10^((i+1)/20))`` seconds.
+
+    Examples:
+        >>> latency_bucket(1.0), latency_bucket(10.0), latency_bucket(0.5)
+        (0, 20, -7)
+        >>> latency_bucket(0.0) == latency_bucket(1e-9) == -80
+        True
+    """
+    if seconds <= 0:
+        return _LATENCY_MIN_BUCKET
+    index = math.floor(math.log10(seconds) * LATENCY_BUCKETS_PER_DECADE)
+    return max(_LATENCY_MIN_BUCKET, min(_LATENCY_MAX_BUCKET, index))
+
+
+def latency_bucket_value(index: int) -> float:
+    """A representative value of bucket *index*: its geometric midpoint."""
+    return float(10 ** ((index + 0.5) / LATENCY_BUCKETS_PER_DECADE))
+
+
+# One finished job into its minute's and its hour's counters, atomically:
+# the job count, its outcome, its result bytes, a bucket of each latency
+# histogram, and each latency's running maximum (which HINCRBY cannot keep).
+#   KEYS     the minute's hash, the hour's hash
+#   ARGV     ttl, outcome, bytes, duration bucket, duration, wait bucket, wait
+#            (a latency's bucket and value are "" when the job had none)
+_COUNT_JOB = """
+for _, key in ipairs(KEYS) do
+  redis.call('HINCRBY', key, 'n', 1)
+  redis.call('HINCRBY', key, 'o:' .. ARGV[2], 1)
+  redis.call('HINCRBY', key, 'bytes', ARGV[3])
+  for i, name in ipairs({'d', 'w'}) do
+    local bucket, value = ARGV[2 + 2 * i], ARGV[3 + 2 * i]
+    if bucket ~= '' then
+      redis.call('HINCRBY', key, name .. ':' .. bucket, 1)
+      local top = tonumber(redis.call('HGET', key, name .. 'max') or '-1')
+      if tonumber(value) > top then
+        redis.call('HSET', key, name .. 'max', value)
+      end
+    end
+  end
+  redis.call('EXPIRE', key, ARGV[1])
+end
+return 1
+"""
+
+
 class JobHistory:
-    """The last few thousand finished jobs, as a capped Redis Stream.
+    """The latest finished jobs, and per-minute and per-hour counts of all of them.
+
+    The jobs themselves go on a capped Redis Stream, newest kept, for the
+    status page's recent-jobs table.  Every job is also counted into a hash
+    per minute and one per hour (``<stream>:m:<epoch minute>``,
+    ``<stream>:h:<epoch hour>``, kept ``counter_ttl_seconds``): its outcome,
+    result bytes and latency histograms.  Those give the page's counts and
+    latencies over any window, however many jobs it held; the hours keep a
+    day's window to a couple of dozen reads.
 
     Args:
         client: A ``redis.Redis`` returning bytes.
         stream: Stream key.
         maxlen: Roughly how many records to keep.
+        counter_ttl_seconds: How long a minute's counters live; at least the
+            longest window the status page shows (24 hours).
     """
 
     def __init__(
-        self, client: redis.Redis, *, stream: str = "gandalf:jobs:history", maxlen: int
+        self,
+        client: redis.Redis,
+        *,
+        stream: str = "gandalf:jobs:history",
+        maxlen: int,
+        counter_ttl_seconds: int = 25 * 3600,
     ):
         self._r = client
         self.stream = stream
         self.maxlen = maxlen
+        self.counter_ttl = counter_ttl_seconds
+        self._count_job = client.register_script(_COUNT_JOB)
 
     @classmethod
     def from_settings(cls, client: Optional[redis.Redis] = None) -> "JobHistory":
@@ -1573,14 +1648,38 @@ class JobHistory:
             maxlen=settings.history_maxlen,
         )
 
+    def _bucket_key(self, size: int, start: int) -> str:
+        return f"{self.stream}:{'h' if size == 3600 else 'm'}:{start}"
+
     def record(self, **fields: object) -> None:
-        """Append one finished job."""
-        self._r.xadd(
+        """Append one finished job, and count it in its minute."""
+        finished_at = _number(fields.get("finished_at"))
+        if finished_at is None:
+            finished_at = time.time()
+        args: list[EncodableT] = [
+            int(self.counter_ttl),
+            str(fields.get("outcome") or "error"),
+            int(_number(fields.get("bytes")) or 0),
+        ]
+        for name in ("duration_s", "wait_s"):
+            seconds = _number(fields.get(name))
+            if seconds is None:
+                args += ["", ""]
+            else:
+                args += [latency_bucket(seconds), repr(seconds)]
+        pipe = self._r.pipeline(transaction=False)
+        pipe.xadd(
             self.stream,
             {k: _field(v) for k, v in fields.items()},
             maxlen=self.maxlen,
             approximate=True,
         )
+        keys = [
+            self._bucket_key(size, int(finished_at // size) * size)
+            for size in (60, 3600)
+        ]
+        self._count_job(keys=keys, args=args, client=pipe)
+        pipe.execute()
 
     def recent(self, count: int) -> list[dict]:
         """The newest *count* records, newest first."""
@@ -1590,6 +1689,65 @@ class JobHistory:
             record["entry_id"] = entry_id.decode()
             records.append(record)
         return records
+
+    def minutes(self, first: int, count: int) -> list[dict]:
+        """The counters of *count* minutes from epoch second *first*, oldest first.
+
+        Each is ``{"start", "size", "jobs", "outcomes", "bytes",
+        "duration_hist", "wait_hist", "duration_max_s", "wait_max_s"}``; a
+        histogram maps a :func:`latency_bucket` index to a count, and a
+        minute with no jobs (or whose counters expired) has zeros and Nones.
+        """
+        return self._buckets(60, first, count)
+
+    def hours(self, first: int, count: int) -> list[dict]:
+        """As :meth:`minutes`, for *count* hours from epoch second *first*."""
+        return self._buckets(3600, first, count)
+
+    def _buckets(self, size: int, first: int, count: int) -> list[dict]:
+        pipe = self._r.pipeline(transaction=False)
+        for i in range(count):
+            pipe.hgetall(self._bucket_key(size, first + size * i))
+        return [
+            _bucket_counts(first + size * i, size, _decode(_hash(reply)))
+            for i, reply in enumerate(pipe.execute())
+        ]
+
+
+def _number(value: object) -> Optional[float]:
+    """*value* as a float, or None if it is missing or not a number."""
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _bucket_counts(start: int, size: int, fields: dict[str, str]) -> dict:
+    """One bucket's counter hash, decoded (see :meth:`JobHistory.minutes`)."""
+    counts: dict = {
+        "start": start,
+        "size": size,
+        "jobs": int(fields.get("n", 0)),
+        "outcomes": {},
+        "bytes": int(fields.get("bytes", 0)),
+        "duration_hist": {},
+        "wait_hist": {},
+        "duration_max_s": float(fields["dmax"]) if "dmax" in fields else None,
+        "wait_max_s": float(fields["wmax"]) if "wmax" in fields else None,
+    }
+    for key, value in fields.items():
+        kind, _, rest = key.partition(":")
+        if not rest:
+            continue
+        if kind == "o":
+            counts["outcomes"][rest] = int(value)
+        elif kind == "d":
+            counts["duration_hist"][int(rest)] = int(value)
+        elif kind == "w":
+            counts["wait_hist"][int(rest)] = int(value)
+    return counts
 
 
 _NUMERIC_HISTORY_FIELDS = frozenset(

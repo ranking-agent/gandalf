@@ -146,8 +146,10 @@ class Settings(BaseSettings):
     result_chunk_bytes: int = 64 * 1024 * 1024
 
     # How many finished jobs the status page's history keeps (a capped
-    # Redis Stream, gandalf:jobs:history).
-    history_maxlen: int = 2000
+    # Redis Stream, gandalf:jobs:history), for its recent-jobs table: the
+    # most that /status.json?recent= can ask for.  The page's counts and
+    # latencies come from per-minute and per-hour counters of every job.
+    history_maxlen: int = 500
 
     # Alerts (gandalf/notify.py).  Every event goes to the alert log shown
     # on /status; with a Slack incoming-webhook URL the enabled kinds are

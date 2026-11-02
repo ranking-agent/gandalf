@@ -976,6 +976,86 @@ def test_history_keeps_newest_first_and_types_numbers(history):
     assert history.recent(1)[0]["job_id"] == "j2"
 
 
+def test_history_counts_every_job_per_minute(history, client):
+    minute = int(time.time() // 60) * 60
+    history.record(
+        job_id="a",
+        outcome="ok",
+        finished_at=minute + 1,
+        duration_s=2.0,
+        wait_s=0.5,
+        bytes=10,
+    )
+    history.record(
+        job_id="b",
+        outcome="timeout",
+        finished_at=minute + 2,
+        duration_s=30.0,
+        wait_s=0.1,
+        bytes=5,
+    )
+    history.record(job_id="c", outcome="refused", finished_at=minute + 3, bytes=0)
+    before, counted = history.minutes(minute - 60, 2)
+    assert before["jobs"] == 0 and before["duration_max_s"] is None
+    assert counted["start"] == minute
+    (hour,) = history.hours(minute // 3600 * 3600, 1)
+    assert hour["jobs"] == 3 and hour["duration_max_s"] == 30.0
+    assert counted["jobs"] == 3
+    assert counted["outcomes"] == {"ok": 1, "timeout": 1, "refused": 1}
+    assert counted["bytes"] == 15
+    assert sum(counted["duration_hist"].values()) == 2  # "c" had no latencies
+    assert counted["duration_max_s"] == 30.0 and counted["wait_max_s"] == 0.5
+    ttl = client.ttl(f"t:history:m:{minute}")
+    assert 24 * 3600 < ttl <= 25 * 3600
+    assert client.ttl(f"t:history:h:{minute // 3600 * 3600}") > 24 * 3600
+
+
+def test_job_counts_are_not_capped_by_the_history_length(client):
+    """The bug: past history_maxlen jobs an hour, "last hour" stopped growing."""
+    from gandalf.status import job_statistics
+
+    history = JobHistory(client, stream="t:history", maxlen=50)
+    now = time.time()
+    # 3000 jobs over the last 50 minutes: far more than the stream keeps.
+    for i in range(3000):
+        history.record(
+            job_id=f"j{i}",
+            outcome="ok" if i % 10 else "error",
+            finished_at=now - 3000 + i,
+            duration_s=1.0 + (i % 100) / 100,
+            wait_s=0.2,
+            bytes=1,
+        )
+    assert client.xlen("t:history") < 3000  # the stream was trimmed...
+    stats = job_statistics(history, recent=20, now=now)
+    hour = stats["windows"]["1h"]
+    assert hour["jobs"] == 3000  # ...but every job is counted
+    assert hour["failed"] == 300 and hour["bytes"] == 3000
+    assert stats["windows"]["24h"]["jobs"] == 3000
+    # p95 of 1.00..1.99 s is 1.95 s; the histogram is within its 6%.
+    assert hour["duration_p95_s"] == pytest.approx(1.95, rel=0.07)
+    assert hour["duration_max_s"] == 1.99
+    chart = stats["per_minute"]
+    assert len(chart) == 60
+    assert sum(b["ok"] + b["timed_out"] + b["failed"] for b in chart) == 3000
+    assert [r["job_id"] for r in stats["recent"][:2]] == ["j2999", "j2998"]
+    assert len(stats["recent"]) == stats["history_size"] == 20
+
+
+def test_the_day_counts_the_partial_hour_by_minute(client):
+    """24h is whole hours plus the minutes before them: no hour lost or doubled."""
+    from gandalf.status import job_statistics
+
+    history = JobHistory(client, stream="t:history", maxlen=50)
+    now = (time.time() // 3600) * 3600 + 1800  # half past an hour
+    # One job every ten minutes for 25 hours: 6 an hour.
+    for i in range(150):
+        history.record(job_id=f"j{i}", outcome="ok", finished_at=now - 600 * i - 1)
+    day = job_statistics(history, recent=5, now=now)["windows"]["24h"]
+    assert day["jobs"] == 144  # jobs within the last 86400 s, exactly
+    assert day["per_minute"] == pytest.approx(144 / 1440, rel=0.01)
+
+
 @pytest.fixture
 def reporting_worker(
     graph, bmt, queue, store, registry, history, tmp_path

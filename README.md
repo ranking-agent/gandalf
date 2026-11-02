@@ -450,7 +450,7 @@ The server is configured via environment variables (prefixed with `GANDALF_`):
 | `GANDALF_QUEUE_SYNC_GRACE_SECONDS` | `30` | Added to the query's timeout for the worker's own Timeout response to arrive |
 | `GANDALF_RESULT_TTL_SECONDS` | `900` | How long an uncollected `/query` result lives in Redis |
 | `GANDALF_RESULT_CHUNK_BYTES` | `67108864` | Largest value written to one Redis key |
-| `GANDALF_HISTORY_MAXLEN` | `2000` | Finished jobs the status page's history keeps |
+| `GANDALF_HISTORY_MAXLEN` | `500` | Finished jobs kept for the status page's recent-jobs table (the most `/status.json?recent=` returns); its counts and latencies come from per-minute and per-hour counters of every job, kept 25 hours |
 | `GANDALF_HEAP_TRIM_THRESHOLD_MB` | `512` | Return freed heap to the OS after a job (worker) or before a query (API) when the process's anonymous RSS is above this; 0 disables |
 | `GANDALF_SLACK_WEBHOOK_URL` | _(empty)_ | Slack incoming-webhook URL; set it to post alerts to its channel |
 | `GANDALF_SLACK_EVENTS` | all but `worker_recycled` | Comma-separated event kinds Slack receives, or `all` |
