@@ -15,6 +15,7 @@ import importlib
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1826,18 +1827,13 @@ def test_a_stopped_worker_is_not_recycled(graph, bmt, queue, store):  # noqa: F8
     assert not w.recycled
 
 
-def test_a_recycling_worker_process_execs_in_place(redis_url, client, tmp_path):
-    """The real process: at its job limit it replaces itself, same PID.
-
-    The container never stops, so Kubernetes counts no restart and applies
-    no crash-loop backoff; the next job is taken by the new image.
-    """
+def _start_recycling_worker(redis_url: str, tmp_path) -> subprocess.Popen:
+    """Run ``python -m gandalf.worker`` with a one-job limit, so it recycles after each job."""
     from tests.search_fixtures import EDGES_FILE, NODES_FILE
     from gandalf.loader import build_graph_from_jsonl
 
     graph_dir = tmp_path / "graph"
     build_graph_from_jsonl(EDGES_FILE, NODES_FILE).save_mmap(graph_dir)
-    heartbeat = tmp_path / "heartbeat"
     env = {
         **os.environ,
         "GANDALF_GRAPH_PATH": str(graph_dir),
@@ -1848,29 +1844,44 @@ def test_a_recycling_worker_process_execs_in_place(redis_url, client, tmp_path):
         "GANDALF_WORKER_MAX_JOBS": "1",
         "GANDALF_WORKER_MAX_JOBS_JITTER": "0",
         "GANDALF_WORKER_METRICS_PORT": "0",
-        "GANDALF_WORKER_HEARTBEAT_FILE": str(heartbeat),
+        "GANDALF_WORKER_HEARTBEAT_FILE": str(tmp_path / "heartbeat"),
         "GANDALF_QUEUE_BLOCK_SECONDS": "0.2",
         "GANDALF_OTEL_ENABLED": "false",
     }
-    proc = subprocess.Popen(
+    return subprocess.Popen(
         [sys.executable, "-m", "gandalf.worker"],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
+
+
+def _e2e_queue(client: redis.Redis) -> JobQueue:
+    """The queue :func:`_start_recycling_worker`'s worker consumes."""
+    queue = JobQueue(
+        client,
+        stream="e2e:jobs",
+        group="e2e:workers",
+        dead_stream="e2e:dead",
+        max_deliveries=3,
+        claim_idle_seconds=45,
+    )
+    queue.ensure_group()
+    return queue
+
+
+def test_a_recycling_worker_process_execs_in_place(redis_url, client, tmp_path):
+    """The real process: at its job limit it replaces itself, same PID.
+
+    The container never stops, so Kubernetes counts no restart and applies
+    no crash-loop backoff; the next job is taken by the new image.
+    """
+    proc = _start_recycling_worker(redis_url, tmp_path)
     try:
-        queue = JobQueue(
-            client,
-            stream="e2e:jobs",
-            group="e2e:workers",
-            dead_stream="e2e:dead",
-            max_deliveries=3,
-            claim_idle_seconds=45,
-        )
+        queue = _e2e_queue(client)
         store = ResultStore.from_settings(client)
         registry = WorkerRegistry(client, ttl_seconds=45)
         first, second = Job.new(dict(ONE_HOP)), Job.new(dict(ONE_HOP))
-        queue.ensure_group()
         queue.enqueue(first)
         queue.enqueue(second)
 
@@ -1890,3 +1901,31 @@ def test_a_recycling_worker_process_execs_in_place(redis_url, client, tmp_path):
     assert proc.returncode == 0, err.decode()[-3000:]
     # Each new image saw the recycle note and reported a routine comeback.
     assert err.count(b"Worker back after recycling") == 2
+
+
+def test_a_worker_stopped_while_recycling_stops(redis_url, client, tmp_path):
+    """SIGTERM sent as the worker recycles stops the fresh image, too.
+
+    A stop that arrived after ``run`` chose to recycle used to set only the
+    old image's flag, which ``exec`` discarded: the fresh image ran on, and
+    the pod never stopped.  The signal is sent the moment the worker
+    announces the recycle, inside the window between the loop and ``exec``.
+    """
+    proc = _start_recycling_worker(redis_url, tmp_path)
+    assert proc.stderr is not None
+    log: list[bytes] = []
+    try:
+        _e2e_queue(client).enqueue(Job.new(dict(ONE_HOP)))
+        for line in proc.stderr:
+            log.append(line)
+            if b"alert worker_recycled: Worker recycled" in line:
+                proc.send_signal(signal.SIGTERM)
+                break
+        else:
+            pytest.fail("the worker exited before it recycled")
+        _, err = proc.communicate(timeout=60)
+    finally:
+        proc.kill()
+    # Taken by the old image before it chose not to exec, or by the fresh
+    # one as soon as it unblocked the signal: either way the process exits.
+    assert proc.returncode == 0, (b"".join(log) + err).decode()[-3000:]

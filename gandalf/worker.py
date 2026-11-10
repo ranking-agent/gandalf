@@ -596,8 +596,61 @@ def restart_in_place(heartbeat_file: str = "") -> None:
     os.execv(sys.executable, [sys.executable, "-m", "gandalf.worker"])
 
 
+#: Signals that stop a worker after its current job.
+_STOP_SIGNALS = {signal.SIGTERM, signal.SIGINT}
+
+
+class StopSignalListener:
+    """Turns SIGTERM / SIGINT into :meth:`Worker.stop`, without losing one to exec.
+
+    The signals stay blocked in every thread (:func:`main` blocks them before
+    it starts any), so the kernel holds each one pending until this listener
+    takes it.  A Python signal handler can't give that: the kernel may hand
+    the signal to any thread, and the handler runs on the main thread later,
+    possibly after :func:`main` has decided to recycle -- the stop then lands
+    in an image that ``exec`` is about to discard, and the fresh image never
+    stops.  With the listener closed, a signal stays pending, and the blocked
+    mask and the pending signal both survive ``exec``: the next image's
+    listener takes it as soon as it starts.
+
+    Polls :func:`signal.sigpending` rather than blocking in
+    :func:`signal.sigwait`, so :meth:`close` can end it; a signal it sees is
+    pending, so the ``sigwait`` that takes it returns at once.
+    """
+
+    def __init__(self, worker: Worker, poll_seconds: float = 0.05) -> None:
+        self.worker = worker
+        self.poll_seconds = poll_seconds
+        self._closing = threading.Event()
+        self._thread = threading.Thread(
+            target=self._listen, daemon=True, name="gandalf-stop-signals"
+        )
+        self._thread.start()
+
+    def _listen(self) -> None:
+        while not self._closing.wait(self.poll_seconds):
+            if signal.sigpending() & _STOP_SIGNALS:
+                signum = signal.sigwait(_STOP_SIGNALS)
+                logger.info("Signal %d: stopping after the current job", signum)
+                self.worker.stop()
+
+    def close(self) -> None:
+        """Stop taking signals; one already taken has stopped the worker."""
+        self._closing.set()
+        self._thread.join()
+
+
 def main() -> int:
     """Entry point for ``python -m gandalf.worker``."""
+    # Every thread must block the stop signals; see StopSignalListener.  An
+    # image started by exec has them blocked from its first instruction, so
+    # all its threads inherit that.  The first image does not: native
+    # extensions start threads at import (numpy's BLAS pool among them),
+    # before this runs, and the kernel would deliver to one of them and kill
+    # the process.  So the first image blocks them and becomes a second one,
+    # before the graph loads: one more interpreter start, about a second.
+    if not _STOP_SIGNALS <= signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS):
+        restart_in_place()
     configure_logging(
         getattr(logging, settings.log_level, logging.INFO), fmt=settings.log_format
     )
@@ -629,12 +682,7 @@ def main() -> int:
         # its metrics correctly either way.
         start_http_server(settings.worker_metrics_port, registry=metrics_registry())
 
-    def _stop(signum: int, _frame: object) -> None:
-        logger.info("Signal %d: stopping after the current job", signum)
-        worker.stop()
-
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
+    stop_signals = StopSignalListener(worker)
 
     try:
         done = worker.run()
@@ -654,7 +702,10 @@ def main() -> int:
     if worker.notifier is not None and worker.notifier.webhook is not None:
         worker.notifier.webhook.flush()
     otel.flush()
-    if worker.recycled and settings.worker_recycle_in_place:
+    # Decide only once nothing takes signals: one taken already stopped the
+    # worker, and one still to come stays pending, for the next image.
+    stop_signals.close()
+    if worker.recycled and settings.worker_recycle_in_place and not worker.stopping:
         logger.info("Worker recycling in place after %d jobs", done)
         restart_in_place(settings.worker_heartbeat_file)
     logger.info("Worker exiting after %d jobs", done)
