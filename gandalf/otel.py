@@ -175,6 +175,53 @@ def _record_pk(target: Any, context: Any = None) -> None:
         target.set_attribute("pk", pk)
 
 
+class _EmptyOtelContext:
+    """ASGI wrapper that runs every request with no OpenTelemetry context.
+
+    uvicorn can leak one request's context into every later request on the
+    same keep-alive connection.  When a request body is large enough that
+    uvicorn pauses reading the socket, the app's ``receive()`` resumes it
+    from inside the request task, and asyncio re-registers the socket reader
+    with a copy of that task's context -- the one where the request's server
+    span is current.  Every later request on the connection is then started
+    from that copy.  ``OpenTelemetryMiddleware`` sees a span already active,
+    makes the new request an INTERNAL child of it, and ignores the request's
+    own ``traceparent``: in Jaeger, queries from unrelated traces pile up
+    under whichever request first sent a large body on that connection.
+
+    Detaching to an empty context before the OTel middleware runs lets it
+    extract the incoming ``traceparent`` for every request.  The cost is one
+    contextvar set/reset per request (well under a microsecond).
+    """
+
+    def __init__(self, app: Any) -> None:
+        from opentelemetry import context
+
+        self.app = app
+        self._context = context
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        token = self._context.attach(self._context.Context())
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self._context.detach(token)
+
+
+def _start_requests_without_otel_context(app: Any) -> None:
+    """Wrap *app*'s middleware stack, OTel middleware included, in :class:`_EmptyOtelContext`.
+
+    Wraps ``build_middleware_stack`` the way ``FastAPIInstrumentor`` does, so
+    it must run after ``instrument_app`` to end up outermost.
+    """
+    build_instrumented_stack = app.build_middleware_stack
+
+    def build_middleware_stack() -> Any:
+        return _EmptyOtelContext(build_instrumented_stack())
+
+    app.build_middleware_stack = build_middleware_stack
+
+
 def init_otel(app=None) -> None:
     """Build the OpenTelemetry SDK for the current process and instrument *app*.
 
@@ -237,6 +284,7 @@ def init_otel(app=None) -> None:
             # they are more so noisy than useful, exclude them from traces
             exclude_spans=["receive", "send"],
         )
+        _start_requests_without_otel_context(app)
     _provider = provider
     # From this provider rather than the global one: a process sets the
     # global provider once, and tests build more than one.

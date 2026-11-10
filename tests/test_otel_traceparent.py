@@ -20,6 +20,7 @@ require the instrumentation packages.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import threading
 import time
@@ -291,3 +292,104 @@ def test_async_callback_includes_traceparent_without_incoming(
     trace_id = _trace_id_of(cb["headers"]["traceparent"])
     assert len(trace_id) == 32
     assert int(trace_id, 16) != 0
+
+
+@pytest.fixture
+def uvicorn_url(otel_server, request):
+    """Serve the OTel-enabled app with a real uvicorn server on a free port.
+
+    ``TestClient`` bypasses uvicorn's socket handling, which is where the
+    keep-alive context leak lives, so these tests need a real server.  The
+    HTTP protocol implementation comes from ``request.param``.
+    """
+    import uvicorn
+
+    config = uvicorn.Config(
+        otel_server.APP,
+        host="127.0.0.1",
+        port=0,
+        http=request.param,
+        lifespan="off",
+        log_level="warning",
+    )
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    assert _wait_for(lambda: server.started), "uvicorn never started"
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5.0)
+
+
+def _traceparent(n: int) -> str:
+    """A distinct, valid W3C ``traceparent`` for the *n*-th request."""
+    return f"00-{n + 1:032x}-{n + 1:016x}-01"
+
+
+# Large enough that uvicorn pauses reading the socket while the app consumes
+# the body (its flow-control high-water mark is 64 KiB).
+_LARGE_BODY_PADDING = 2 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "uvicorn_url",
+    [
+        "h11",
+        pytest.param(
+            "httptools",
+            marks=pytest.mark.skipif(
+                importlib.util.find_spec("httptools") is None,
+                reason="httptools not installed",
+            ),
+        ),
+    ],
+    indirect=True,
+)
+def test_keepalive_requests_after_large_body_keep_their_own_traceparent(
+    uvicorn_url,
+):
+    """Each ``/query`` on a reused connection is a SERVER span under its own caller.
+
+    A large request body makes uvicorn pause and resume reading the socket
+    from inside that request's context, which used to leave its server span
+    active for every later request on the connection: they became INTERNAL
+    children of the first request and their ``traceparent`` was ignored.
+    """
+    import httpx
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+    from opentelemetry.trace import SpanKind
+
+    exporter = InMemorySpanExporter()
+    gandalf.otel._provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    query = json.dumps({"message": _QUERY_MESSAGE}).encode()
+    # Trailing whitespace is valid JSON, so the large body is still a valid query.
+    bodies = [query + b" " * _LARGE_BODY_PADDING, query, query]
+    with httpx.Client(base_url=uvicorn_url, timeout=30.0) as client:
+        for n, body in enumerate(bodies):
+            resp = client.post(
+                "/query",
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "traceparent": _traceparent(n),
+                },
+            )
+            assert resp.status_code == 200, resp.text
+
+    request_spans = [
+        span for span in exporter.get_finished_spans() if span.name == "POST /query"
+    ]
+    assert [
+        (span.kind, f"{span.context.trace_id:032x}", f"{span.parent.span_id:016x}")
+        for span in request_spans
+    ] == [
+        (SpanKind.SERVER, _traceparent(n).split("-")[1], _traceparent(n).split("-")[2])
+        for n in range(len(bodies))
+    ]
