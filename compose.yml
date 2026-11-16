@@ -27,7 +27,7 @@ services:
   # docker compose --profile queue up --build
   # with GANDALF_QUEUE_URL=redis://redis:6379/0 in the environment or .env.
   # The queue must survive a Redis restart and must never be evicted:
-  # every write goes to the append-only file in a host directory, and at a
+  # every write goes to the append-only file on a volume, and at a
   # memory limit Redis refuses writes (the API answers 503) rather than
   # dropping keys.  Gandalf logs and alerts (redis_unsafe) if either is off.
   gandalf_queue:
@@ -43,10 +43,13 @@ services:
       - --maxmemory-policy
       - noeviction
     volumes:
-      # Host directory for Redis's files (appendonlydir/, dump.rdb);
-      # override with GANDALF_QUEUE_DATA_DIR.  Redis's image makes it owned
-      # by its redis user (uid 999) on start.
-      - ${GANDALF_QUEUE_DATA_DIR:-./queue_data}:/data
+      # Redis's files (appendonlydir/, dump.rdb) go in a named volume by
+      # default.  Set GANDALF_QUEUE_DATA_DIR to a host path (e.g.
+      # ./queue_data) to bind-mount a directory instead, but only on a
+      # native Linux filesystem: on Docker Desktop (Windows/macOS), WSL
+      # /mnt/* paths, NFS or rootless Docker the AOF rewrite cannot rename
+      # its manifest ("Permission denied") and the AOF grows without bound.
+      - ${GANDALF_QUEUE_DATA_DIR:-gandalf_queue_data}:/data
     networks:
       - shepherd
 
@@ -69,6 +72,9 @@ services:
       - ${GANDALF_GRAPH_DIR:-./translatorkg/gandalf_mmap}:/data/graph:ro
     networks:
       - shepherd
+
+volumes:
+  gandalf_queue_data:
 
 networks:
   # Shepherd's compose network, so Gandalf can reach its `jaeger` service and
