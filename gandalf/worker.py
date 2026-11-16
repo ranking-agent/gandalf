@@ -76,6 +76,7 @@ from gandalf.jobs import (
     default_consumer_name,
     keepalive,
     log_redis_problems,
+    wait_for_redis,
     redis_client,
     summarize_query,
 )
@@ -188,6 +189,11 @@ class Worker:
         Returns:
             How many jobs this worker finished.
         """
+        # Redis may still be starting or loading its append-only file; wait
+        # for it rather than crash and reload the graph on every restart.
+        if not wait_for_redis(self.queue.client, self._stop):
+            logger.info("Worker %s stopped while waiting for Redis", self.consumer)
+            return 0
         log_redis_problems(self.queue.client)
         self.queue.ensure_group_at_startup()
         logger.info(

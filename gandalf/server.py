@@ -310,8 +310,14 @@ def open_queue() -> None:
         backlog_seconds=settings.alert_queue_backlog_seconds,
         stuck_seconds=settings.alert_stuck_seconds,
     )
-    log_redis_problems(client)
-    QUEUE.ensure_group_at_startup()
+    # Redis not up yet (or still loading its append-only file) must not
+    # fail the boot: /ready answers 503 until it is, the workers create the
+    # group once they reach it, and the monitor checks the configuration.
+    if log_redis_problems(client) is not None:
+        try:
+            QUEUE.ensure_group_at_startup()
+        except redis.RedisError as exc:
+            logger.warning("Could not create the consumer group yet: %s", exc)
     MONITOR.start()
     logger.info(
         "Queue mode: jobs go to %s on %s", settings.queue_stream, settings.queue_url

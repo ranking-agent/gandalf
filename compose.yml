@@ -17,6 +17,12 @@ services:
       # worker service below instead of in this process.  Leave empty to
       # run them in-process.
       GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://gandalf_queue:6379/0}
+    depends_on:
+      # In queue mode, start once Redis answers; without the queue profile
+      # there is no Redis to wait for (required: false).
+      gandalf_queue:
+        condition: service_healthy
+        required: false
     volumes:
       # Host directory holding the built graph; override with GANDALF_GRAPH_DIR.
       - ${GANDALF_GRAPH_DIR:-./translatorkg/gandalf_mmap}:/data/graph:ro
@@ -42,6 +48,15 @@ services:
       - everysec
       - --maxmemory-policy
       - noeviction
+    # Healthy once Redis answers PING with PONG: not while it is starting
+    # or still loading its append-only file (it answers LOADING then).  The
+    # worker and API start only then; start_period covers a long AOF load.
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 5m
     volumes:
       # Redis's files (appendonlydir/, dump.rdb) go in a named volume by
       # default.  Set GANDALF_QUEUE_DATA_DIR to a host path (e.g.
@@ -58,7 +73,9 @@ services:
     profiles: [queue]
     command: ["python", "-m", "gandalf.worker"]
     restart: unless-stopped
-    depends_on: [gandalf_queue]
+    depends_on:
+      gandalf_queue:
+        condition: service_healthy
     environment:
       GANDALF_GRAPH_PATH: /data/graph
       GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://gandalf_queue:6379/0}

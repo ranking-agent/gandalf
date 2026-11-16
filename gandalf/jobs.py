@@ -665,6 +665,73 @@ def _decode_str(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _describe_redis(client: redis.Redis) -> str:
+    """host:port/db of *client*, without credentials, for log lines."""
+    kw = client.connection_pool.connection_kwargs
+    if "path" in kw:
+        return f"unix:{kw['path']}"
+    return f"{kw.get('host', '?')}:{kw.get('port', '?')}/{kw.get('db', 0)}"
+
+
+def wait_for_redis(
+    client: redis.Redis,
+    stop: Optional[threading.Event] = None,
+    *,
+    max_delay: float = 5.0,
+    report_every: float = 30.0,
+) -> bool:
+    """Block until Redis answers PING; at startup, before anything else.
+
+    Redis that is not up yet, or still loading its append-only file
+    (``LOADING``), is waited out quietly: one warning when the wait starts,
+    one line every *report_every* seconds while it lasts, and one when Redis
+    answers, rather than a line or a crash per attempt.
+
+    Args:
+        client: The Redis to wait for.
+        stop: Ends the wait early when set (a stop signal).
+        max_delay: Longest pause between attempts.
+        report_every: Seconds between "still waiting" lines.
+
+    Returns:
+        True once Redis answered; False if *stop* was set first.
+    """
+    stop = stop if stop is not None else threading.Event()
+    started = time.monotonic()
+    last_report = None
+    delay = 0.25
+    while True:
+        try:
+            client.ping()
+        except redis.RedisError as exc:
+            now = time.monotonic()
+            reason = f"{type(exc).__name__}: {exc}"
+            if last_report is None:
+                logger.warning(
+                    "Waiting for Redis at %s (%s)", _describe_redis(client), reason
+                )
+                last_report = now
+            elif now - last_report >= report_every:
+                logger.warning(
+                    "Still waiting for Redis at %s after %.0fs (%s)",
+                    _describe_redis(client),
+                    now - started,
+                    reason,
+                )
+                last_report = now
+            if stop.wait(delay):
+                return False
+            delay = min(delay * 2, max_delay)
+            continue
+        if last_report is not None:
+            logger.info(
+                "Redis at %s is up after %.0fs",
+                _describe_redis(client),
+                time.monotonic() - started,
+            )
+        return True
+
+
 def log_redis_problems(client: redis.Redis) -> Optional[RedisHealth]:
     """Log, as errors, every way this Redis can lose the queue; at startup.
 
@@ -674,7 +741,11 @@ def log_redis_problems(client: redis.Redis) -> Optional[RedisHealth]:
     try:
         health = RedisHealth.read(client)
     except redis.RedisError as exc:
-        logger.warning("Could not read Redis's configuration: %s", exc)
+        logger.warning(
+            "Redis not reachable yet, its configuration is not checked at "
+            "startup: %s",
+            exc,
+        )
         return None
     for problem in health.problems():
         logger.error("Redis can lose the job queue: %s", problem)
