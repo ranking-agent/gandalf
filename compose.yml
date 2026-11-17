@@ -17,6 +17,12 @@ services:
       # worker service below instead of in this process.  Leave empty to
       # run them in-process.
       GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://gandalf_queue:6379/0}
+    depends_on:
+      # In queue mode, start once Redis answers; without the queue profile
+      # there is no Redis to wait for (required: false).
+      gandalf_queue:
+        condition: service_healthy
+        required: false
     volumes:
       # Host directory holding the built graph; override with GANDALF_GRAPH_DIR.
       - ${GANDALF_GRAPH_DIR:-./translatorkg/gandalf_mmap}:/data/graph:ro
@@ -27,7 +33,7 @@ services:
   # docker compose --profile queue up --build
   # with GANDALF_QUEUE_URL=redis://redis:6379/0 in the environment or .env.
   # The queue must survive a Redis restart and must never be evicted:
-  # every write goes to the append-only file in a host directory, and at a
+  # every write goes to the append-only file on a volume, and at a
   # memory limit Redis refuses writes (the API answers 503) rather than
   # dropping keys.  Gandalf logs and alerts (redis_unsafe) if either is off.
   gandalf_queue:
@@ -42,11 +48,23 @@ services:
       - everysec
       - --maxmemory-policy
       - noeviction
+    # Healthy once Redis answers PING with PONG: not while it is starting
+    # or still loading its append-only file (it answers LOADING then).  The
+    # worker and API start only then; start_period covers a long AOF load.
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 5m
     volumes:
-      # Host directory for Redis's files (appendonlydir/, dump.rdb);
-      # override with GANDALF_QUEUE_DATA_DIR.  Redis's image makes it owned
-      # by its redis user (uid 999) on start.
-      - ${GANDALF_QUEUE_DATA_DIR:-./queue_data}:/data
+      # Redis's files (appendonlydir/, dump.rdb) go in a named volume by
+      # default.  Set GANDALF_QUEUE_DATA_DIR to a host path (e.g.
+      # ./queue_data) to bind-mount a directory instead, but only on a
+      # native Linux filesystem: on Docker Desktop (Windows/macOS), WSL
+      # /mnt/* paths, NFS or rootless Docker the AOF rewrite cannot rename
+      # its manifest ("Permission denied") and the AOF grows without bound.
+      - ${GANDALF_QUEUE_DATA_DIR:-gandalf_queue_data}:/data
     networks:
       - shepherd
 
@@ -55,7 +73,9 @@ services:
     profiles: [queue]
     command: ["python", "-m", "gandalf.worker"]
     restart: unless-stopped
-    depends_on: [gandalf_queue]
+    depends_on:
+      gandalf_queue:
+        condition: service_healthy
     environment:
       GANDALF_GRAPH_PATH: /data/graph
       GANDALF_QUEUE_URL: ${GANDALF_QUEUE_URL:-redis://gandalf_queue:6379/0}
@@ -69,6 +89,9 @@ services:
       - ${GANDALF_GRAPH_DIR:-./translatorkg/gandalf_mmap}:/data/graph:ro
     networks:
       - shepherd
+
+volumes:
+  gandalf_queue_data:
 
 networks:
   # Shepherd's compose network, so Gandalf can reach its `jaeger` service and

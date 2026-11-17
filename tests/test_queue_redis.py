@@ -1929,3 +1929,96 @@ def test_a_worker_stopped_while_recycling_stops(redis_url, client, tmp_path):
     # Taken by the old image before it chose not to exec, or by the fresh
     # one as soon as it unblocked the signal: either way the process exits.
     assert proc.returncode == 0, (b"".join(log) + err).decode()[-3000:]
+
+
+def test_wait_for_redis_waits_quietly_for_a_late_redis():
+    """A Redis that comes up late is waited for: one warning, then 'up'."""
+    import logging
+
+    from gandalf.jobs import wait_for_redis
+
+    class _Records(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__(logging.INFO)
+            self.records: list[logging.LogRecord] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.records.append(record)
+
+    # Directly on the logger: the app's logging setup may stop propagation.
+    caplog = _Records()
+    jobs_logger = logging.getLogger("gandalf.jobs")
+    old_level = jobs_logger.level
+    jobs_logger.addHandler(caplog)
+    jobs_logger.setLevel(logging.INFO)
+    port = _free_port()
+    client = redis.Redis(port=port, socket_connect_timeout=0.2)
+    result: list[bool] = []
+    thread = threading.Thread(target=lambda: result.append(wait_for_redis(client)))
+    thread.start()
+    # redis-py retries inside one PING, so an attempt can take seconds; wait
+    # for the first failure to be logged, then several more attempts.
+    assert _wait_for(
+        lambda: any("aiting for Redis" in r.getMessage() for r in caplog.records),
+        timeout=15.0,
+    )
+    time.sleep(2.0)
+    assert thread.is_alive()
+    proc = _start_redis(port)
+    try:
+        thread.join(timeout=10)
+        assert result == [True]
+        waiting = [r for r in caplog.records if "aiting for Redis" in r.getMessage()]
+        assert len(waiting) == 1  # not one line per attempt
+        assert any("is up after" in r.getMessage() for r in caplog.records)
+    finally:
+        jobs_logger.removeHandler(caplog)
+        jobs_logger.setLevel(old_level)
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_wait_for_redis_ends_on_stop():
+    """A stop signal during the wait ends it, and says Redis never answered."""
+    from gandalf.jobs import wait_for_redis
+
+    client = redis.Redis(port=_free_port(), socket_connect_timeout=0.2)
+    stop = threading.Event()
+    threading.Timer(0.5, stop.set).start()
+    started = time.monotonic()
+    assert wait_for_redis(client, stop) is False
+    assert time.monotonic() - started < 5
+
+
+def test_worker_starts_before_redis_and_waits(graph, bmt):  # noqa: F811
+    """A worker started before Redis waits for it instead of dying."""
+    port = _free_port()
+    url = f"redis://127.0.0.1:{port}/0?socket_timeout=1&socket_connect_timeout=0.2"
+    client = redis_client(url)
+    queue = JobQueue(
+        client,
+        stream="s:jobs",
+        group="s:w",
+        dead_stream="s:dead",
+        max_deliveries=2,
+        claim_idle_seconds=5,
+    )
+    store = ResultStore(
+        client, prefix="s:result", ttl_seconds=60, chunk_bytes=1024, zstd_level=1
+    )
+    w = Worker(graph, bmt, queue, store, consumer="w1", block_seconds=0.2)
+    thread = threading.Thread(target=w.run, daemon=True)
+    thread.start()
+    proc = None
+    try:
+        time.sleep(1.5)
+        assert thread.is_alive()
+        proc = _start_redis(port)
+        queue.enqueue(Job.new(dict(ONE_HOP)))
+        assert _wait_for(lambda: w.jobs_done == 1, timeout=20.0)
+    finally:
+        w.stop()
+        thread.join(timeout=10)
+        if proc is not None:
+            proc.terminate()
+            proc.wait(timeout=10)
