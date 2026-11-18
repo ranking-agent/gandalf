@@ -228,6 +228,20 @@ query with `_SINGLE_PATH_FAST` off and on and compares the serialized bytes.
 `scripts/benchmarks/fast_path_ab.py` does the same comparison, with timings,
 on any graph and query set.
 
+**The general loop works an edge out once, not once per path.**  Results
+that are not single-path go through `_build_response`'s per-group loop, and
+on the Translator graph's largest generated queries that is most of them
+(2-68% fast path on the 0.3-1.1M-result two-hops) and most of the lookup's
+time.  What a real edge contributes to a result -- its dedup key and its
+marked Edge dict -- depends only on the edge and the direction it was
+matched in, so `edge_occurrences` holds both from the first time the edge is
+met: later paths through it cost a dict lookup and a set test, and every
+result binding the edge shares the one dict (it is one knowledge-graph entry
+either way).  So the loop must never change such a dict per result: it
+*reads* `_edge_id` rather than popping it, and the markers come off once,
+after the last result.  The dedup key is a small integer standing for the
+key tuple (`edge_key_ids`), so membership tests hash an int.
+
 **Interned source lists hold nothing per-edge.**  `EdgePropertyStore`
 keeps one Python list per distinct `sources` value and relies on there
 being a few thousand of them.  `source_record_urls` are unique per edge,
