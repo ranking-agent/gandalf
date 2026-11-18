@@ -1249,7 +1249,14 @@ def _build_response(
     edge_detail_map: dict = {}
     edge_urls_map: dict = {}
     query_edges = np.zeros(0, dtype=np.int64)
-    if pa_num_edges > 0 and pa_fwd_eidx.size:
+    # The distinct edges are a sort of every path's edges, so they are only
+    # listed where something reads them: the prefetch below (a full
+    # response), and _single_path_json's check for shared edge IDs (a graph
+    # whose build found some).  A dehydrated response over a graph with
+    # unique IDs -- every very large one -- needs neither.
+    id_store = graph.edge_id_store
+    ids_may_repeat = vector_json and id_store is not None and not id_store.unique
+    if pa_num_edges > 0 and pa_fwd_eidx.size and (not lightweight or ids_may_repeat):
         query_edges = np.unique(pa_fwd_eidx)
         query_edges = query_edges[query_edges >= 0]
         if len(query_edges) and not lightweight:
