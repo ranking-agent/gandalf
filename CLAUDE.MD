@@ -59,6 +59,7 @@ gandalf/
 ├── graph.py          # CSRGraph class (core data structure)
 ├── loader.py         # JSONL to graph conversion
 ├── edge_id_store.py  # Original edge IDs (memory-mapped JSON blob)
+├── node_categories.py  # Per-node category index (memory-mapped)
 ├── node_annotations.py  # Build-time node annotation (biothings_annotator)
 ├── trapi.py          # TRAPI 2.0 envelope, query parameters, timeouts
 ├── search/           # Search & path finding (package)
@@ -68,6 +69,7 @@ gandalf/
 │   ├── qualifiers.py     # Qualifier constraint matching
 │   ├── edge_constraints.py  # QEdge.constraints parsing & matching
 │   ├── query_edge.py     # Edge query with predicate/constraint filtering
+│   ├── edge_matches.py   # One query edge's matches, as parallel arrays
 │   ├── reconstruct.py    # Path reconstruction & join ordering
 │   ├── path_arrays.py    # Compact numpy path representation
 │   ├── path_finder.py    # 3-hop path finding functions
@@ -114,6 +116,47 @@ scripts/              # CLI entry points (gandalf-build, gandalf-query, gandalf-
 - **Bidirectional search**: Expands from both start and end nodes to minimize traversal
 - **Property storage**: Hash dicts keyed by `(src_idx, dst_idx, pred_idx)` tuples
 - **Node indexing**: Original string IDs mapped to integer indices for NumPy operations
+
+## Traversal works on arrays
+
+`query_edge` makes no Python object per candidate edge.  It reads the edges
+of many pinned nodes at once (`CSRGraph.edges_of`), filters them as boolean
+masks, and returns an `EdgeMatches` (`gandalf/search/edge_matches.py`):
+parallel `int32`/`bool` arrays, 17 bytes a match.  As a tuple per match, with
+a dict of its properties and an entry in a dedup set, a match cost several
+hundred bytes and a few microseconds; a hub's edges are millions of matches.
+Keep it that way:
+
+- **A filter is a mask over a step's edges**, never a test called per edge.
+  Qualifiers, sources and knowledge_level / agent_type are interned, so
+  `EdgeConstraints.permits_mask` tests each once per *distinct value* among
+  the edges (`EdgePropertyStore.pool_mask`) and indexes the verdicts back
+  out.  Only edge attribute constraints, whose data is unique to an edge,
+  are read edge by edge, last, on what passed everything else.
+- **A QNode's categories are checked against the category index**
+  (`graph.node_categories`, `gandalf/node_categories.py`): one small integer
+  per node naming which of the few hundred distinct category lists it has,
+  memory-mapped like the CSR arrays (`node_category_sets.npy`, lists in
+  `metadata.pkl`).  `save_mmap` writes it.  A graph saved before it existed
+  loads without it and falls back to reading each candidate node's record
+  from the node store (once per node per edge query, batched per step) --
+  the same answers, slower.  Node filters and node attribute constraints
+  always take that per-node route, on the nodes whose categories passed.
+- **Steps are bounded.**  Pinned nodes are read in runs of about
+  `TRAVERSAL_CHUNK_EDGES` candidate edges, so the working arrays stay a few
+  megabytes however many nodes are pinned.
+- **No dedup set.**  A match is one edge in one direction, and each pinned
+  node is traversed once (`_unique_in_order`), so nothing can be found twice.
+- **Match order is part of the output.**  Matches come pinned node by pinned
+  node, a node's direct matches before its inverse ones, and results follow
+  that order.  The nodes an edge discovers are bound for the next edge in
+  index order (`np.unique`), which is also the order the CSR arrays are laid
+  out in on disk.  `tests/test_query_edge.py` checks every traversal case
+  against a brute-force walk of all edges, at several step sizes, on a graph
+  with and without the category index.
+
+The per-node `neighbors_with_properties` family remains for the library's
+other callers (`path_finder`, `validation`); `lookup` does not use it.
 
 ## The TRAPI object model (`translator_tom`)
 
@@ -334,7 +377,8 @@ pruning (done in the loader so it covers both graph sources), the persisted
 `meta_kg.json` / `sri_testing_data.json`, the storage format of edge
 attributes (JSON arrays in `edge_properties.lmdb`, recorded as
 `edge_attributes_format` in `metadata.pkl`; `load_mmap` refuses a graph
-without it), the storage format of edge IDs (below), and the order of each
+without it), the storage format of edge IDs (below), the node category
+index (optional: a graph without it still loads), and the order of each
 edge's qualifiers (sorted by type, so it no longer depends on the build's
 `PYTHONHASHSEED`).  Everything else is
 computed per query.  When changing a serialization rule, check which side it

@@ -370,6 +370,7 @@ def _build_graph_from_source(
     graph.id_to_predicate = {idx: pred for pred, idx in predicate_to_idx.items()}
     graph.node_properties = node_properties
     graph.node_store = None
+    graph.node_categories = None  # written by save_mmap
 
     graph.fwd_targets = dst_sorted
     graph.fwd_predicates = pred_sorted

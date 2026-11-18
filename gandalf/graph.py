@@ -15,6 +15,8 @@ from gandalf.config import settings
 from gandalf.edge_id_store import EDGE_IDS_FORMAT, OFFSETS_FILE, EdgeIdStore
 from gandalf.memory import MemoryLedger
 from gandalf.lmdb_store import EDGE_ATTRIBUTES_FORMAT, LMDBPropertyStore
+from gandalf.node_categories import METADATA_KEY as NODE_CATEGORY_SETS_KEY
+from gandalf.node_categories import NODE_SETS_FILE, NodeCategoryIndex
 from gandalf.node_store import NodeStore
 
 logger = logging.getLogger(__name__)
@@ -261,6 +263,36 @@ class EdgePropertyStore:
         """
         return int(self._quals_idx[idx]), int(self._sources_idx[idx])
 
+    def pool_mask(self, field: str, edge_idxes: np.ndarray, test) -> np.ndarray:
+        """Whether each edge's interned *field* value passes *test*.
+
+        *test* runs once per distinct value among the edges -- a few thousand
+        at most, however many edges share them -- rather than once per edge.
+
+        Args:
+            field: ``"qualifiers"``, ``"sources"`` or ``"kl_at"`` (the
+                ``(knowledge_level, agent_type)`` pair).
+            edge_idxes: Forward-CSR positions of the edges to test.
+            test: ``value -> bool``, given the pool's own object (do not
+                change it).
+
+        Returns:
+            A boolean array parallel to *edge_idxes*.
+        """
+        indices, pool = {
+            "qualifiers": (self._quals_idx, self._quals_pool),
+            "sources": (self._sources_idx, self._sources_pool),
+            "kl_at": (self._kl_at_idx, self._kl_at_pool),
+        }[field]
+        codes, inverse = np.unique(indices[edge_idxes], return_inverse=True)
+        passed = np.fromiter(
+            (test(pool[code]) for code in codes.tolist()),
+            dtype=np.bool_,
+            count=len(codes),
+        )
+        mask: np.ndarray = passed[inverse]
+        return mask
+
     def get_kl_at(self, idx):
         """Get the ``(knowledge_level, agent_type)`` pair for an edge.
 
@@ -483,6 +515,11 @@ class CSRGraph:
 
         # Node store (LMDB) — None when using in-memory dicts (build time)
         self.node_store = None
+
+        # Per-node category index — written by save_mmap, mapped by
+        # load_mmap; None for a graph still held in memory (its node
+        # properties may yet change) or saved before the index existed.
+        self.node_categories: Optional[NodeCategoryIndex] = None
 
         # LMDB store (cold path) — set later by loader or load_mmap
         self.lmdb_store = None
@@ -769,6 +806,73 @@ class CSRGraph:
             return np.arange(start, end), pred_ids
         keep = np.flatnonzero(mask[pred_ids])
         return keep + start, pred_ids[keep]
+
+    def edges_of(
+        self,
+        node_idxes: np.ndarray,
+        incoming: bool = False,
+        predicate_mask: Optional[np.ndarray] = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Every edge out of (or into) each of *node_idxes*, as parallel arrays.
+
+        The array form of :meth:`neighbors_with_properties` /
+        :meth:`incoming_neighbors_with_properties` for many nodes at once:
+        no Python object is made per edge, so a traversal costs a few array
+        operations whatever the nodes' degrees.
+
+        Args:
+            node_idxes: Node indices (an integer array).
+            incoming: Read each node's incoming edges rather than its
+                outgoing ones.
+            predicate_mask: Optional :meth:`predicate_mask`; edges whose
+                predicate it rejects are left out.
+
+        Returns:
+            ``(owner, other, pred_ids, fwd_edge_idx)``: for each edge, the
+            position in *node_idxes* of the node it was read from, the node
+            at its other end, its predicate id, and its forward-CSR position.
+            Edges come node by node in the order given, and in CSR order
+            within a node.
+        """
+        if incoming:
+            offsets, predicates = self.rev_offsets, self.rev_predicates
+        else:
+            offsets, predicates = self.fwd_offsets, self.fwd_predicates
+
+        if len(node_idxes) == 1:
+            # One node's edges are a slice: no index arrays over the edges
+            # the predicate mask is about to reject.
+            node_idx = int(node_idxes[0])
+            start, end = int(offsets[node_idx]), int(offsets[node_idx + 1])
+            positions, pred_ids = self._positions_with_predicates(
+                predicates, start, end, None, predicate_mask
+            )
+            owner = np.zeros(len(positions), dtype=np.int64)
+        else:
+            starts = offsets[node_idxes]
+            counts = offsets[node_idxes + 1] - starts
+            owner = np.repeat(np.arange(len(node_idxes)), counts)
+            # Each node's run of consecutive positions, laid end to end.
+            positions = np.arange(len(owner)) + np.repeat(
+                starts - (np.cumsum(counts) - counts), counts
+            )
+            pred_ids = predicates[positions]
+            if predicate_mask is not None:
+                keep = predicate_mask[pred_ids]
+                owner, positions, pred_ids = (
+                    owner[keep],
+                    positions[keep],
+                    pred_ids[keep],
+                )
+
+        if incoming:
+            return (
+                owner,
+                self.rev_sources[positions],
+                pred_ids,
+                self.rev_to_fwd[positions],
+            )
+        return owner, self.fwd_targets[positions], pred_ids, positions
 
     def neighbors_with_properties(
         self,
@@ -1379,19 +1483,7 @@ class CSRGraph:
         np.save(directory / "rev_offsets.npy", self.rev_offsets)
         np.save(directory / "rev_to_fwd.npy", self.rev_to_fwd)
 
-        # Save small metadata as pickle (predicates + num_nodes only)
-        metadata = {
-            "num_nodes": self.num_nodes,
-            "predicate_to_idx": self.predicate_to_idx,
-            "edge_attributes_format": EDGE_ATTRIBUTES_FORMAT,
-            "edge_ids_format": EDGE_IDS_FORMAT,
-        }
-        if self.edge_id_store is not None:
-            metadata.update(self.edge_id_store.metadata())
-        with open(directory / "metadata.pkl", "wb") as f:
-            pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-        # Save node ID mappings and properties as LMDB
+        # Node ID mappings and properties, as they go into the node store
         node_id_to_idx = (
             dict(self.node_store.iter_id_to_idx())
             if isinstance(getattr(self, "node_store", None), NodeStore)
@@ -1402,6 +1494,27 @@ class CSRGraph:
             if isinstance(getattr(self, "node_store", None), NodeStore)
             else self.node_properties
         )
+
+        # Each node's categories as an index into the distinct category
+        # lists, so a traversal filters nodes by category without reading
+        # their records (see gandalf.node_categories)
+        node_categories = NodeCategoryIndex.build(self.num_nodes, node_properties)
+        node_categories.save(directory)
+
+        # Save small metadata as pickle (predicates + num_nodes only)
+        metadata = {
+            "num_nodes": self.num_nodes,
+            "predicate_to_idx": self.predicate_to_idx,
+            "edge_attributes_format": EDGE_ATTRIBUTES_FORMAT,
+            "edge_ids_format": EDGE_IDS_FORMAT,
+            **node_categories.metadata(),
+        }
+        if self.edge_id_store is not None:
+            metadata.update(self.edge_id_store.metadata())
+        with open(directory / "metadata.pkl", "wb") as f:
+            pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # Save node ID mappings and properties as LMDB
         NodeStore.build(
             directory / "node_store.lmdb",
             node_id_to_idx,
@@ -1583,6 +1696,23 @@ class CSRGraph:
                 idx: nid for nid, idx in graph.node_id_to_idx.items()
             }
             graph.node_properties = metadata["node_properties"]
+
+        # Per-node category index (absent from a graph saved before it existed)
+        node_sets_path = directory / NODE_SETS_FILE
+        if node_sets_path.exists() and NODE_CATEGORY_SETS_KEY in metadata:
+            graph.node_categories = NodeCategoryIndex(
+                _load_npy(node_sets_path, mmap_mode=mmap_mode),
+                metadata[NODE_CATEGORY_SETS_KEY],
+            )
+        else:
+            logger.info(
+                "  %s has no %s: a query node's categories are checked by "
+                "reading each candidate node's record. Rebuild the graph with "
+                "gandalf-build to check them from a mapped index instead.",
+                directory,
+                NODE_SETS_FILE,
+            )
+            graph.node_categories = None
         ledger.mark("node store")
 
         # Load edge properties - detect format

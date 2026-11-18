@@ -43,6 +43,7 @@ from gandalf.search.edge_constraints import EdgeConstraints
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
 from gandalf.search.gc_utils import GCMonitor, pause_gc, resume_gc
 from gandalf.search.node_filters import build_node_filters
+from gandalf.search.edge_matches import EdgeMatches
 from gandalf.search.query_edge import query_edge, query_subclass_edge
 from gandalf.search.reconstruct import reconstruct_paths
 
@@ -303,8 +304,8 @@ def _lookup_inner(
             query_graph = copy.deepcopy(subqgraph)
 
     # Store results for each edge query
-    # edge_id -> list of (subject_idx, predicate, object_idx) tuples
-    edge_results = {}
+    # edge_id -> EdgeMatches
+    edge_results: dict[str, EdgeMatches] = {}
 
     # Store inverse predicates for each edge (needed for path reconstruction)
     # edge_id -> set of inverse predicates
@@ -324,7 +325,7 @@ def _lookup_inner(
     # would cost a node-store read per node to produce and another to turn
     # back into an index for the next edge.  A pinned qnode whose ids are
     # all unknown to the graph is bound to nothing (not left unpinned).
-    bound_idxes: dict[str, list[int]] = {
+    bound_idxes: dict[str, Union[list[int], np.ndarray]] = {
         qnode_id: _resolve_node_idxes(graph, qnode["ids"])
         for qnode_id, qnode in subqgraph["nodes"].items()
         if len(qnode.get("ids", [])) > 0
@@ -453,28 +454,17 @@ def _lookup_inner(
             break
 
         # Bind both ends to the nodes this edge discovered, for the edges
-        # still to be queried
-        discovered_subjects = set()
-        discovered_objects = set()
-
-        for subj_idx, pred, obj_idx, via_inverse, _fwd_edge_idx in edge_matches:
-            if via_inverse:
-                # Edge was found through inverse lookup: the stored edge is
-                # subj_idx -> obj_idx, but the query direction is reversed.
-                # So subj_idx corresponds to the query's object node and
-                # obj_idx corresponds to the query's subject node.
-                discovered_subjects.add(obj_idx)
-                discovered_objects.add(subj_idx)
-            else:
-                discovered_subjects.add(subj_idx)
-                discovered_objects.add(obj_idx)
-
+        # still to be queried.  A match found through the inverse lookup is
+        # stored the other way round from the query, so each end is read in
+        # the query's direction.  The nodes are kept sorted: the next edge
+        # then reads the graph's arrays in index order, which is the order
+        # they are laid out in on disk.
         for qnode_id, discovered in (
-            (next_edge["subject"], discovered_subjects),
-            (next_edge["object"], discovered_objects),
+            (next_edge["subject"], np.unique(edge_matches.query_subj)),
+            (next_edge["object"], np.unique(edge_matches.query_obj)),
         ):
             if len(discovered) > 0:
-                bound_idxes[qnode_id] = list(discovered)
+                bound_idxes[qnode_id] = discovered
                 discovered_counts[qnode_id] = len(discovered)
 
         # Remove processed edge
