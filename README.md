@@ -114,7 +114,12 @@ graph.save_mmap("data/processed/gandalf_mmap")
 > `node_category_sets.npy`, a small memory-mapped index of each node's
 > categories, so a query node's `categories` are checked without reading
 > every candidate node's record.  An old graph still loads and answers the
-> same; it just keeps checking them the slower way.
+> same; it just keeps checking them the slower way.  To give an existing
+> graph the index without rebuilding it (it reads the node store once):
+>
+> ```bash
+> python -m gandalf.node_categories data/processed/gandalf_mmap
+> ```
 
 ### Annotating nodes at build time
 

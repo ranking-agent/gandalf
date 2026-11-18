@@ -137,8 +137,9 @@ Keep it that way:
   (`graph.node_categories`, `gandalf/node_categories.py`): one small integer
   per node naming which of the few hundred distinct category lists it has,
   memory-mapped like the CSR arrays (`node_category_sets.npy`, lists in
-  `metadata.pkl`).  `save_mmap` writes it.  A graph saved before it existed
-  loads without it and falls back to reading each candidate node's record
+  `metadata.pkl`).  `save_mmap` writes it, and
+  `python -m gandalf.node_categories GRAPH_DIR` adds it to a graph already
+  built.  A graph saved before it existed loads without it and falls back to reading each candidate node's record
   from the node store (once per node per edge query, batched per step) --
   the same answers, slower.  Node filters and node attribute constraints
   always take that per-node route, on the nodes whose categories passed.

@@ -45,6 +45,13 @@ into orjson Fragments; results are counted and fingerprinted through
 labels a query in the report. `parameters` (`subclass`, `subclass_depth`,
 `dehydrated`, `filter_config`) are applied exactly as the server applies them.
 
+Both `bench_lookup.py` and `lookup_breakdown.py` refuse a query whose joins
+exceed `--path-cap` intermediate paths, 5,000,000 by default: the cap
+`generate_queries.py` probes with, so every query it kept runs to the end.
+The server's own limit is `GANDALF_MAX_PATH_LIMIT` (200,000 unless set); pass
+that as `--path-cap` to measure what the server would do.  A refused query
+returns no results, and both scripts say so rather than report it as empty.
+
 ### What each run does
 
 For every query:

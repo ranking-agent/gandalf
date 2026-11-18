@@ -360,6 +360,9 @@ def bench_query(
     on_run("profiled ", profiled_ms)
     tree = profile_tree(profiled) or {}
     record["results"] = len(response_results(profiled))
+    # "QueryTooLarge" or "Timeout" when the lookup was refused or cut short:
+    # its zero results are then not the query's answer.
+    record["status"] = profiled.get("status")
     record["fingerprint"] = fingerprint(profiled)
     del profiled
     record["profiled_ms"] = profiled_ms
@@ -554,7 +557,9 @@ def print_compare(base: dict, new: dict) -> bool:
 def cmd_run(args) -> int:
     from gandalf.biolink import make_toolkit
     from gandalf.graph import CSRGraph
+    from gandalf.search import reconstruct
 
+    reconstruct.MAX_PATH_LIMIT = args.path_cap
     graph_dir, queries = resolve_graph(args)
     if args.only:
         queries = [q for q in queries if any(s in q["name"] for s in args.only)]
@@ -583,6 +588,11 @@ def cmd_run(args) -> int:
         print(
             f"  -> median {_fmt_ms(record['median_ms'])}"
             f"  ({record['results']:,} results)"
+            + (
+                f"  ** {record['status']}: not the query's answer; see --path-cap **"
+                if record["status"] in ("QueryTooLarge", "Timeout")
+                else ""
+            )
         )
         report["queries"].append(record)
 
@@ -638,6 +648,12 @@ def main(argv=None) -> int:
     run.add_argument("--label", help="name for this run (default: git commit)")
     run.add_argument("--out", help="save the report as JSON here")
     run.add_argument("--compare", help="saved report to compare this run against")
+    run.add_argument(
+        "--path-cap",
+        type=int,
+        default=5_000_000,
+        help="refuse a query whose joins exceed this many intermediate paths (default: generate_queries.py's own cap, so the queries it kept all run; the server's is GANDALF_MAX_PATH_LIMIT, 200,000 unless set)",
+    )
     run.set_defaults(func=cmd_run)
 
     compare = sub.add_parser("compare", help="compare two saved reports")
