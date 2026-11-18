@@ -994,6 +994,9 @@ def breakdown(
     response, tracker, cap = _instrumented_run(graph, bmt, body, kwargs, build)
     results = response["message"]["results"]
     rec["results"] = _result_count(results)
+    # "QueryTooLarge" or "Timeout" when the lookup was refused or cut short:
+    # its zero results are then not the query's answer.
+    rec["status"] = response.get("status")
     tree = profile_tree(response) or {}
     time_rec["stages"] = {
         "subclass_rewrite": stage_ms(tree, ("subclass_rewrite",)) / 1000,
@@ -1184,7 +1187,12 @@ def print_report(rec: dict, out=print, fold: float = 0.005) -> None:
     t = rec["time"]
     out(f"== {rec['name']} ==")
     if "paths" not in rec:
-        out(f"{rec.get('results', 0):,} results; response building did not run\n")
+        why = (
+            f"the lookup ended with status {rec['status']} (see --path-cap)"
+            if rec.get("status") in ("QueryTooLarge", "Timeout")
+            else "response building did not run"
+        )
+        out(f"{rec.get('results', 0):,} results; {why}\n")
         return
     shape = rec["shape"]
     kg = rec["kg"]
@@ -1426,11 +1434,20 @@ def main(argv=None) -> int:
         help="also trace Python allocations (slow; use with --only)",
     )
     parser.add_argument("--out", help="write the measurements as JSON here")
+    parser.add_argument(
+        "--path-cap",
+        type=int,
+        default=5_000_000,
+        help="refuse a query whose joins exceed this many intermediate paths (default: generate_queries.py's own cap, so the queries it kept all run; the server's is GANDALF_MAX_PATH_LIMIT, 200,000 unless set)",
+    )
     args = parser.parse_args(argv)
     args.repeat = max(args.repeat, 1)
 
     from gandalf.biolink import make_toolkit
     from gandalf.graph import CSRGraph
+    from gandalf.search import reconstruct
+
+    reconstruct.MAX_PATH_LIMIT = args.path_cap
 
     queries = load_queries(Path(args.queries))
     if args.only:

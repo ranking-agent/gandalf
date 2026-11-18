@@ -6,7 +6,7 @@ import time
 import uuid
 import weakref
 from collections import defaultdict
-from typing import Any, Optional, Union, cast
+from typing import Any, Optional, Union
 
 import numpy as np
 import orjson
@@ -43,6 +43,7 @@ from gandalf.search.edge_constraints import EdgeConstraints
 from gandalf.search.expanders import PredicateExpander, QualifierExpander
 from gandalf.search.gc_utils import GCMonitor, pause_gc, resume_gc
 from gandalf.search.node_filters import build_node_filters
+from gandalf.search.edge_matches import EdgeMatches
 from gandalf.search.query_edge import query_edge, query_subclass_edge
 from gandalf.search.reconstruct import reconstruct_paths
 
@@ -303,8 +304,8 @@ def _lookup_inner(
             query_graph = copy.deepcopy(subqgraph)
 
     # Store results for each edge query
-    # edge_id -> list of (subject_idx, predicate, object_idx) tuples
-    edge_results = {}
+    # edge_id -> EdgeMatches
+    edge_results: dict[str, EdgeMatches] = {}
 
     # Store inverse predicates for each edge (needed for path reconstruction)
     # edge_id -> set of inverse predicates
@@ -324,7 +325,7 @@ def _lookup_inner(
     # would cost a node-store read per node to produce and another to turn
     # back into an index for the next edge.  A pinned qnode whose ids are
     # all unknown to the graph is bound to nothing (not left unpinned).
-    bound_idxes: dict[str, list[int]] = {
+    bound_idxes: dict[str, Union[list[int], np.ndarray]] = {
         qnode_id: _resolve_node_idxes(graph, qnode["ids"])
         for qnode_id, qnode in subqgraph["nodes"].items()
         if len(qnode.get("ids", [])) > 0
@@ -453,28 +454,17 @@ def _lookup_inner(
             break
 
         # Bind both ends to the nodes this edge discovered, for the edges
-        # still to be queried
-        discovered_subjects = set()
-        discovered_objects = set()
-
-        for subj_idx, pred, obj_idx, via_inverse, _fwd_edge_idx in edge_matches:
-            if via_inverse:
-                # Edge was found through inverse lookup: the stored edge is
-                # subj_idx -> obj_idx, but the query direction is reversed.
-                # So subj_idx corresponds to the query's object node and
-                # obj_idx corresponds to the query's subject node.
-                discovered_subjects.add(obj_idx)
-                discovered_objects.add(subj_idx)
-            else:
-                discovered_subjects.add(subj_idx)
-                discovered_objects.add(obj_idx)
-
+        # still to be queried.  A match found through the inverse lookup is
+        # stored the other way round from the query, so each end is read in
+        # the query's direction.  The nodes are kept sorted: the next edge
+        # then reads the graph's arrays in index order, which is the order
+        # they are laid out in on disk.
         for qnode_id, discovered in (
-            (next_edge["subject"], discovered_subjects),
-            (next_edge["object"], discovered_objects),
+            (next_edge["subject"], np.unique(edge_matches.query_subj)),
+            (next_edge["object"], np.unique(edge_matches.query_obj)),
         ):
             if len(discovered) > 0:
-                bound_idxes[qnode_id] = list(discovered)
+                bound_idxes[qnode_id] = discovered
                 discovered_counts[qnode_id] = len(discovered)
 
         # Remove processed edge
@@ -1259,7 +1249,14 @@ def _build_response(
     edge_detail_map: dict = {}
     edge_urls_map: dict = {}
     query_edges = np.zeros(0, dtype=np.int64)
-    if pa_num_edges > 0 and pa_fwd_eidx.size:
+    # The distinct edges are a sort of every path's edges, so they are only
+    # listed where something reads them: the prefetch below (a full
+    # response), and _single_path_json's check for shared edge IDs (a graph
+    # whose build found some).  A dehydrated response over a graph with
+    # unique IDs -- every very large one -- needs neither.
+    id_store = graph.edge_id_store
+    ids_may_repeat = vector_json and id_store is not None and not id_store.unique
+    if pa_num_edges > 0 and pa_fwd_eidx.size and (not lightweight or ids_may_repeat):
         query_edges = np.unique(pa_fwd_eidx)
         query_edges = query_edges[query_edges >= 0]
         if len(query_edges) and not lightweight:
@@ -1307,9 +1304,19 @@ def _build_response(
     content_keys_by_pools: dict[tuple, tuple] = {}
 
     # Each real edge's Edge dict for a full response, built once.  The
-    # general loop copies it into every result that binds the edge; the
+    # general loop marks a copy of it (see edge_occurrences); the
     # single-path fast path uses it as is.
     edge_templates: dict[int, InFlightEdge] = {}
+
+    # For the general loop: what a real edge contributes to every result it
+    # appears in, per direction it was matched in (direct, inverse) -- its
+    # dedup key, as a small integer standing for the key tuple, and its
+    # marked Edge dict.  Both depend on the edge and the direction alone, so
+    # they are worked out the first time the edge is met, not once per path
+    # through it, and every result binding the edge shares the one dict
+    # (it is one knowledge-graph entry either way).
+    edge_occurrences: tuple[dict[int, tuple], dict[int, tuple]] = ({}, {})
+    edge_key_ids: dict[tuple, int] = {}
 
     # For the single-path fast path below: the non-subclass edge columns, the
     # node columns at each end of every subclass edge column, and each real
@@ -1565,9 +1572,20 @@ def _build_response(
                     # Identity match: never bound, never in the KG
                     continue
 
-                predicate = idx_to_predicate[preds_row[col]]
                 is_inverse = via_inv_row[col]
                 fwd_eidx = fwd_eidx_row[col]
+
+                # A real edge met before, in this direction: only whether
+                # this result already binds an edge like it is left to check.
+                occurrence = edge_occurrences[is_inverse].get(fwd_eidx)
+                if occurrence is not None:
+                    seen_keys = edge_seen_keys[qedge_id]
+                    if occurrence[0] not in seen_keys:
+                        seen_keys.add(occurrence[0])
+                        edge_bindings_by_qedge[qedge_id].append(occurrence[1])
+                    continue
+
+                predicate = idx_to_predicate[preds_row[col]]
 
                 # Determine actual (stored) edge direction
 
@@ -1596,51 +1614,55 @@ def _build_response(
                         # sources, so only qualifiers tell parallel ones apart.
                         content_key = (content_key[0], ())
                     edge_key = (subj_id, predicate, obj_id) + content_key
+                edge_key_id = edge_key_ids.setdefault(edge_key, len(edge_key_ids))
 
-                if edge_key not in edge_seen_keys[qedge_id]:
-                    edge_seen_keys[qedge_id].add(edge_key)
-                    # Build edge dict only for unique edges
-                    edge_props: InFlightEdge
-                    if not lightweight and fwd_eidx >= 0:
-                        # A real edge's full dict depends only on the edge,
-                        # so it is built once and copied per result.
-                        template = edge_templates.get(fwd_eidx)
-                        if template is None:
-                            template = _full_edge(
-                                graph,
-                                fwd_eidx,
-                                predicate,
-                                subj_id,
-                                obj_id,
-                                edge_detail_map.get(fwd_eidx, {}),
-                                edge_urls_map.get(fwd_eidx),
-                            )
-                            edge_templates[fwd_eidx] = template
-                        edge_props = template.copy()
-                    else:
-                        edge_props = _minimal_edge(
-                            graph, fwd_eidx, predicate, subj_id, obj_id
+                # Build the edge dict
+                edge_props: InFlightEdge
+                if not lightweight and fwd_eidx >= 0:
+                    # A real edge's full dict depends only on the edge, so
+                    # it is built once; the copy is what gets the markers.
+                    template = edge_templates.get(fwd_eidx)
+                    if template is None:
+                        template = _full_edge(
+                            graph,
+                            fwd_eidx,
+                            predicate,
+                            subj_id,
+                            obj_id,
+                            edge_detail_map.get(fwd_eidx, {}),
+                            edge_urls_map.get(fwd_eidx),
                         )
+                        edge_templates[fwd_eidx] = template
+                    edge_props = template.copy()
+                else:
+                    edge_props = _minimal_edge(
+                        graph, fwd_eidx, predicate, subj_id, obj_id
+                    )
 
-                    if fwd_eidx >= 0:
-                        orig_id = edge_id_map.get(fwd_eidx)
-                        edge_props["_edge_id"] = (
-                            orig_id if orig_id is not None else _stand_in_id(fwd_eidx)
-                        )
+                if fwd_eidx >= 0:
+                    orig_id = edge_id_map.get(fwd_eidx)
+                    edge_props["_edge_id"] = (
+                        orig_id if orig_id is not None else _stand_in_id(fwd_eidx)
+                    )
 
-                    # Store query-aligned subject/object for building
-                    # inferred composite edges.  edge["subject"]/["object"]
-                    # follow stored direction (swapped for inverse edges),
-                    # but superclass_node_overrides uses query direction.
-                    # Whether the edge was matched through its inverse says
-                    # which stored end each query end is; comparing IDs can't
-                    # tell for a self-loop.
-                    edge_props["_query_subject"] = node_id_cache[query_subj_idx]
-                    edge_props["_query_object"] = node_id_cache[query_obj_idx]
-                    edge_props["_matched_inverse"] = bool(is_inverse)
+                # Store query-aligned subject/object for building
+                # inferred composite edges.  edge["subject"]/["object"]
+                # follow stored direction (swapped for inverse edges),
+                # but superclass_node_overrides uses query direction.
+                # Whether the edge was matched through its inverse says
+                # which stored end each query end is; comparing IDs can't
+                # tell for a self-loop.
+                edge_props["_query_subject"] = node_id_cache[query_subj_idx]
+                edge_props["_query_object"] = node_id_cache[query_obj_idx]
+                edge_props["_matched_inverse"] = bool(is_inverse)
+                marked_edges.append(edge_props)
+                if fwd_eidx >= 0:
+                    edge_occurrences[is_inverse][fwd_eidx] = (edge_key_id, edge_props)
 
+                seen_keys = edge_seen_keys[qedge_id]
+                if edge_key_id not in seen_keys:
+                    seen_keys.add(edge_key_id)
                     edge_bindings_by_qedge[qedge_id].append(edge_props)
-                    marked_edges.append(edge_props)
 
         # This group's subclass edges, indexed by the child they derive from
         # (built on first use, per subclass qedge).
@@ -1666,7 +1688,9 @@ def _build_response(
             # rather than dropping the subclass inference when a direct edge is
             # present.
             for edge in edges:
-                edge_kg_id = edge.pop("_edge_id", None) or str(uuid.uuid4())[:8]
+                # Read, not popped: the dict is shared by every result that
+                # binds this edge.  The markers come off once all are built.
+                edge_kg_id = edge.get("_edge_id") or str(uuid.uuid4())[:8]
                 kg_edges[edge_kg_id] = edge
 
                 if attached:
@@ -1677,14 +1701,15 @@ def _build_response(
                         # The endpoint of THIS base edge that carries the subclass
                         # expansion, in query direction (never stored direction,
                         # which is swapped for inverse edges).
-                        base_child = cast(
-                            str,
-                            edge.get(
+                        # (An annotated assignment, not typing.cast: that is a
+                        # function call per edge.)
+                        base_child: str = edge[  # type: ignore[assignment]
+                            (
                                 "_query_subject"
                                 if which_end == "subject"
                                 else "_query_object"
-                            ),
-                        )
+                            )
+                        ]
 
                         by_child = subclass_edges_by_child.get(sc_edge_id)
                         if by_child is None:

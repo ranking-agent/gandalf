@@ -12,6 +12,7 @@ from translator_tom.model_dicts import NodeDict
 
 from gandalf.config import settings
 from gandalf.profiler import current_profiler
+from gandalf.search.edge_matches import EdgeMatches
 from gandalf.search.path_arrays import PathArrays
 from gandalf.trapi import QueryTooLarge, ensure_node_category
 
@@ -76,7 +77,7 @@ def reconstruct_paths(
     Args:
         graph: CSRGraph instance
         query_graph: Original query graph
-        edge_results: Dict of edge_id -> [(subj_idx, pred, obj_idx, via_inverse, fwd_edge_idx), ...]
+        edge_results: Dict of edge_id -> EdgeMatches
         edge_order: List of edge IDs in original query order
         edge_inverse_preds: (Deprecated, kept for compatibility) Dict of edge_id -> set of inverse predicates
         logger: Logger to emit this query's records to.  ``lookup`` passes the
@@ -555,34 +556,36 @@ class _EdgeArrays(NamedTuple):
     fwd_edge_idx: np.ndarray
 
 
-def _edge_arrays(edge_matches, get_pred_idx) -> _EdgeArrays:
-    """Convert ``query_edge`` match tuples into query-aligned arrays.
+def _edge_arrays(edge_matches: EdgeMatches, get_pred_idx) -> _EdgeArrays:
+    """Put one query edge's matches in query direction, for joining.
 
     A match found through an inverse lookup is stored object-to-subject, so
-    its ends are swapped back to the query's direction here.
+    its ends are swapped back to the query's direction here, and its
+    predicate code becomes an index into the paths' own vocabulary
+    (*get_pred_idx*).
 
     >>> vocab = {}
     >>> arrays = _edge_arrays(
-    ...     [(1, "biolink:treats", 2, False, 7), (3, "biolink:treated_by", 4, True, 8)],
+    ...     EdgeMatches.from_tuples(
+    ...         [(1, "biolink:treats", 2, False, 7),
+    ...          (3, "biolink:treated_by", 4, True, 8)]
+    ...     ),
     ...     lambda p: vocab.setdefault(p, len(vocab)),
     ... )
     >>> arrays.subj.tolist(), arrays.obj.tolist(), arrays.pred.tolist()
     ([1, 4], [2, 3], [0, 1])
     """
-    n = len(edge_matches)
-    if n == 0:
-        empty = np.empty(0, dtype=np.int32)
-        return _EdgeArrays(empty, empty, empty, np.empty(0, dtype=np.bool_), empty)
-    subj, preds, obj, via_inverse, fwd = zip(*edge_matches)
-    subj_arr = np.fromiter(subj, dtype=np.int32, count=n)
-    obj_arr = np.fromiter(obj, dtype=np.int32, count=n)
-    inv_arr = np.fromiter(via_inverse, dtype=np.bool_, count=n)
+    codes, inverse = np.unique(edge_matches.pred, return_inverse=True)
+    vocab_idx = np.array(
+        [get_pred_idx(edge_matches.predicates[code]) for code in codes.tolist()],
+        dtype=np.int32,
+    )
     return _EdgeArrays(
-        subj=np.where(inv_arr, obj_arr, subj_arr),
-        obj=np.where(inv_arr, subj_arr, obj_arr),
-        pred=np.fromiter((get_pred_idx(p) for p in preds), dtype=np.int32, count=n),
-        via_inverse=inv_arr,
-        fwd_edge_idx=np.fromiter(fwd, dtype=np.int32, count=n),
+        subj=edge_matches.query_subj,
+        obj=edge_matches.query_obj,
+        pred=vocab_idx[inverse],
+        via_inverse=edge_matches.via_inverse,
+        fwd_edge_idx=edge_matches.fwd_edge_idx,
     )
 
 

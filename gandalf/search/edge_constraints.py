@@ -31,6 +31,7 @@ constraint kinds the spec grows.
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import numpy as np
 from translator_tom.model_dicts import QEdgeDict
 
 from gandalf.search.attribute_constraints import matches_attribute_constraints
@@ -265,6 +266,59 @@ class EdgeConstraints:
             return False
 
         return True
+
+    def permits_mask(self, graph, fwd_edge_idx: np.ndarray) -> np.ndarray:
+        """:meth:`permits` for many candidate edges at once.
+
+        Qualifiers, sources and knowledge_level / agent_type are interned, so
+        each is tested once per distinct value among the edges rather than
+        once per edge.  Only the attribute constraints, whose data is unique
+        to an edge, are checked edge by edge, and only on the edges that
+        passed everything else.
+
+        Args:
+            graph: The CSRGraph being traversed.
+            fwd_edge_idx: The candidate edges' forward-CSR positions.
+
+        Returns:
+            A boolean array parallel to *fwd_edge_idx*, True where the edge
+            satisfies every constraint.
+        """
+        store = graph.edge_properties
+        keep = np.ones(len(fwd_edge_idx), dtype=np.bool_)
+        if len(fwd_edge_idx) == 0:
+            return keep
+
+        if self.qualifiers:
+            keep &= store.pool_mask(
+                "qualifiers",
+                fwd_edge_idx,
+                lambda quals: edge_matches_qualifier_constraints(
+                    quals, self.qualifiers
+                ),
+            )
+        if self.knowledge_level is not None or self.agent_type is not None:
+            keep &= store.pool_mask("kl_at", fwd_edge_idx, self._permits_kl_at)
+        if self.sources is not None:
+            keep &= store.pool_mask("sources", fwd_edge_idx, self.sources.permits)
+
+        # Cold path last: it costs an LMDB read per edge.
+        if self.attributes:
+            for i in np.flatnonzero(keep).tolist():
+                if not _edge_attributes_match(
+                    graph, int(fwd_edge_idx[i]), self.attributes
+                ):
+                    keep[i] = False
+        return keep
+
+    def _permits_kl_at(self, kl_at: tuple) -> bool:
+        """Check one ``(knowledge_level, agent_type)`` pair."""
+        knowledge_level, agent_type = kl_at
+        if self.knowledge_level is not None and not self.knowledge_level.permits(
+            {knowledge_level}
+        ):
+            return False
+        return self.agent_type is None or self.agent_type.permits({agent_type})
 
 
 def _parse_list(raw: Any, field: str) -> list:

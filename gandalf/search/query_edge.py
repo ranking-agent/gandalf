@@ -1,14 +1,33 @@
-"""Edge query functions for graph traversal with predicate/qualifier filtering."""
+"""Edge query functions for graph traversal with predicate/qualifier filtering.
+
+The traversal works on arrays: it reads the edges of many pinned nodes at
+once, applies each filter to all of them as a mask, and returns the matches
+as an :class:`~gandalf.search.edge_matches.EdgeMatches`.  See "Traversal
+works on arrays" in CLAUDE.MD.
+"""
 
 import logging
 import time
-from collections import defaultdict
-from typing import Optional
+from typing import Iterator, Optional
+
+import numpy as np
 
 from gandalf.profiler import current_profiler
 from gandalf.search.attribute_constraints import matches_attribute_constraints
 from gandalf.search.edge_constraints import EdgeConstraints
+from gandalf.search.edge_matches import EdgeMatches
 from gandalf.search.node_filters import NodeFilter, apply_node_filters
+
+#: Candidate edges read per traversal step.  Pinned nodes are taken in runs
+#: whose degrees add up to about this many, so the arrays a step works on
+#: stay a few megabytes however many nodes are pinned.  A single node with
+#: more edges than this is still read in one step.
+TRAVERSAL_CHUNK_EDGES = 262_144
+
+#: A traversal step slower than this (seconds) is reported to the profiler.
+_SLOW_STEP_SECONDS = 0.1
+
+_SUBCLASS_OF = "biolink:subclass_of"
 
 logger = logging.getLogger(__name__)
 
@@ -39,48 +58,40 @@ def query_subclass_edge(
             module logger.
 
     Returns:
-        List of (child_idx, "biolink:subclass_of", parent_idx, False, fwd_edge_idx) tuples.
-        The depth-0 self-match is included with fwd_edge_idx=-1 (no real edge).
+        The matches as an :class:`EdgeMatches` of child (subject),
+        ``biolink:subclass_of``, superclass (object).  The depth-0
+        self-match is included with fwd_edge_idx=-1 (no real edge).
     """
     logger = logger if logger is not None else logging.getLogger(__name__)
     matches: list[tuple] = []
 
-    # Resolve the subclass_of predicate index once
-    subclass_pred = "biolink:subclass_of"
-
     if end_idxes is None:
-        return matches
+        return EdgeMatches.empty([_SUBCLASS_OF])
 
-    subclass_mask = graph.predicate_mask([subclass_pred])
+    subclass_mask = graph.predicate_mask([_SUBCLASS_OF])
 
-    for superclass_idx in end_idxes:
+    for superclass_idx in _as_index_list(end_idxes):
         # BFS: current frontier -> next frontier, up to `depth` levels
         # Depth 0 = identity match (the node itself)
         frontier = {superclass_idx}
         visited = {superclass_idx}
 
         # Always include the depth-0 self-match (no real edge, sentinel -1)
-        matches.append((superclass_idx, subclass_pred, superclass_idx, False, -1))
+        matches.append((superclass_idx, superclass_idx, -1))
 
         for _hop in range(depth):
             next_frontier = set()
             for node_idx in frontier:
                 # Walk incoming subclass_of edges: child --subclass_of--> node_idx
-                for (
-                    child_idx,
-                    _predicate,
-                    _props,
-                    fwd_eidx,
-                ) in graph.incoming_neighbors_with_properties(
-                    node_idx, predicate_mask=subclass_mask
-                ):
+                _owner, children, _pred_ids, fwd_eidxes = graph.edges_of(
+                    np.array([node_idx]), incoming=True, predicate_mask=subclass_mask
+                )
+                for child_idx, fwd_eidx in zip(children.tolist(), fwd_eidxes.tolist()):
                     if child_idx in visited:
                         continue
                     visited.add(child_idx)
                     next_frontier.add(child_idx)
-                    matches.append(
-                        (child_idx, subclass_pred, superclass_idx, False, fwd_eidx)
-                    )
+                    matches.append((child_idx, superclass_idx, fwd_eidx))
             frontier = next_frontier
             if not frontier:
                 break
@@ -89,7 +100,23 @@ def query_subclass_edge(
         "  Subclass traversal: found %s matches (depth=%s)", len(matches), depth
     )
 
-    return matches
+    columns = np.array(matches, dtype=np.int32).reshape(-1, 3)
+    return EdgeMatches(
+        subj=columns[:, 0].copy(),
+        obj=columns[:, 1].copy(),
+        pred=np.zeros(len(columns), dtype=np.int32),
+        via_inverse=np.zeros(len(columns), dtype=np.bool_),
+        fwd_edge_idx=columns[:, 2].copy(),
+        predicates=[_SUBCLASS_OF],
+    )
+
+
+def _as_index_list(node_idxes) -> list[int]:
+    """Node indices (a list or an array) as a list of Python ints."""
+    if isinstance(node_idxes, np.ndarray):
+        indices: list[int] = node_idxes.tolist()
+        return indices
+    return list(node_idxes)
 
 
 def query_edge(
@@ -106,17 +133,23 @@ def query_edge(
     end_node_constraints: Optional[list] = None,
     pair_targets: Optional[dict[int, set[int]]] = None,
     logger: Optional[logging.Logger] = None,
-):
+) -> EdgeMatches:
     """Query for a single edge with given constraints.
 
     Handles symmetric and inverse predicates at query time by checking both
     edge directions when appropriate. For example, if searching for predicate P
     and P has inverse Q, edges stored as B--Q-->A will be returned as A--P-->B.
 
+    The traversal works on arrays throughout (:meth:`CSRGraph.edges_of`): no
+    Python object is made per candidate edge, and each filter is applied to a
+    whole step's edges at once.
+
     Args:
         graph: CSRGraph instance
-        start_idxes: List of pinned start node indices, or None if unpinned
-        end_idxes: List of pinned end node indices, or None if unpinned
+        start_idxes: Pinned start node indices (a list or an array), or None
+            if unpinned
+        end_idxes: Pinned end node indices (a list or an array), or None if
+            unpinned
         start_categories: List of allowed categories for start node
         end_categories: List of allowed categories for end node
         allowed_predicates: List of forward predicate strings (canonical/symmetric descendants)
@@ -141,40 +174,23 @@ def query_edge(
             and no other's.  Defaults to the module logger.
 
     Returns:
-        List of (subject_idx, predicate, object_idx, via_inverse, fwd_edge_idx) tuples where
-        via_inverse indicates if the edge was found through inverse/symmetric lookup and
-        fwd_edge_idx is the forward-CSR array position (unique per physical edge).
+        The matching edges as an :class:`EdgeMatches`, each edge as stored in
+        the graph, once per direction it matched in: ``via_inverse`` marks an
+        edge found through the inverse/symmetric lookup, and ``fwd_edge_idx``
+        is its forward-CSR array position (unique per physical edge).
     """
     logger = logger if logger is not None else logging.getLogger(__name__)
     if node_filters is None:
         node_filters = []
-    matches = []
-    seen_edges = set()  # Track (subj, pred, obj, fwd_edge_idx) to avoid duplicates
 
-    # Build set of inverse predicates for quick lookup.
     # None  -> don't check inverse direction at all (default)
     # []    -> match ALL predicates in inverse direction (wildcard, e.g. related_to)
     # [pred]-> match only the listed predicates in inverse direction
     check_inverse = inverse_predicates is not None
     inverse_pred_set = set(inverse_predicates) if inverse_predicates else set()
 
-    def add_match(subj_idx, predicate, obj_idx, fwd_edge_idx, via_inverse=False):
-        """Add a match, avoiding duplicates. Includes via_inverse flag.
-
-        Dedup key includes ``fwd_edge_idx`` so that edges with the same
-        (subj, pred, obj) but different qualifiers / sources are kept as
-        separate matches.  It also includes ``via_inverse`` because the
-        same physical edge found in both forward and inverse directions
-        represents two distinct query bindings (e.g. SN=A,h=B vs SN=B,h=A
-        for symmetric predicates).
-        """
-        key = (subj_idx, predicate, obj_idx, fwd_edge_idx, via_inverse)
-        if key not in seen_edges:
-            seen_edges.add(key)
-            matches.append((subj_idx, predicate, obj_idx, via_inverse, fwd_edge_idx))
-
     # Predicate filters as lookup tables over predicate ids, built once so
-    # that each node's neighbour slice is filtered in one vectorized step.
+    # that each step's edges are filtered in one vectorized operation.
     # None means "any predicate".
     forward_mask = (
         graph.predicate_mask(allowed_predicates) if allowed_predicates else None
@@ -184,9 +200,11 @@ def query_edge(
     prof = current_profiler()
     n_allowed_preds = len(allowed_predicates) if allowed_predicates else 0
     n_inverse_preds = len(inverse_pred_set) if check_inverse else 0
+    t0 = time.perf_counter()
 
     # Case 1: Start pinned, end unpinned
     if start_idxes is not None and end_idxes is None:
+        logger.debug("  Forward search from %s pinned nodes", len(start_idxes))
         with prof.stage(
             "query_forward",
             n_pinned=len(start_idxes),
@@ -196,23 +214,24 @@ def query_edge(
             n_end_categories=len(end_categories) if end_categories else 0,
             has_edge_constraints=bool(edge_constraints),
         ):
-            _query_forward(
+            parts, total_neighbors, slow_nodes = _query_from_pinned(
                 graph,
                 start_idxes,
-                forward_mask,
-                end_categories,
-                edge_constraints,
-                check_inverse,
-                inverse_mask,
-                add_match,
-                node_filters=node_filters,
-                start_node_constraints=start_node_constraints,
-                end_node_constraints=end_node_constraints,
-                logger=logger,
+                pinned_is_subject=True,
+                forward_mask=forward_mask,
+                check_inverse=check_inverse,
+                inverse_mask=inverse_mask,
+                edge_constraints=edge_constraints,
+                pinned_ok=_NodeCheck(graph, None, None, start_node_constraints),
+                other_ok=_NodeCheck(
+                    graph, end_categories, node_filters, end_node_constraints
+                ),
             )
+            _record_traversal_metrics(graph, total_neighbors, slow_nodes)
 
     # Case 2: Start unpinned, end pinned
     elif start_idxes is None and end_idxes is not None:
+        logger.debug("  Backward search from %s pinned nodes", len(end_idxes))
         with prof.stage(
             "query_backward",
             n_pinned=len(end_idxes),
@@ -222,23 +241,26 @@ def query_edge(
             n_start_categories=len(start_categories) if start_categories else 0,
             has_edge_constraints=bool(edge_constraints),
         ):
-            _query_backward(
+            parts, total_neighbors, slow_nodes = _query_from_pinned(
                 graph,
                 end_idxes,
-                forward_mask,
-                start_categories,
-                edge_constraints,
-                check_inverse,
-                inverse_mask,
-                add_match,
-                node_filters=node_filters,
-                start_node_constraints=start_node_constraints,
-                end_node_constraints=end_node_constraints,
-                logger=logger,
+                pinned_is_subject=False,
+                forward_mask=forward_mask,
+                check_inverse=check_inverse,
+                inverse_mask=inverse_mask,
+                edge_constraints=edge_constraints,
+                pinned_ok=_NodeCheck(graph, None, None, end_node_constraints),
+                other_ok=_NodeCheck(
+                    graph, start_categories, node_filters, start_node_constraints
+                ),
             )
+            _record_traversal_metrics(graph, total_neighbors, slow_nodes)
 
     # Case 3: Both pinned
     elif start_idxes is not None and end_idxes is not None:
+        logger.debug(
+            "  Both ends pinned: %s start, %s end", len(start_idxes), len(end_idxes)
+        )
         with prof.stage(
             "query_both_pinned",
             n_start=len(start_idxes),
@@ -248,290 +270,334 @@ def query_edge(
             check_inverse=check_inverse,
             has_edge_constraints=bool(edge_constraints),
         ):
-            _query_both_pinned(
+            parts, total_neighbors, slow_nodes = _query_both_pinned(
                 graph,
                 start_idxes,
                 end_idxes,
-                forward_mask,
-                edge_constraints,
-                check_inverse,
-                inverse_mask,
-                add_match,
-                start_node_constraints=start_node_constraints,
-                end_node_constraints=end_node_constraints,
+                forward_mask=forward_mask,
+                check_inverse=check_inverse,
+                inverse_mask=inverse_mask,
+                edge_constraints=edge_constraints,
+                # Both ends are pinned, so categories and node filters are
+                # not rechecked: only each end's attribute constraints apply.
+                # An end is pinned either by the query, whose pinned nodes
+                # are never filtered, or by an earlier edge that discovered
+                # it as an unpinned end, where the node filters ran.
+                start_ok=_NodeCheck(graph, None, None, start_node_constraints),
+                end_ok=_NodeCheck(graph, None, None, end_node_constraints),
                 pair_targets=pair_targets,
-                logger=logger,
             )
+            _record_traversal_metrics(graph, total_neighbors, slow_nodes)
 
     else:
         raise Exception("Both nodes unpinned - bad query planning")
 
+    matches = EdgeMatches.concatenate(parts, graph.id_to_predicate)
+    logger.debug(
+        "  Traversed %s neighbors in %.3fs", total_neighbors, time.perf_counter() - t0
+    )
     prof.add_metric("matches", len(matches))
     return matches
 
 
-def _node_checker(graph, categories, node_filters, attribute_constraints):
-    """Build a memoized test of whether a node satisfies a query node.
+class _NodeCheck:
+    """A memoized test of whether nodes satisfy a query node.
 
-    Checks the node's categories (any of *categories*), the plugin node
-    filters, and the query node's attribute constraints.  The node record is
-    read once per node, and the verdict is cached for the rest of the edge
-    query: hub nodes are reached from many pinned nodes, and each read
-    unpacks the node's whole stored record.
+    Checks a node's categories (any of *categories*), the plugin node
+    filters, and the query node's attribute constraints.
+
+    Categories are tested for a whole step's nodes at once against the
+    graph's category index (``graph.node_categories``), where it has one.
+    Whatever needs the node itself -- the filters, the constraints, and the
+    categories of a graph without the index -- is judged once per node for
+    the whole edge query, since hub nodes are reached from many pinned
+    nodes, with the nodes of one traversal step read from the node store in
+    a single batch.
+
+    Falsy when there is nothing to check (every node passes).
+    """
+
+    def __init__(self, graph, categories, node_filters, attribute_constraints):
+        self._graph = graph
+        self._node_filters = node_filters or []
+        self._attribute_constraints = attribute_constraints
+        self._category_index = (
+            getattr(graph, "node_categories", None) if categories else None
+        )
+        indexed = self._category_index is not None
+        self._indexed_categories = categories if indexed else None
+        # Categories left to check on each node's own record
+        self._categories = None if indexed else categories
+        self._verdicts: dict[int, bool] = {}
+
+    def __bool__(self) -> bool:
+        return bool(
+            self._indexed_categories
+            or self._categories
+            or self._node_filters
+            or self._attribute_constraints
+        )
+
+    def mask(self, node_idxes: np.ndarray) -> np.ndarray:
+        """Whether each of *node_idxes* passes, as a boolean array."""
+        mask = np.ones(len(node_idxes), dtype=np.bool_)
+        if len(node_idxes) == 0:
+            return mask
+        if self._category_index is not None:
+            mask = self._category_index.any_of(node_idxes, self._indexed_categories)
+        if not (self._categories or self._node_filters or self._attribute_constraints):
+            return mask
+
+        # Only the nodes still standing are looked at one by one.
+        candidates = np.flatnonzero(mask)
+        unique, inverse = np.unique(node_idxes[candidates], return_inverse=True)
+        nodes = unique.tolist()
+        verdicts = self._verdicts
+        self._judge([node for node in nodes if node not in verdicts])
+        passed = np.fromiter(
+            (verdicts[node] for node in nodes), dtype=np.bool_, count=len(nodes)
+        )
+        mask[candidates] = passed[inverse]
+        return mask
+
+    def _judge(self, nodes: list[int]) -> None:
+        """Record a verdict for each of *nodes* (ascending, not yet judged)."""
+        if not nodes:
+            return
+        graph = self._graph
+        categories = self._categories
+        constraints = self._attribute_constraints
+        props_by_node: dict = {}
+        if categories or constraints:
+            props_by_node = graph.get_all_node_properties_batch(nodes)
+        for node in nodes:
+            props = props_by_node.get(node, {})
+            if categories:
+                node_categories = props.get("categories", [])
+                passed = any(cat in node_categories for cat in categories)
+            else:
+                passed = True
+            passed = passed and apply_node_filters(self._node_filters, graph, node)
+            if passed and constraints:
+                passed = bool(
+                    matches_attribute_constraints(
+                        props.get("attributes", []), constraints
+                    )
+                )
+            self._verdicts[node] = passed
+
+
+def _unique_in_order(node_idxes) -> np.ndarray:
+    """*node_idxes* as an index array, each node once, at its first position.
+
+    A node pinned twice yields the same edges twice, so traversing it once is
+    what keeps a match from being reported more than once.
+    """
+    nodes = np.asarray(node_idxes, dtype=np.int64).reshape(-1)
+    _, first_at = np.unique(nodes, return_index=True)
+    if len(first_at) == len(nodes):
+        return nodes
+    unique: np.ndarray = nodes[np.sort(first_at)]
+    return unique
+
+
+def _degrees(graph, nodes: np.ndarray, incoming: bool) -> np.ndarray:
+    """Each node's out-degree (or in-degree), from the CSR offsets alone."""
+    offsets = graph.rev_offsets if incoming else graph.fwd_offsets
+    degrees: np.ndarray = offsets[nodes + 1] - offsets[nodes]
+    return degrees
+
+
+def _steps(weights: np.ndarray, limit: int) -> Iterator[tuple[int, int]]:
+    """Split ``range(len(weights))`` into runs weighing about *limit* each.
+
+    A run always holds at least one item, so one heavier than *limit* is a
+    run of its own.
+
+    >>> list(_steps(np.array([3, 3, 3, 10, 1, 1]), 6))
+    [(0, 2), (2, 3), (3, 4), (4, 6)]
+    >>> list(_steps(np.array([], dtype=np.int64), 6))
+    []
+    """
+    cumulative = np.cumsum(weights)
+    start, n = 0, len(weights)
+    while start < n:
+        done = int(cumulative[start - 1]) if start else 0
+        end = int(np.searchsorted(cumulative, done + limit, side="right"))
+        end = max(end, start + 1)
+        yield start, end
+        start = end
+
+
+def _read_edges(
+    graph,
+    nodes: np.ndarray,
+    incoming: bool,
+    predicate_mask,
+    other_ok: Optional["_NodeCheck"],
+    edge_constraints,
+    other_allowed=None,
+) -> tuple[int, tuple]:
+    """Read one traversal step's edges and apply every filter to them.
+
+    Args:
+        nodes: The pinned nodes of this step.
+        incoming: Read their incoming edges rather than their outgoing ones.
+        other_ok: Check on the node at each edge's other end, or None.
+        other_allowed: ``(pinned, other) -> mask`` restricting the other end
+            to given nodes, applied before anything is read about it.
 
     Returns:
-        A ``node_idx -> bool`` callable, or None when there is nothing to
-        check (every node passes).
+        ``(scanned, (owner, pinned, other, pred_ids, fwd_edge_idx))``:
+        how many edges passed the predicate filter (and *other_allowed*), and
+        the edges that passed everything, *owner* being each one's position
+        in *nodes*.
     """
-    if not categories and not node_filters and not attribute_constraints:
-        return None
-    verdicts: dict[int, bool] = {}
+    owner, other, pred_ids, fwd_edge_idx = graph.edges_of(
+        nodes, incoming=incoming, predicate_mask=predicate_mask
+    )
+    pinned = nodes[owner]
+    keep = None
+    if other_allowed is not None:
+        keep = other_allowed(pinned, other)
+        owner, pinned, other, pred_ids, fwd_edge_idx = (
+            owner[keep],
+            pinned[keep],
+            other[keep],
+            pred_ids[keep],
+            fwd_edge_idx[keep],
+        )
+    scanned = len(owner)
 
-    def passes(node_idx: int) -> bool:
-        verdict = verdicts.get(node_idx)
-        if verdict is None:
-            verdict = _node_passes(
-                graph, node_idx, categories, node_filters, attribute_constraints
+    # The node at the other end first (categories, node filters, attribute
+    # constraints), then the QEdge's constraints (qualifiers,
+    # knowledge_level, agent_type, sources, attributes) on what is left.
+    for check in (other_ok, edge_constraints):
+        if not check or len(owner) == 0:
+            continue
+        if check is other_ok:
+            keep = other_ok.mask(other)
+        else:
+            keep = edge_constraints.permits_mask(graph, fwd_edge_idx)
+        if not keep.all():
+            owner, pinned, other, pred_ids, fwd_edge_idx = (
+                owner[keep],
+                pinned[keep],
+                other[keep],
+                pred_ids[keep],
+                fwd_edge_idx[keep],
             )
-            verdicts[node_idx] = verdict
-        return verdict
-
-    return passes
+    return scanned, (owner, pinned, other, pred_ids, fwd_edge_idx)
 
 
-def _node_passes(graph, node_idx, categories, node_filters, attribute_constraints):
-    """Uncached check behind :func:`_node_checker`."""
-    props: dict = {}
-    if categories or attribute_constraints:
-        props = graph.get_all_node_properties(node_idx)
-    if categories:
-        node_categories = props.get("categories", [])
-        if not any(cat in node_categories for cat in categories):
-            return False
-    if not apply_node_filters(node_filters, graph, node_idx):
-        return False
-    if attribute_constraints and not matches_attribute_constraints(
-        props.get("attributes", []), attribute_constraints
-    ):
-        return False
-    return True
+def _stored(pinned, other, pred_ids, fwd_edge_idx, incoming: bool, via_inverse: bool):
+    """One step's edges as an ``EdgeMatches.concatenate`` part.
+
+    An incoming edge is stored other -> pinned, an outgoing one pinned -> other.
+    """
+    subj, obj = (other, pinned) if incoming else (pinned, other)
+    return subj, obj, pred_ids, via_inverse, fwd_edge_idx
 
 
-def _query_forward(
+def _query_from_pinned(
     graph,
-    start_idxes,
+    pinned_idxes,
+    pinned_is_subject: bool,
     forward_mask,
-    end_categories,
-    edge_constraints,
-    check_inverse,
+    check_inverse: bool,
     inverse_mask,
-    add_match,
-    node_filters=None,
-    start_node_constraints=None,
-    end_node_constraints=None,
-    logger: Optional[logging.Logger] = None,
-):
-    """Case 1: Start pinned, end unpinned - forward search from pinned nodes.
+    edge_constraints,
+    pinned_ok: "_NodeCheck",
+    other_ok: "_NodeCheck",
+) -> tuple[list, int, list]:
+    """Cases 1 and 2: search from the pinned end of an edge to its open end.
+
+    From a pinned subject the direct matches are its outgoing edges; from a
+    pinned object, its incoming ones.  With ``check_inverse`` the edges in
+    the other direction are read too, under ``inverse_mask``: an edge stored
+    B --inverse(P)--> A stands for A --P--> B.  Those are reported as stored
+    and marked ``via_inverse``.
 
     ``forward_mask`` / ``inverse_mask`` are :meth:`CSRGraph.predicate_mask`
     tables, or None for "any predicate".
+
+    Matches come pinned node by pinned node, each node's direct matches
+    before its inverse ones.
+
+    Returns:
+        ``(parts, total_neighbors, slow_nodes)``: the matches as
+        ``EdgeMatches.concatenate`` parts, how many edges passed the
+        predicate filters, and ``(node_idx, neighbors, seconds)`` for each
+        slow traversal step (see :func:`_record_traversal_metrics`).
     """
-    logger = logger if logger is not None else logging.getLogger(__name__)
-    logger.debug("  Forward search from %s pinned nodes", len(start_idxes))
+    nodes = _unique_in_order(pinned_idxes)
+    # Attribute constraints on the pinned node, once per node
+    if pinned_ok:
+        nodes = nodes[pinned_ok.mask(nodes)]
 
-    t0 = time.perf_counter()
+    direct_incoming = not pinned_is_subject
+    weights = _degrees(graph, nodes, direct_incoming)
+    if check_inverse:
+        weights = weights + _degrees(graph, nodes, not direct_incoming)
 
+    parts: list[tuple] = []
     total_neighbors = 0
-    slow_nodes = []  # Track nodes that take > 0.1s
+    slow_nodes: list[tuple] = []
+    for start, end in _steps(weights, TRAVERSAL_CHUNK_EDGES):
+        t_step = time.perf_counter()
+        step_nodes = nodes[start:end]
+        scanned, (owner, pinned, other, pred_ids, fwd_edge_idx) = _read_edges(
+            graph, step_nodes, direct_incoming, forward_mask, other_ok, edge_constraints
+        )
+        direct = _stored(pinned, other, pred_ids, fwd_edge_idx, direct_incoming, False)
 
-    start_ok = _node_checker(graph, None, None, start_node_constraints)
-    end_ok = _node_checker(graph, end_categories, node_filters, end_node_constraints)
-
-    for start_idx in start_idxes:
-        # Check start node attribute constraints once per start node
-        if start_ok is not None and not start_ok(start_idx):
-            continue
-
-        t_node_start = time.perf_counter()
-        node_neighbors = 0
-
-        # Check outgoing edges (direct matches)
-        for obj_idx, predicate, props, fwd_edge_idx in graph.neighbors_with_properties(
-            start_idx, predicate_mask=forward_mask
-        ):
-            node_neighbors += 1
-
-            # Check the object: categories, node filters, attribute constraints
-            if end_ok is not None and not end_ok(obj_idx):
-                continue
-
-            # Check the QEdge's constraints (qualifiers, knowledge_level,
-            # agent_type, sources, attributes)
-            if edge_constraints and not edge_constraints.permits(
-                graph, props, fwd_edge_idx
-            ):
-                continue
-
-            add_match(start_idx, predicate, obj_idx, fwd_edge_idx)
-
-        # Check incoming edges for symmetric/inverse predicates
-        # An incoming edge with inverse(P) represents an outgoing edge with P
-        if check_inverse:
-            for (
-                other_idx,
-                stored_pred,
-                props,
-                fwd_edge_idx,
-            ) in graph.incoming_neighbors_with_properties(
-                start_idx, predicate_mask=inverse_mask
-            ):
-                node_neighbors += 1
-
-                # The "other" node becomes our object
-                if end_ok is not None and not end_ok(other_idx):
-                    continue
-
-                # Check the QEdge's constraints (qualifiers, knowledge_level,
-                # agent_type, sources, attributes)
-                if edge_constraints and not edge_constraints.permits(
-                    graph, props, fwd_edge_idx
-                ):
-                    continue
-
-                # Report the actual edge as stored in the graph
-                # The edge is: other_idx --[stored_pred]--> start_idx
-                # Mark as via_inverse since found through inverse lookup
-                add_match(
-                    other_idx, stored_pred, start_idx, fwd_edge_idx, via_inverse=True
+        if not check_inverse:
+            parts.append(direct)
+        else:
+            inv_scanned, (inv_owner, pinned, other, pred_ids, fwd_edge_idx) = (
+                _read_edges(
+                    graph,
+                    step_nodes,
+                    not direct_incoming,
+                    inverse_mask,
+                    other_ok,
+                    edge_constraints,
+                )
+            )
+            scanned += inv_scanned
+            inverse = _stored(
+                pinned, other, pred_ids, fwd_edge_idx, not direct_incoming, True
+            )
+            if end - start == 1:
+                parts.extend((direct, inverse))
+            else:
+                # Each node's direct matches, then its inverse ones: a stable
+                # sort by node of the direct block followed by the inverse.
+                order = np.argsort(np.concatenate([owner, inv_owner]), kind="stable")
+                merged = EdgeMatches.concatenate([direct, inverse], ())
+                parts.append(
+                    (
+                        merged.subj[order],
+                        merged.obj[order],
+                        merged.pred[order],
+                        merged.via_inverse[order],
+                        merged.fwd_edge_idx[order],
+                    )
                 )
 
-        t_node_end = time.perf_counter()
-        node_time = t_node_end - t_node_start
-        total_neighbors += node_neighbors
+        total_neighbors += scanned
+        seconds = time.perf_counter() - t_step
+        if seconds > _SLOW_STEP_SECONDS:
+            heaviest = start + int(np.argmax(weights[start:end]))
+            slow_nodes.append((int(nodes[heaviest]), scanned, seconds))
 
-        if node_time > 0.1:  # Track slow nodes
-            slow_nodes.append((start_idx, node_neighbors, node_time))
-
-    t1 = time.perf_counter()
-    _record_traversal_metrics(graph, total_neighbors, slow_nodes)
-    logger.debug("  Traversed %s total neighbors", total_neighbors)
-    if slow_nodes:
-        logger.debug("  Slow nodes (>0.1s): %s", len(slow_nodes))
-        for node_idx, neighbors, node_time in slow_nodes[:5]:  # Show top 5
-            logger.debug(
-                "    Node %s: %s neighbors, %.2fs", node_idx, neighbors, node_time
-            )
-    logger.debug("  Forward search completed in %.3fs", t1 - t0)
+    return parts, total_neighbors, slow_nodes
 
 
-def _query_backward(
-    graph,
-    end_idxes,
-    forward_mask,
-    start_categories,
-    edge_constraints,
-    check_inverse,
-    inverse_mask,
-    add_match,
-    node_filters=None,
-    start_node_constraints=None,
-    end_node_constraints=None,
-    logger: Optional[logging.Logger] = None,
-):
-    """Case 2: Start unpinned, end pinned - backward search from pinned nodes.
-
-    Predicate masks are as for :func:`_query_forward`.
-    """
-    logger = logger if logger is not None else logging.getLogger(__name__)
-    logger.debug("  Backward search from %s pinned nodes", len(end_idxes))
-
-    t0 = time.perf_counter()
-
-    total_neighbors = 0
-    slow_nodes = []  # Track nodes that take > 0.1s
-
-    end_ok = _node_checker(graph, None, None, end_node_constraints)
-    start_ok = _node_checker(
-        graph, start_categories, node_filters, start_node_constraints
-    )
-
-    for end_idx in end_idxes:
-        # Check end node attribute constraints once per end node
-        if end_ok is not None and not end_ok(end_idx):
-            continue
-
-        t_node_start = time.perf_counter()
-        node_neighbors = 0
-
-        # Check incoming edges (direct matches)
-        for (
-            subj_idx,
-            predicate,
-            props,
-            fwd_edge_idx,
-        ) in graph.incoming_neighbors_with_properties(
-            end_idx, predicate_mask=forward_mask
-        ):
-            node_neighbors += 1
-
-            # Check the subject: categories, node filters, attribute constraints
-            if start_ok is not None and not start_ok(subj_idx):
-                continue
-
-            # Check the QEdge's constraints (qualifiers, knowledge_level,
-            # agent_type, sources, attributes)
-            if edge_constraints and not edge_constraints.permits(
-                graph, props, fwd_edge_idx
-            ):
-                continue
-
-            add_match(subj_idx, predicate, end_idx, fwd_edge_idx)
-
-        # Check outgoing edges for symmetric/inverse predicates
-        # An outgoing edge with inverse(P) represents an incoming edge with P
-        if check_inverse:
-            for (
-                other_idx,
-                stored_pred,
-                props,
-                fwd_edge_idx,
-            ) in graph.neighbors_with_properties(end_idx, predicate_mask=inverse_mask):
-                node_neighbors += 1
-
-                # The "other" node becomes our subject
-                if start_ok is not None and not start_ok(other_idx):
-                    continue
-
-                # Check the QEdge's constraints (qualifiers, knowledge_level,
-                # agent_type, sources, attributes)
-                if edge_constraints and not edge_constraints.permits(
-                    graph, props, fwd_edge_idx
-                ):
-                    continue
-
-                # Report the actual edge as stored in the graph
-                # The edge is: end_idx --[stored_pred]--> other_idx
-                # Mark as via_inverse since found through inverse lookup
-                add_match(
-                    end_idx, stored_pred, other_idx, fwd_edge_idx, via_inverse=True
-                )
-
-        t_node_end = time.perf_counter()
-        node_time = t_node_end - t_node_start
-        total_neighbors += node_neighbors
-
-        if node_time > 0.1:  # Track slow nodes
-            slow_nodes.append((end_idx, node_neighbors, node_time))
-
-    t1 = time.perf_counter()
-    _record_traversal_metrics(graph, total_neighbors, slow_nodes)
-    logger.debug("  Traversed %s total incoming neighbors", total_neighbors)
-    if slow_nodes:
-        logger.debug("  Slow nodes (>0.1s): %s", len(slow_nodes))
-        for node_idx, neighbors, node_time in slow_nodes[:5]:  # Show top 5
-            logger.debug(
-                "    Node %s: %s neighbors, %.2fs", node_idx, neighbors, node_time
-            )
+def _pair_keys(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    """Pack two node index arrays into one int64 key per pair."""
+    keys: np.ndarray = (first.astype(np.int64) << 32) | second.astype(np.int64)
+    return keys
 
 
 def _query_both_pinned(
@@ -539,150 +605,105 @@ def _query_both_pinned(
     start_idxes,
     end_idxes,
     forward_mask,
-    edge_constraints,
-    check_inverse,
+    check_inverse: bool,
     inverse_mask,
-    add_match,
-    start_node_constraints=None,
-    end_node_constraints=None,
+    edge_constraints,
+    start_ok: "_NodeCheck",
+    end_ok: "_NodeCheck",
     pair_targets=None,
-    logger: Optional[logging.Logger] = None,
-):
+) -> tuple[list, int, list]:
     """Case 3: Both ends pinned - intersection search.
 
-    Predicate masks are as for :func:`_query_forward`.  With
+    Reads each start node's outgoing edges and keeps those ending on a pinned
+    end node; then, with ``check_inverse``, each end node's outgoing edges
+    ending on a pinned start node, reported as stored and marked
+    ``via_inverse``.  An edge whose other end is not pinned is dropped before
+    anything else is looked up about it.
+
+    Predicate masks are as for :func:`_query_from_pinned`.  With
     ``pair_targets``, each start node is searched for its own allowed ends
     only, and each end node, in the inverse pass, for the starts that list it.
+
+    Returns:
+        ``(parts, total_neighbors, slow_nodes)`` as :func:`_query_from_pinned`
+        does; direct matches all come before inverse ones.
     """
-    logger = logger if logger is not None else logging.getLogger(__name__)
-    logger.debug(
-        "  Both ends pinned: %s start, %s end", len(start_idxes), len(end_idxes)
-    )
+    starts = _unique_in_order(start_idxes)
+    ends = _unique_in_order(end_idxes)
 
-    t0 = time.perf_counter()
+    if pair_targets is None:
+        start_has_targets = np.full(len(starts), len(ends) > 0)
+        end_has_sources = np.full(len(ends), len(starts) > 0)
 
-    # Build target set up front so we can filter during traversal instead
-    # of accumulating a large forward_edges dict and intersecting later.
-    # This avoids property-dict allocations for edges whose target is not
-    # in end_set (the vast majority in typical queries).
-    end_set = set(end_idxes)
-    start_set = set(start_idxes)
-    targets_by_start = None
-    sources_by_end: dict[int, set[int]] = defaultdict(set)
-    if pair_targets is not None:
-        targets_by_start = {
-            start_idx: pair_targets.get(start_idx, set()) & end_set
-            for start_idx in start_set
-        }
-        for start_idx, targets in targets_by_start.items():
-            for end_idx in targets:
-                sources_by_end[end_idx].add(start_idx)
+        def end_allowed(pinned, other):
+            return np.isin(other, ends)
 
-    # Both ends are pinned, so categories and node filters are not rechecked:
-    # only each end's attribute constraints apply.  An end is pinned either by
-    # the query, whose pinned nodes are never filtered, or by an earlier edge
-    # that discovered it as an unpinned end, where the node filters ran.
-    start_ok = _node_checker(graph, None, None, start_node_constraints)
-    end_ok = _node_checker(graph, None, None, end_node_constraints)
+        def start_allowed(pinned, other):
+            return np.isin(other, starts)
 
-    t_neighbors_start = time.perf_counter()
+    else:
+        # The listed (start, end) pairs between pinned nodes, as int64 keys
+        end_set = set(ends.tolist())
+        pairs = [
+            (start, target)
+            for start in starts.tolist()
+            for target in pair_targets.get(start, ())
+            if target in end_set
+        ]
+        pair_array = np.array(pairs, dtype=np.int64).reshape(-1, 2)
+        pair_keys = _pair_keys(pair_array[:, 0], pair_array[:, 1])
+        start_has_targets = np.isin(starts, pair_array[:, 0])
+        end_has_sources = np.isin(ends, pair_array[:, 1])
+
+        def end_allowed(pinned, other):
+            return np.isin(_pair_keys(pinned, other), pair_keys)
+
+        def start_allowed(pinned, other):
+            return np.isin(_pair_keys(other, pinned), pair_keys)
+
+    parts: list[tuple] = []
     total_neighbors = 0
-    slow_nodes = []
+    slow_nodes: list[tuple] = []
 
-    for start_idx in start_idxes:
-        targets = end_set if targets_by_start is None else targets_by_start[start_idx]
-        if not targets:
-            continue
-        # Check node filters and attribute constraints on the start node
-        if start_ok is not None and not start_ok(start_idx):
-            continue
-
-        t_node_start = time.perf_counter()
-
-        # Count total neighbors for diagnostics (cheap CSR offset math)
-        node_start = int(graph.fwd_offsets[start_idx])
-        node_end = int(graph.fwd_offsets[start_idx + 1])
-        node_neighbors = node_end - node_start
-        total_neighbors += node_neighbors
-
-        # Only fetch properties for edges whose target is in end_set
-        for (
-            obj_idx,
-            predicate,
-            props,
-            fwd_edge_idx,
-        ) in graph.neighbors_filtered_by_targets(
-            start_idx, targets, predicate_mask=forward_mask
-        ):
-            # Check node filters and attribute constraints on the end node
-            if end_ok is not None and not end_ok(obj_idx):
-                continue
-
-            # Check the QEdge's constraints (qualifiers, knowledge_level,
-            # agent_type, sources, attributes)
-            if edge_constraints and not edge_constraints.permits(
-                graph, props, fwd_edge_idx
-            ):
-                continue
-
-            add_match(start_idx, predicate, obj_idx, fwd_edge_idx)
-
-        t_node_end = time.perf_counter()
-        node_time = t_node_end - t_node_start
-        if node_time > 0.1:
-            slow_nodes.append((start_idx, node_neighbors, node_time))
-
-    # Also check reverse direction for symmetric/inverse predicates
-    # Look for edges: end_node --inverse(P)--> start_node
-    if check_inverse:
-        for end_idx in end_idxes:
-            sources = start_set if targets_by_start is None else sources_by_end[end_idx]
-            if not sources:
-                continue
-            # Check node filters and attribute constraints on the end node
-            if end_ok is not None and not end_ok(end_idx):
-                continue
-
-            for (
-                obj_idx,
-                stored_pred,
-                props,
-                fwd_edge_idx,
-            ) in graph.neighbors_filtered_by_targets(
-                end_idx, sources, predicate_mask=inverse_mask
-            ):
-                total_neighbors += 1
-
-                # obj_idx is a start node: check its filters and constraints
-                if start_ok is not None and not start_ok(obj_idx):
-                    continue
-
-                # Check the QEdge's constraints (qualifiers, knowledge_level,
-                # agent_type, sources, attributes)
-                if edge_constraints and not edge_constraints.permits(
-                    graph, props, fwd_edge_idx
-                ):
-                    continue
-
-                # Report the actual edge as stored in the graph
-                # The edge is: end_idx --[stored_pred]--> obj_idx
-                # (where obj_idx is a start node)
-                # Mark as via_inverse since found through inverse lookup
-                add_match(end_idx, stored_pred, obj_idx, fwd_edge_idx, via_inverse=True)
-
-    t1 = time.perf_counter()
-    _record_traversal_metrics(graph, total_neighbors, slow_nodes)
-    logger.debug(
-        "    Neighbor traversal: %.3fs (%s neighbors)",
-        t1 - t_neighbors_start,
-        total_neighbors,
-    )
-    if slow_nodes:
-        logger.debug("    Slow nodes (>0.1s): %s", len(slow_nodes))
-        for node_idx, neighbors, node_time in slow_nodes[:5]:
-            logger.debug(
-                "      Node %s: %s neighbors, %.2fs", node_idx, neighbors, node_time
+    def search(nodes, has_partner, nodes_ok, other_ok, other_allowed, mask, inverse):
+        """Edges out of *nodes* that end on an allowed pinned node."""
+        nonlocal total_neighbors
+        nodes = nodes[has_partner]
+        if nodes_ok:
+            nodes = nodes[nodes_ok.mask(nodes)]
+        weights = _degrees(graph, nodes, incoming=False)
+        for start, end in _steps(weights, TRAVERSAL_CHUNK_EDGES):
+            t_step = time.perf_counter()
+            scanned, (_owner, pinned, other, pred_ids, fwd_edge_idx) = _read_edges(
+                graph,
+                nodes[start:end],
+                False,
+                mask,
+                other_ok,
+                edge_constraints,
+                other_allowed=other_allowed,
             )
+            parts.append(_stored(pinned, other, pred_ids, fwd_edge_idx, False, inverse))
+            # For diagnostics: every neighbour of a start node, but only the
+            # pinned ones of an end node.
+            neighbors = scanned if inverse else int(weights[start:end].sum())
+            total_neighbors += neighbors
+            seconds = time.perf_counter() - t_step
+            if seconds > _SLOW_STEP_SECONDS:
+                heaviest = start + int(np.argmax(weights[start:end]))
+                slow_nodes.append((int(nodes[heaviest]), neighbors, seconds))
+
+    search(
+        starts, start_has_targets, start_ok, end_ok, end_allowed, forward_mask, False
+    )
+    # Also check reverse direction for symmetric/inverse predicates:
+    # edges end_node --inverse(P)--> start_node
+    if check_inverse:
+        search(
+            ends, end_has_sources, end_ok, start_ok, start_allowed, inverse_mask, True
+        )
+
+    return parts, total_neighbors, slow_nodes
 
 
 _SLOW_NODE_EVENT_LIMIT = 10
@@ -693,7 +714,9 @@ def _record_traversal_metrics(graph, total_neighbors, slow_nodes):
 
     Aggregates onto the currently-active query_* stage. ``slow_nodes`` is
     the list ``[(node_idx, neighbors, duration_seconds), ...]`` collected by
-    the search loop for nodes that took longer than the inline threshold.
+    the search for traversal steps that took longer than the inline
+    threshold: the step's highest-degree node, the neighbours the whole step
+    read, and how long it took.
     """
     prof = current_profiler()
     prof.add_metric("total_neighbors", int(total_neighbors))
