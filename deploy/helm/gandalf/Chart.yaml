@@ -10,7 +10,7 @@ sources:
   - https://github.com/ranking-agent/gandalf
 
 # The chart's own version.  Published versions are never replaced, so bump
-# this with every change to the chart (.github/workflows/chart.yml publishes
+# this with every change to the chart (.github/workflows/helm-chart.yml publishes
 # a version once and skips one that already exists).
 version: 0.1.0
 
