@@ -50,7 +50,8 @@ jobs:
 
       - name: Read the chart version
         id: chart
-        run: echo "version=$(helm show chart "$CHART_DIR" | sed -n 's/^version: //p')" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=$(helm show chart "$CHART_DIR" | sed -n 's/^version: //p')" >> "$GITHUB_OUTPUT"
 
       - name: Check whether this version is already published
         id: published
