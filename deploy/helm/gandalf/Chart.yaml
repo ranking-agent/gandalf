@@ -1,0 +1,19 @@
+apiVersion: v2
+name: gandalf
+description: >-
+  GANDALF, a TRAPI knowledge provider for fast path finding in large biomedical
+  knowledge graphs: an API tier, queue workers, the Redis queue between them
+  and a loader for the graph they serve.
+type: application
+home: https://github.com/ranking-agent/gandalf
+sources:
+  - https://github.com/ranking-agent/gandalf
+
+# The chart's own version.  Published versions are never replaced, so bump
+# this with every change to the chart (.github/workflows/helm-chart.yml publishes
+# a version once and skips one that already exists).
+version: 0.1.0
+
+# The GANDALF release this chart version was written against.  Deployments
+# set the image tag explicitly in their values.
+appVersion: "2.3.1"

@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "gandalf.fullname" . }}-queue
+  labels:
+    {{- include "gandalf.labels" . | nindent 4 }}
+    service-type: redis
+spec:
+  serviceName: {{ include "gandalf.fullname" . }}-queue
+  selector:
+    matchLabels:
+      {{- include "gandalf.selectorLabels" . | nindent 6 }}
+      service-type: redis
+  template:
+    metadata:
+      labels:
+        {{- include "gandalf.selectorLabels" . | nindent 8 }}
+        service-type: redis
+    spec:
+      # Let Redis finish writing its append-only file on SIGTERM.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: {{ .Chart.Name }}-queue-container
+          image: "{{ .Values.gandalf_queue.image.repository }}:{{ .Values.gandalf_queue.image.tag }}"
+          command:
+            - "redis-server"
+          args:
+            # Write data to the PVC, not the image's working directory.
+            - --dir
+            - {{ .Values.gandalf_queue.dbPath | quote }}
+            # Log every write to the append-only file, synced each second:
+            # a restart loses at most ~1s instead of everything.
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec
+            # At the memory cap, refuse writes; never drop keys.
+            - --maxmemory-policy
+            - noeviction
+            # Stay under the container limit so Redis refuses writes
+            # before the kernel kills it.
+            - --maxmemory
+            - {{ .Values.gandalf_queue.maxmemory | quote }}
+          volumeMounts:
+            - mountPath: {{ .Values.gandalf_queue.dbPath }}
+              name: {{ include "gandalf.fullname" . }}-queue-data-volume
+          resources:
+            {{ toYaml .Values.gandalf_queue.resources | nindent 12 }}
+      {{- with .Values.app.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.app.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.app.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ include "gandalf.fullname" . }}-queue-data-volume
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: {{ .Values.gandalf_queue.pvcSize }}

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gandalf.fullname" . }}-configmap
+data:
+  WEB_HOST: "0.0.0.0"
+  GANDALF_WEB_PORT: "{{ .Values.app.gandalf.service.port }}"
+  GRAPH_DB: "{{ .Values.graph.backend }}"
+  GRAPH_QUERY_TIMEOUT: "{{ .Values.app.GRAPH_QUERY_TIMEOUT }}"
+  GANDALF_QUEUE_URL: "redis://gandalf-queue:6379/0"
+
+  GANDALF_SLACK_WEBHOOK_URL: "{{ .Values.app.gandalf.slack_webhook_url }}"
+  GANDALF_SLACK_ENVIRONMENT: "{{ .Values.x_trapi.maturity.value }}"
+  GANDALF_SLACK_STATUS_URL: "{{ .Values.app.public_url }}/status"
+
+  # turn off automat logic
+  # GANDALF_SERVICE_ADDRESS: "{{ include "gandalf.fullname" . }}-service"
+  # GANDALF_AUTOMAT_HOST: {{ .Values.app.automatAddress }}
+  # GANDALF_PLATER_TITLE: {{ .Release.Name }}
+  GANDALF_INFORES: "{{ .Values.datasetDesc.provenanceTag }}"
+  BL_VERSION: "{{ .Values.app.bl_version }}"
+  GANDALF_SERVER_MATURITY: "{{ .Values.x_trapi.maturity.value }}"
+  GANDALF_SERVER_LOCATION: "{{ .Values.x_trapi.location.value }}"
+  GANDALF_SERVER_URL: "{{ .Values.app.public_url }}"
+  PROFILER_ON: "{{ .Values.app.profiler_on }}"
+  {{ if .Values.app.otel.enabled }}
+  GANDALF_OTEL_ENABLED: "TRUE"
+  GANDALF_OTEL_SERVICE_NAME: "{{ .Release.Name }}"
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.app.otel.jaegerHost | quote }}
+  GANDALF_JAEGER_HOST: {{ .Values.app.otel.jaegerHost | quote }}
+  GANDALF_JAEGER_PORT: {{ .Values.app.otel.jaegerPort | quote }}
+  {{ end }}
+
+  GANDALF_GRAPH_PATH: "{{ .Values.app.gandalf.sharedData.mountPath }}/gandalf_mmap"
+  GANDALF_WORKERS: "{{ .Values.app.gandalf.num_workers }}"
+  GANDALF_LARGE_RESULT_THRESHOLD: {{ .Values.app.gandalf.large_result_threshold | int64 | quote }}
+  GANDALF_MAX_PATH_LIMIT: {{ .Values.app.gandalf.max_path_limit | int64 | quote }}

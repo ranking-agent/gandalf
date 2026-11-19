@@ -1,0 +1,10 @@
+# Left out of the packaged chart.
+
+# The RENCI dev deployment's values file - don't publish it with the chart
+values-dev.yaml
+
+.DS_Store
+.git/
+*.swp
+*.bak
+*.tmp

@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gandalf.fullname" . }}-service
+  labels:
+    {{- include "gandalf.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.app.gandalf.service.type }}
+  ports:
+    - port: {{ .Values.app.gandalf.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "gandalf.selectorLabels" . | nindent 4 }}
+    service-type: server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gandalf.fullname" . }}-queue
+  labels:
+    {{- include "gandalf.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "gandalf.selectorLabels" . | nindent 4 }}
+    service-type: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379

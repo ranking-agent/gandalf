@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gandalf.fullname" . }}-gandalf-worker
+  labels:
+    {{- include "gandalf.labels" . | nindent 4 }}
+    service-type: worker
+spec:
+  {{- if .Values.app.gandalf_worker.autoscaling.enabled }}
+  replicas: 1
+  {{- else }}
+  replicas: 4
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "gandalf.selectorLabels" . | nindent 6 }}
+      service-type: worker
+  template:
+    metadata:
+      labels:
+        {{- include "gandalf.selectorLabels" . | nindent 8 }}
+        service-type: worker
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # Rolls the worker whenever the loader's source URLs change, so new pods
+        # re-run the init container and open the freshly-loaded data.
+        checksum/gandalf-sources: {{ include "gandalf.sourcesHash" . }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "6429"
+        prometheus.io/path: /metrics
+    spec:
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{ . | toYaml | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 1800
+      initContainers:
+        # Ordering is now enforced by the loader being a pre-install/pre-upgrade
+        # HOOK (it completes before this Deployment is applied). This init
+        # container is kept as a cheap safety net: it also guards against a
+        # stale/mismatched load by waiting until the on-disk hash equals the
+        # hash this worker expects AND the readiness sentinel is present.
+        # .data-ready and .source-url-hash persist across loads, so "file exists"
+        # alone cannot distinguish this load from a stale one.
+        - name: gandalf-wait-for-data
+          image: busybox
+          env:
+            - name: EXPECTED_HASH
+              value: {{ include "gandalf.sourcesHash" . | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              MOUNT="{{ .Values.app.gandalf.sharedData.mountPath }}"
+              SENTINEL="${MOUNT}/.data-ready"
+              CHECKSUM_FILE="${MOUNT}/.source-url-hash"
+              while true; do
+                if [ -f "$SENTINEL" ] && [ -f "$CHECKSUM_FILE" ]; then
+                  ON_DISK=$(cat "$CHECKSUM_FILE" 2>/dev/null || echo "")
+                  if [ "$ON_DISK" = "$EXPECTED_HASH" ]; then
+                    echo "Data ready for expected hash $EXPECTED_HASH."
+                    break
+                  fi
+                  echo "waiting: on-disk hash '$ON_DISK' != expected '$EXPECTED_HASH'..."
+                else
+                  echo "waiting for loader to finish (.data-ready / .source-url-hash)..."
+                fi
+                sleep 5
+              done
+          volumeMounts:
+            - name: {{ include "gandalf.fullname" . }}-data
+              mountPath: {{ .Values.app.gandalf.sharedData.mountPath }}
+              readOnly: true
+      containers:
+        - name: {{ .Chart.Name }}-gandalf-worker
+          image: "{{ .Values.image.gandalf.repository }}:{{ .Values.image.gandalf.tag }}"
+          imagePullPolicy: {{ .Values.image.gandalf.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "gandalf.fullname" . }}-configmap
+          command:
+            - 'python'
+          args:
+            - "-m"
+            - "gandalf.worker"
+          ports:
+            - {name: metrics, containerPort: 9100}
+          {{- if .Values.app.gandalf_worker.resources }}
+          resources: {{ toYaml .Values.app.gandalf_worker.resources | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # Shared mmap/LMDB data (read-only for the worker)
+            - name: {{ include "gandalf.fullname" . }}-data
+              mountPath: {{ .Values.app.gandalf.sharedData.mountPath }}
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/tmp/gandalf-worker-heartbeat"]
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test $(( $(date +%s) - $(stat -c %Y /tmp/gandalf-worker-heartbeat) )) -lt 120
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        # Shared graph data volume (mmap + LMDB files)
+        - name: {{ include "gandalf.fullname" . }}-data
+          persistentVolumeClaim:
+            claimName: {{ include "gandalf.fullname" . }}-data
+            readOnly: true
+      {{- with .Values.app.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.app.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.app.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

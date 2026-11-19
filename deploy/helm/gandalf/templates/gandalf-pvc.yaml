@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gandalf-data
+  labels:
+    helm.sh/chart: gandalf-0.1.0
+    app.kubernetes.io/name: gandalf
+    app.kubernetes.io/instance: gandalf
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    {{- toYaml .Values.app.gandalf.persistentVolume.accessModes | nindent 4 }}
+  {{- with .Values.app.gandalf.persistentVolume.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.app.gandalf.persistentVolume.size }}
