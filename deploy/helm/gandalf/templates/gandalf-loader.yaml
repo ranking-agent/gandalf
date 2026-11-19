@@ -1,0 +1,132 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gandalf.fullname" . }}-loader
+  labels:
+    {{- include "gandalf.labels" . | nindent 4 }}
+  annotations:
+    # Re-run when source URLs change. The hash is part of the Job name suffix so
+    # that `helm upgrade` creates a NEW Job (Jobs are immutable) instead of
+    # failing to patch the existing one.
+    checksum/gandalf-sources: {{ include "gandalf.sourcesHash" . }}
+spec:
+  backoffLimit: {{ .Values.app.gandalf.loader.backoffLimit | default 1 }}
+  ttlSecondsAfterFinished: {{ .Values.app.gandalf.loader.ttlSecondsAfterFinished | default 600 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gandalf.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: data-loader
+    spec:
+      restartPolicy: Never
+      # Loader runs as root so it can write to the NFS-backed volume without
+      # any chown/chmod. The worker mounts the data read-only as a non-root
+      # user; root-written files are world-readable, so reads work fine.
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: data-loader
+          image: "{{ .Values.app.gandalf.loader.image.repository }}:{{ .Values.app.gandalf.loader.image.tag }}"
+          imagePullPolicy: {{ .Values.app.gandalf.loader.image.pullPolicy }}
+          env:
+            - name: SOURCES_HASH
+              value: {{ include "gandalf.sourcesHash" . | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -euo pipefail
+              trap 'echo "FAILED at line $LINENO (exit code $?)" >&2' ERR
+
+              # DEST is derived from the SAME value as the volumeMount below,
+              # so the data files and the sentinel can never diverge onto
+              # different filesystems.
+              DEST="{{ .Values.app.gandalf.sharedData.mountPath }}"
+              SENTINEL="${DEST}/.data-ready"
+              CHECKSUM_FILE="${DEST}/.source-url-hash"
+              CURRENT_HASH="$SOURCES_HASH"
+
+              # Skip download if data exists and sources are unchanged.
+              {{- if .Values.app.gandalf.loader.skipIfExists }}
+              if [ -f "$SENTINEL" ] && [ -f "$CHECKSUM_FILE" ]; then
+                EXISTING_HASH=$(cat "$CHECKSUM_FILE")
+                if [ "$CURRENT_HASH" = "$EXISTING_HASH" ]; then
+                  echo "Data already present and sources unchanged - skipping download."
+                  exit 0
+                else
+                  echo "Source URLs changed - re-downloading."
+                  # Tier 1 invariant: remove the readiness signal FIRST, so any
+                  # worker waiting on (hash match + .data-ready) blocks for the
+                  # whole refresh and can never read data mid-delete. Then drop
+                  # the stale hash, then wipe the data. Note: * does not match
+                  # dotfiles in sh; the ${DEST:?} guard prevents rm -rf /*.
+                  rm -f "$SENTINEL" "$CHECKSUM_FILE"
+                  rm -rf "${DEST:?}"/* "${DEST:?}"/.[!.]* || true
+                fi
+              else
+                # Sentinel and/or checksum missing -> volume is in an unknown or
+                # partially-loaded state. Clear readiness first, then wipe.
+                echo "Sentinel or checksum file missing - clearing volume and re-downloading."
+                rm -f "$SENTINEL" "$CHECKSUM_FILE"
+                rm -rf "${DEST:?}"/* "${DEST:?}"/.[!.]* || true
+              fi
+              {{- end }}
+
+              echo "Downloading data files..."
+              {{- range .Values.app.gandalf.loader.sources }}
+
+              echo "Fetching: {{ . }}"
+              FILENAME=$(basename "{{ . }}" | sed 's/?.*//')
+
+              {{- if or (hasSuffix ".tar.gz" .) (hasSuffix ".tgz" .) }}
+              wget -O "${DEST}/${FILENAME}" "{{ . }}"
+              tar xzvf "${DEST}/${FILENAME}" -C "$DEST"
+              rm -f "${DEST}/${FILENAME}"
+              {{- else if hasSuffix ".tar" . }}
+              wget -O - "{{ . }}" | tar xf - -C "$DEST"
+              {{- else if hasSuffix ".zip" . }}
+              wget -O "/tmp/${FILENAME}" "{{ . }}"
+              unzip -o "/tmp/${FILENAME}" -d "$DEST"
+              rm -f "/tmp/${FILENAME}"
+              {{- else }}
+              wget -O "${DEST}/${FILENAME}" "{{ . }}"
+              {{- end }}
+              {{- end }}
+
+              {{- if .Values.app.gandalf.loader.postDownloadCommand }}
+              echo "Running post-download command..."
+              {{ .Values.app.gandalf.loader.postDownloadCommand }}
+              {{- end }}
+
+              # Mark complete. Reached ONLY if everything above succeeded
+              # (set -e). Tier 1 write order: hash FIRST, readiness sentinel
+              # LAST, so the sentinel never exists alongside a not-yet-written
+              # or mismatched hash. The worker gates on (hash == expected AND
+              # sentinel present), so it cannot pass until both are in place.
+              #
+              # The sentinel's CONTENT is irrelevant (the worker only checks that
+              # it exists), so we avoid writing a date here -- a strftime format
+              # contains % characters that Helm templating mangled into
+              # %!(MISSING) markers. Writing the hash sidesteps that entirely.
+              echo "$CURRENT_HASH" > "$CHECKSUM_FILE"
+              echo "$CURRENT_HASH" > "$SENTINEL"
+              echo "Data download complete. Sentinel written to $SENTINEL"
+          volumeMounts:
+            - name: gandalf-data
+              mountPath: {{ .Values.app.gandalf.sharedData.mountPath }}
+          {{- with .Values.app.gandalf.loader.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: gandalf-data
+          persistentVolumeClaim:
+            claimName: {{ include "gandalf.fullname" . }}-data
+      {{- with .Values.app.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.app.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

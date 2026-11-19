@@ -1,0 +1,181 @@
+# Default values for gandalf.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+graph:
+  backend: gandalf
+  external: false
+
+busybox:
+  image:
+    repository: busybox
+    tag: "1.35"
+
+gandalf_queue:
+  image:
+    repository: redis
+    tag: 7-alpine
+  service:
+    port: 6379
+  resources:
+    requests:
+      cpu: "2000m"
+      memory: "5Gi"
+    limits:
+      cpu: "2000m"
+      memory: "5Gi"
+  pvcSize: 5Gi
+  maxmemory: 3gb   # about 75% of resources.limits.memory
+  dbPath: /data
+
+image:
+  gandalf:
+    repository: ghcr.io/ranking-agent/gandalf
+    tag: 0.3.3
+    pullPolicy: Always
+
+nameOverride: ""
+fullnameOverride: ""
+
+app:
+  otel:
+    enabled: false
+    jaegerHost: "http://jaeger-otel-collector.translator-exp"
+    jaegerPort: "4317"
+  profiler_on: "False"
+  bl_version: 4.2.1
+  gandalf:
+    num_workers: 2
+    max_path_limit: 200000
+    large_result_threshold: 1000000
+    service:
+      port: 6429
+      type: ClusterIP
+    resources:
+      requests:
+        cpu: "2000m"
+        memory: "4Gi"
+      limits:
+        cpu: "2000m"
+        memory: "5Gi"
+    sharedData:
+      mountPath: ""
+    autoscaling:
+      enabled: false
+      replicaCount: 1
+    loader:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 600
+      image:
+        repository: busybox
+        tag: "1.36"
+        pullPolicy: IfNotPresent
+      sources:
+        - ""
+
+      # Skip download if data already exists and source URLs haven't changed
+      skipIfExists: true
+
+      # Optional shell command to run after all downloads complete
+      # Runs inside the init container with the data volume mounted
+      postDownloadCommand: "ls -lh"
+
+      # Resources for the init container (downloads can be memory-light)
+      resources:
+        requests:
+          cpu: "1000m"
+          memory: "5Gi"
+          ephemeral-storage: "5Gi"
+        limits:
+          cpu: "2"
+          memory: "6Gi"
+          ephemeral-storage: "6Gi"
+    persistentVolume:
+      accessModes: 
+        - ReadWriteMany
+      size: "40Gi"
+  
+  gandalf_worker:
+    autoscaling:
+      enabled: false
+    replicaCount: 4
+    resources:
+      requests:
+        cpu: "1000m"
+        memory: "5Gi"
+      limits:
+        cpu: "1000m"
+        memory: "7Gi"
+
+
+  openapi_config:
+    # Adds more configs to default open api config
+    x-trapi:
+      version: 1.5.0
+      operations:
+        - lookup
+        - overlay_connect_knodes
+        - annotate_nodes
+    x-translator:
+      component: KP
+      team:
+      - '' # add teams
+    contact:
+      email: "" # email
+      name: "" # name
+      x-id: "" # link if available
+      x-role: "" # role
+    termsOfService: "" # link to terms of service
+    title: ""
+    description: ""
+    tags:
+     - name: translator
+    servers:
+      - description: Default server
+        # this value should match chart installation name
+        # https://automat-dev.renci.org/<chart install name>
+        url: ""
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+ingress:
+  enabled: false
+  class: ""
+  pathType: "ImplementationSpecific"
+  path: "/"
+  gandalf:
+    host: "the gandalf host name"
+    annotations:
+      nginx.ingress.kubernetes.io/connection-proxy-header: keep-alive
+      nginx.ingress.kubernetes.io/proxy-body-size: "512m"
+      nginx.ingress.kubernetes.io/proxy-connect-timeout: "86400"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+      nginx.ingress.kubernetes.io/send-timeout: "86400"
+      nginx.ingress.kubernetes.io/service-upstream: "true"
+      nginx.ingress.kubernetes.io/upstream-keepalive-timeout: "86400"
+  tls:
+    enabled: false
+
+skipAttributes:
+graphMetadataUrl: ""
+schemaUrl: ""
+metadataUrl: ""
+metaKGUrl: ""
+testingDataUrl: ""
+
+datasetDesc:
+  version: ''
+  description: ''
+  dataseturl: ''
+  generatorCode: ''
+  neo4j_dump: ""
+  provenanceTag: "infores:dogpark-tier0"
+  license: "" # link to terms of service
+
+x_trapi:
+  maturity:
+    value: "maturity"
+  location:
+    value: "location"
