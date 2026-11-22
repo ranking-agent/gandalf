@@ -572,6 +572,11 @@ def _lookup_inner(
 #: tests turn it off, to compare against the general per-group loop.
 _SINGLE_PATH_FAST = True
 
+#: With ``results_as_json``, also write results built from several paths as
+#: JSON where they need none of the per-result loop's special cases (see
+#: ``_single_path_json``).  A switch for tests and A/B runs.
+_MULTI_PATH_JSON = True
+
 #: With ``results_as_json``, the most consecutive single-path results that
 #: share one ``bytes`` entry of the results list.
 _RESULTS_BLOCK = 4096
@@ -661,6 +666,40 @@ def _group_layout(keys: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]
 _JSON_CHUNK = 65_536
 
 
+def _content_key_ids(graph, fwd_eidx: np.ndarray, lightweight: bool) -> np.ndarray:
+    """Each edge's dedup content key (see ``_edge_content_key``) as a small
+    integer, equal for equal keys.
+
+    The key depends only on the edge's interned qualifier and source lists,
+    so it is worked out once per distinct pair, and remembered on the graph
+    across queries (the pools never change).  In a dehydrated response only
+    the qualifiers count, as in the general loop.
+    """
+    cache = getattr(graph, "_content_key_ids", None)
+    if cache is None:
+        # pair -> (full key id, qualifiers-only key id), and key -> id
+        cache = graph._content_key_ids = ({}, {})
+    by_pair: dict[int, tuple[int, int]] = cache[0]
+    key_ids: dict[tuple, int] = cache[1]
+    quals, sources = graph.edge_properties.pool_index_arrays(fwd_eidx)
+    pairs, first, inverse = np.unique(
+        (quals << 32) | sources, return_index=True, return_inverse=True
+    )
+    which = 1 if lightweight else 0
+    ids = np.empty(len(pairs), dtype=np.int64)
+    for i, (pair, rep) in enumerate(zip(pairs.tolist(), fwd_eidx[first].tolist())):
+        known = by_pair.get(pair)
+        if known is None:
+            key = _edge_content_key(graph, rep)
+            known = by_pair[pair] = (
+                key_ids.setdefault(key, len(key_ids)),
+                key_ids.setdefault((key[0], ()), len(key_ids)),
+            )
+        ids[i] = known[which]
+    content: np.ndarray = ids[inverse.reshape(-1)]
+    return content
+
+
 def _single_path_json(
     graph,
     layout: tuple[np.ndarray, np.ndarray, np.ndarray],
@@ -684,16 +723,21 @@ def _single_path_json(
     block: int,
     deadline,
 ) -> Optional[dict]:
-    """Write every single-path result of a query as JSON, all at once.
+    """Write a query's plain results as JSON, all at once.
 
-    The array counterpart of the single-path fast path in _build_response:
-    a group of one path whose subclass matches are all identities, and whose
-    edges all have IDs, binds each node column's node and each plain edge
-    column's edge.  Its JSON is a template fixed by the query graph with those
-    IDs filled in, so the IDs are encoded once each, looked up a column at a
-    time, and whole chunks of results are joined in one call, then sliced
-    into entries of at most *block* results, cut wherever a result the loop
-    builds comes in between.
+    The array counterpart of _build_response's per-result loop for the
+    results that need none of its special cases: groups whose subclass
+    matches are all identities (child == parent), so no inferred edge, and
+    whose edges all have IDs.  Such a result binds the node of each node
+    column on its first path, and each plain qedge to the distinct edges its
+    paths go through -- one for a single-path result; for a multi-path one,
+    deduplicated as the loop does, on (stored subject, predicate, stored
+    object, qualifiers, sources), first appearance by path then kept.  Its
+    JSON is a template fixed by the query graph with those IDs filled in, so
+    the IDs are encoded once each, looked up a column at a time, and whole
+    chunks of results are joined in one call, then sliced into entries of at
+    most *block* results, cut wherever a result the loop builds comes in
+    between.
 
     Edge IDs come from ``graph.edge_id_store`` already encoded as JSON.
 
@@ -716,73 +760,130 @@ def _single_path_json(
         if len(set(spans)) != len(spans):
             return None
     rows, starts, sizes = layout
+    num_groups = len(sizes)
     first = rows[starts]
-    fast = sizes == 1
-    for subj_col, obj_col in subclass_col_ends:
-        fast &= pa_nodes[first, subj_col] == pa_nodes[first, obj_col]
-    fast_groups = np.flatnonzero(fast)
     edge_cols = [col for col, _q, _s, _o in plain_edge_cols]
     k, m = len(node_cols), len(edge_cols)
 
-    def unique_edges(fast_rows):
-        eidx = pa_fwd_eidx[np.ix_(fast_rows, edge_cols)].reshape(-1)
-        unique, first_at, inverse = np.unique(
-            eidx, return_index=True, return_inverse=True
+    # The groups written here: every path's subclass matches are identities,
+    # and a multi-path group only where its edges' dedup keys can be read.
+    group_of_pos = np.repeat(np.arange(num_groups), sizes)
+    row_ok = np.ones(len(rows), dtype=np.bool_)
+    for subj_col, obj_col in subclass_col_ends:
+        row_ok &= pa_nodes[rows, subj_col] == pa_nodes[rows, obj_col]
+    fast = np.ones(num_groups, dtype=np.bool_)
+    if len(rows):
+        fast = np.logical_and.reduceat(row_ok, starts)
+    if not (_MULTI_PATH_JSON and hasattr(graph.edge_properties, "pool_index_arrays")):
+        fast &= sizes == 1
+
+    # Every path of those groups, in group order then path order.
+    sel = fast[group_of_pos]
+    occ_rows = rows[sel]
+    occ_group = group_of_pos[sel]
+    if m and len(occ_rows):
+        eidx = pa_fwd_eidx[np.ix_(occ_rows, edge_cols)]
+        u_all, inv_all = np.unique(eidx.reshape(-1), return_inverse=True)
+        has_id = (
+            store.lengths(u_all) > 0
+            if store is not None
+            else np.zeros(len(u_all), dtype=np.bool_)
         )
-        return unique, first_at, inverse.reshape(-1)
-
-    def id_lengths(edges: np.ndarray) -> np.ndarray:
-        if store is None:
-            return np.zeros(len(edges), dtype=np.int64)
-        lengths: np.ndarray = store.lengths(edges)
-        return lengths
-
+        missing = ~has_id[inv_all.reshape(-1)].reshape(-1, m).all(axis=1)
+        if missing.any():
+            # An edge without an ID is left to the loop, for its stand-in id.
+            fast[np.unique(occ_group[missing])] = False
+            keep_rows = fast[occ_group]
+            occ_rows = occ_rows[keep_rows]
+            occ_group = occ_group[keep_rows]
+    fast_groups = np.flatnonzero(fast)
+    n = len(fast_groups)
     fast_rows = first[fast_groups]
-    # Each unique edge's ID as the JSON a result binds it by, and as the str
-    # its KG entry is filed under.
+    num_paths = len(occ_rows)
+    deadline.check("response building")
+
+    # One entry per (path, plain edge column): the edge, its result, column,
+    # path, and its ends as stored.
     enc_edges = np.empty(0, dtype=object)
     len_edges = np.zeros(0, dtype=np.int64)
     edge_ids: list = []
-    if m:
-        u_edges, e_first, e_inv = unique_edges(fast_rows)
-        len_edges = id_lengths(u_edges)
-        with_ids = (len_edges[e_inv] > 0).reshape(-1, m).all(axis=1)
-        if not with_ids.all():
-            # An edge without an ID is left to the loop, for its stand-in id.
-            fast_groups = fast_groups[with_ids]
-            fast_rows = fast_rows[with_ids]
-            u_edges, e_first, e_inv = unique_edges(fast_rows)
-            len_edges = id_lengths(u_edges)
+    edge_values: list = []
+    slot_bytes = np.empty((n, m), dtype=object)
+    slot_lengths = np.zeros((n, m), dtype=np.int64)
+    edge_groups = np.zeros(0, dtype=np.int64)
+    edge_positions = np.zeros(0, dtype=np.int64)
+    if m and num_paths:
+        sub = pa_fwd_eidx[np.ix_(occ_rows, edge_cols)].reshape(-1)
+        ent_group = np.repeat(occ_group, m)
+        ent_col = np.tile(np.arange(m), num_paths)
+        ent_path = np.repeat(np.arange(num_paths), m)
+        inverse = pa_via_inv[np.ix_(occ_rows, edge_cols)].astype(bool).reshape(-1)
+        subj_cols = [s for _c, _q, s, _o in plain_edge_cols]
+        obj_cols = [o for _c, _q, _s, o in plain_edge_cols]
+        query_subj = pa_nodes[np.ix_(occ_rows, subj_cols)].reshape(-1)
+        query_obj = pa_nodes[np.ix_(occ_rows, obj_cols)].reshape(-1)
+        stored_subj = np.where(inverse, query_obj, query_subj)
+        stored_obj = np.where(inverse, query_subj, query_obj)
+        preds = pa_preds[np.ix_(occ_rows, edge_cols)].reshape(-1)
+
+        # Ordered by result, then qedge, then path: each binding's edges in
+        # the order the loop meets them.  Entries come by result, path, then
+        # qedge, which is that order already when every result has one path.
+        multi = sizes[ent_group] > 1
+        if multi.any():
+            order = np.lexsort((ent_path, ent_col, ent_group))
+            multi = multi[order]
+        else:
+            order = np.arange(len(ent_group))
+        if multi.any():
+            # A multi-path result binds one edge per dedup key per qedge,
+            # the first one met.
+            cand = order[multi]
+            content = _content_key_ids(graph, sub[cand], lightweight)
+            keys = np.stack(
+                [
+                    ent_group[cand],
+                    ent_col[cand],
+                    stored_subj[cand],
+                    preds[cand],
+                    stored_obj[cand],
+                    content,
+                ],
+                axis=1,
+            )
+            _, first_at = np.unique(keys, axis=0, return_index=True)
+            dropped = np.ones(len(cand), dtype=np.bool_)
+            dropped[first_at] = False
+            keep = np.ones(len(order), dtype=np.bool_)
+            keep[np.flatnonzero(multi)[dropped]] = False
+            order = order[keep]
+        ent = order
+        ent_g = ent_group[ent]
+
+        # Each distinct edge's ID, and its KG entry built once, from its
+        # first appearance.
+        u_edges, e_first, e_inv = np.unique(
+            sub[ent], return_index=True, return_inverse=True
+        )
+        e_inv = e_inv.reshape(-1)
+        len_edges = store.lengths(u_edges) if store is not None else len_edges
         if store is not None and len(u_edges):
             spans = store.get_json_batch(u_edges)
             enc_edges = np.empty(len(spans), dtype=object)
             enc_edges[:] = spans
             edge_ids = store.decode(spans)
             del spans
-    n = len(fast_rows)
-    deadline.check("response building")
-
-    # Each edge's KG entry, built once, from its first appearance.
-    edge_values: list = []
-    if m:
-        at_row = fast_rows[e_first // m]
-        at_col = e_first % m
-        cols = np.asarray(edge_cols)[at_col]
-        subj_cols = np.asarray([s for _c, _q, s, _o in plain_edge_cols])[at_col]
-        obj_cols = np.asarray([o for _c, _q, _s, o in plain_edge_cols])[at_col]
-        inverse = pa_via_inv[at_row, cols].astype(bool)
-        query_subj = pa_nodes[at_row, subj_cols]
-        query_obj = pa_nodes[at_row, obj_cols]
-        stored_subj = np.where(inverse, query_obj, query_subj).tolist()
-        stored_obj = np.where(inverse, query_subj, query_obj).tolist()
-        preds = pa_preds[at_row, cols].tolist()
+        at = ent[e_first]
+        first_preds = preds[at].tolist()
+        first_subj = stored_subj[at].tolist()
+        first_obj = stored_obj[at].tolist()
         cache = minimal_edges if lightweight else edge_templates
         for i, fwd_eidx in enumerate(u_edges.tolist()):
             edge = cache.get(fwd_eidx)
             if edge is None:
-                predicate = idx_to_predicate[preds[i]]
-                subj_id = node_id_cache[stored_subj[i]]
-                obj_id = node_id_cache[stored_obj[i]]
+                predicate = idx_to_predicate[first_preds[i]]
+                subj_id = node_id_cache[first_subj[i]]
+                obj_id = node_id_cache[first_obj[i]]
                 if lightweight:
                     edge = _minimal_edge(graph, fwd_eidx, predicate, subj_id, obj_id)
                 else:
@@ -799,6 +900,32 @@ def _single_path_json(
             edge_values.append(edge)
         deadline.check("response building")
 
+        # Where each edge is first filed: its result, and its place among
+        # the result's edges (qedge, then binding order, as the loop files).
+        group_start = np.searchsorted(ent_g, ent_g, side="left")
+        ent_position = np.arange(len(ent)) - group_start
+        edge_groups = ent_g[e_first]
+        edge_positions = ent_position[e_first]
+
+        # Each binding's IDs, as the JSON between its brackets.
+        slot = np.searchsorted(fast_groups, ent_g) * m + ent_col[ent]
+        run_starts = np.flatnonzero(np.r_[True, slot[1:] != slot[:-1]])
+        run_sizes = np.diff(np.r_[run_starts, len(slot)])
+        flat_bytes = slot_bytes.reshape(-1)
+        flat_lengths = slot_lengths.reshape(-1)
+        single = run_sizes == 1
+        one = run_starts[single]
+        flat_bytes[slot[one]] = enc_edges[e_inv[one]]
+        flat_lengths[slot[one]] = len_edges[e_inv[one]]
+        for start, size in zip(
+            run_starts[~single].tolist(), run_sizes[~single].tolist()
+        ):
+            ids = enc_edges[e_inv[start : start + size]].tolist()
+            joined = b",".join(ids)
+            flat_bytes[slot[start]] = joined
+            flat_lengths[slot[start]] = len(joined)
+        deadline.check("response building")
+
     node_matrix = pa_nodes[np.ix_(fast_rows, [col for col, _q in node_cols])]
     u_nodes, n_first, n_inv = np.unique(
         node_matrix.reshape(-1), return_index=True, return_inverse=True
@@ -813,9 +940,9 @@ def _single_path_json(
 
     enc_nodes, len_nodes = encoded(node_ids)
 
-    # The template's literal pieces, around k node IDs then m edge IDs; a
-    # NUL never appears in orjson output, so it marks the gaps.  Each result
-    # ends with a comma, dropped from the last one of each entry.
+    # The template's literal pieces, around k node IDs then m edge bindings'
+    # IDs; a NUL never appears in orjson output, so it marks the gaps.  Each
+    # result ends with a comma, dropped from the last one of each entry.
     def binding(key: str) -> bytes:
         encoded: bytes = orjson.dumps(key)
         return encoded + b':{"ids":[\x00]}'
@@ -837,13 +964,13 @@ def _single_path_json(
     if k:
         lengths += len_nodes[n_inv].reshape(n, k).sum(axis=1)
     if m:
-        lengths += len_edges[e_inv].reshape(n, m).sum(axis=1)
+        lengths += slot_lengths.sum(axis=1)
     offsets = np.zeros(n + 1, dtype=np.int64)
     np.cumsum(lengths, out=offsets[1:])
 
     # Entries end at every block boundary and wherever a loop-built result
     # comes in between; chunks end on block boundaries too.
-    dict_groups = np.setdiff1d(np.arange(len(sizes)), fast_groups, assume_unique=True)
+    dict_groups = np.setdiff1d(np.arange(num_groups), fast_groups, assume_unique=True)
     cuts = np.searchsorted(fast_groups, dict_groups)
     step = max(block, 1)
     bounds = np.union1d(cuts, np.append(np.arange(0, n, step), n)).tolist()
@@ -859,7 +986,7 @@ def _single_path_json(
         for j in range(k):
             pieces[:, 2 * j + 1] = enc_nodes[n_inv[c0 * k + j : c1 * k : k]]
         for j in range(m):
-            pieces[:, 2 * (k + j) + 1] = enc_edges[e_inv[c0 * m + j : c1 * m : m]]
+            pieces[:, 2 * (k + j) + 1] = slot_bytes[c0:c1, j]
         joined = b"".join(pieces.reshape(-1).tolist())
         base = offsets[c0]
         while bi + 1 < len(bounds) and bounds[bi + 1] <= c1:
@@ -881,12 +1008,7 @@ def _single_path_json(
             fast_groups[n_first // k] if k else np.zeros(0, dtype=np.int64),
             n_first % k if k else np.zeros(0, dtype=np.int64),
         ),
-        "edges": (
-            edge_ids,
-            edge_values,
-            fast_groups[e_first // m] if m else np.zeros(0, dtype=np.int64),
-            e_first % m if m else np.zeros(0, dtype=np.int64),
-        ),
+        "edges": (edge_ids, edge_values, edge_groups, edge_positions),
     }
 
 

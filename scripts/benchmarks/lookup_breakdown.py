@@ -106,7 +106,7 @@ HELPERS = (
 #: statement is shown as its code.
 NAMES = (
     ("top", "_group_rows(", "group paths into results"),
-    ("top", "_single_path_json(", "write single-path results as JSON"),
+    ("top", "_single_path_json(", "write results as JSON"),
     ("top", "_file_in_first_seen_order(", "merge JSON and loop results; file KG"),
     ("top", "lmdb_store.get_json_batch(", "prefetch edge attributes"),
     ("top", "get_edge_ids_batch(", "edge IDs of the loop's results"),

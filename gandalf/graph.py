@@ -274,6 +274,15 @@ class EdgePropertyStore:
         """
         return int(self._quals_idx[idx]), int(self._sources_idx[idx])
 
+    def pool_index_arrays(
+        self, edge_idxes: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """:meth:`pool_indices` for many edges: two arrays parallel to them."""
+        return (
+            np.asarray(self._quals_idx[edge_idxes], dtype=np.int64),
+            np.asarray(self._sources_idx[edge_idxes], dtype=np.int64),
+        )
+
     def pool_mask(self, field: str, edge_idxes: np.ndarray, test) -> np.ndarray:
         """Whether each edge's interned *field* value passes *test*.
 

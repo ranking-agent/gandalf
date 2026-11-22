@@ -312,17 +312,21 @@ Two rules follow:
   its place in the edge.  `tests/test_edge_attributes_json.py` checks both
   modes serialize to the same bytes.
 
-**Single-path results are written straight to JSON.**  The server also calls
+**Plain results are written straight to JSON.**  The server also calls
 `lookup(..., results_as_json=True)`.  Nearly every result on a large query
-comes from one path whose subclass matches are identities (the single-path
-fast path above); `_single_path_json` writes all of those at once rather
-than building them one by one: it picks them out with NumPy masks, builds
-each unique edge's KG entry once, and fills a JSON template fixed by the
-query graph with each result's IDs, encoded once each.  Runs of consecutive
-results become single `bytes` entries of `message["results"]`, among the
-results the per-group loop still builds as dicts (multi-path, inferred edges,
-edges without IDs, ALL/COLLATE queries); `to_fragments` hands them to orjson
-as Fragments.  The rules:
+needs no inferred edge: its subclass matches are identities.
+`_single_path_json` writes all of those at once rather than building them
+one by one -- single-path results (the fast path above) and, with
+`_MULTI_PATH_JSON`, multi-path ones too: it picks them out with NumPy masks,
+works out each multi-path result's edge bindings with the loop's dedup rule
+(stored subject, predicate, stored object, and `_edge_content_key`, as
+integers via `_content_key_ids`, cached per graph), builds each unique
+edge's KG entry once, and fills a JSON template fixed by the query graph
+with each result's IDs, encoded once each.  Runs of consecutive results
+become single `bytes` entries of `message["results"]`, among the results the
+per-group loop still builds as dicts (inferred edges, edges without IDs,
+ALL/COLLATE queries); `to_fragments` hands them to orjson as Fragments.  The
+rules:
 - **Read or change results through `gandalf.trapi.response_results(response)`**
   (response annotator plugins included), which decodes them in place.
 - **Output stays byte-identical to the dict path**, results and

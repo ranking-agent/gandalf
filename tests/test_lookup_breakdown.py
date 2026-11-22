@@ -100,7 +100,11 @@ def test_timed_copy_builds_the_same_response(
     assert build.cnt[first] == results
 
 
-def test_breakdown_of_one_query(breakdown, graph, bmt):
+def test_breakdown_of_one_query(breakdown, graph, bmt, monkeypatch):
+    # Multi-path results to the loop, so this query has both kinds.
+    monkeypatch.setattr(
+        importlib.import_module("gandalf.search.lookup"), "_MULTI_PATH_JSON", False
+    )
     cal = breakdown.calibrate(n=10_000, rounds=2)
     query = {"name": "two_hop_mixed", "body": QUERIES["two_hop_mixed"]}
     rec = breakdown.breakdown(

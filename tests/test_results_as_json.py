@@ -172,9 +172,47 @@ def test_same_bytes_with_sibling_subclasses(
 def test_mixed_results_keep_their_order(monkeypatch, graph, bmt):  # noqa: F811
     """Written results and dict results interleave in the list, in order."""
     monkeypatch.setattr(lookup_module, "_RESULTS_BLOCK", 4096)
+    # Multi-path results to the loop, so this query mixes the two kinds.
+    monkeypatch.setattr(lookup_module, "_MULTI_PATH_JSON", False)
     response = lookup(graph, TWO_HOP_MIXED, bmt=bmt, results_as_json=True)
     kinds = [type(r) for r in response["message"]["results"]]
     assert bytes in kinds and dict in kinds
+
+
+@pytest.mark.parametrize("multi_path_json", [False, True])
+@pytest.mark.parametrize("block", [1, 4096])
+@pytest.mark.parametrize("dehydrated", [False, True])
+@pytest.mark.parametrize("subclass", [False, True])
+@pytest.mark.parametrize("name", list(QUERIES))
+def test_same_bytes_with_and_without_multi_path_json(
+    monkeypatch, graph, bmt, name, subclass, dehydrated, block, multi_path_json
+):  # noqa: F811
+    """Writing multi-path results as JSON changes nothing, either way."""
+    monkeypatch.setattr(lookup_module, "_MULTI_PATH_JSON", multi_path_json)
+    _check(
+        monkeypatch,
+        graph,
+        QUERIES[name],
+        bmt,
+        block,
+        subclass=subclass,
+        dehydrated=dehydrated,
+    )
+
+
+def test_multi_path_results_are_written_as_json(monkeypatch, graph, bmt):  # noqa: F811
+    """A multi-path result needing no inferred edge is written, not built."""
+    written = _check(monkeypatch, graph, TWO_HOP_MIXED, bmt, 4096)
+    response = lookup(
+        graph, TWO_HOP_MIXED, bmt=bmt, results_as_json=True, attributes_as_json=True
+    )
+    assert all(type(r) is bytes for r in response["message"]["results"])
+    bindings = [
+        len(binding["ids"])
+        for result in response_results(response)
+        for binding in result["analyses"][0]["edge_bindings"].values()
+    ]
+    assert written and max(bindings) > 1, "the query should have a multi-path result"
 
 
 # ---------------------------------------------------------------------------

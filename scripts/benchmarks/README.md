@@ -38,7 +38,7 @@ python scripts/benchmarks/bench_lookup.py compare \
 The query file holds either one TRAPI request body or a JSON list of them,
 the same JSON you would POST to `/query`.  Like the server, the benchmark
 scripts ask `lookup()` for edge attributes as their stored JSON
-(`attributes_as_json`) and for single-path results written as JSON
+(`attributes_as_json`) and for plain results written as JSON
 (`results_as_json`), and the serialization they time includes turning them
 into orjson Fragments; results are counted and fingerprinted through
 `gandalf.trapi.response_results`. An optional top-level `"name"` key
