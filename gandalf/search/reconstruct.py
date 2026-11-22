@@ -272,49 +272,34 @@ def reconstruct_paths(
     t_cache_start = time.perf_counter()
     with prof.stage("node_cache_build"):
         unique_node_indices = np.unique(paths_nodes[:, :num_node_cols])
-
-        # Fetch all node properties and IDs in two single-transaction batch
-        # reads (sorted for B-tree locality) instead of one LMDB lookup per
-        # node.  For result sets with hundreds of thousands of unique nodes
-        # this collapses ~N transactions into 2.
-        props_batch = graph.get_all_node_properties_batch(unique_node_indices)
-        id_batch = graph.get_node_ids_batch(unique_node_indices)
-
-        node_cache = {}
-        node_id_cache = {}
-        # Nodes share a few dozen distinct category lists, and resolving the
-        # most specific one costs a BMT call per category, so resolve each
-        # distinct list once.
-        specific_categories: dict[tuple, list] = {}
-        for node_idx in unique_node_indices:
-            # pop (not get) so each property dict is freed as it is consumed,
-            # avoiding a transient 2x peak alongside node_cache.
-            all_props = props_batch.pop(int(node_idx), {})
-            # TRAPI 2.0 admits no nulls and requires at least one category on
-            # every Node, so a missing name yields no "name" key and a node
-            # with no stored category falls back to NamedThing.  (Node
-            # attributes may legitimately be an empty list.)
-            node_props: NodeDict
-            if lightweight and bmt is not None:
-                categories = tuple(all_props.get("categories", []))
-                specific = specific_categories.get(categories)
-                if specific is None:
-                    specific = _get_most_specific_category(list(categories), bmt)
-                    specific_categories[categories] = specific
-                # A list of its own per node, so no response code that
-                # edits one node's categories can reach another's.
-                node_props = {"categories": list(specific)}
-                name = all_props.get("name")
-                if name is not None:
-                    node_props["name"] = name
-            else:
-                node_props = cast("NodeDict", all_props.copy())
-                if node_props.get("name") is None:
-                    node_props.pop("name", None)
-                if "attributes" not in node_props:
-                    node_props["attributes"] = []
-            node_cache[node_idx] = ensure_node_category(node_props)
-            node_id_cache[node_idx] = id_batch.get(int(node_idx))
+        node_cache: dict = {}
+        node_id_cache: dict = {}
+        name_store = getattr(graph, "node_name_store", None)
+        category_index = getattr(graph, "node_categories", None)
+        if (
+            lightweight
+            and bmt is not None
+            and name_store is not None
+            and category_index is not None
+        ):
+            _dehydrated_node_cache(
+                graph,
+                bmt,
+                unique_node_indices,
+                name_store,
+                category_index,
+                node_cache,
+                node_id_cache,
+            )
+        else:
+            _node_cache_from_records(
+                graph,
+                bmt,
+                lightweight,
+                unique_node_indices,
+                node_cache,
+                node_id_cache,
+            )
         prof.add_metric("unique_nodes", int(len(unique_node_indices)))
 
     t_cache_end = time.perf_counter()
@@ -719,3 +704,87 @@ def compute_join_order(query_graph, edge_results, edge_order):
         nodes_in_path.add(edge_info["object"])
 
     return join_order
+
+
+def _node_cache_from_records(
+    graph, bmt, lightweight, unique_node_indices, node_cache, node_id_cache
+) -> None:
+    """Fill the node caches from each node's record in the node store."""
+
+    # Fetch all node properties and IDs in two single-transaction batch
+    # reads (sorted for B-tree locality) instead of one LMDB lookup per
+    # node.  For result sets with hundreds of thousands of unique nodes
+    # this collapses ~N transactions into 2.
+    props_batch = graph.get_all_node_properties_batch(unique_node_indices)
+    id_batch = graph.get_node_ids_batch(unique_node_indices)
+
+    # Nodes share a few dozen distinct category lists, and resolving the
+    # most specific one costs a BMT call per category, so resolve each
+    # distinct list once.
+    specific_categories: dict[tuple, list] = {}
+    for node_idx in unique_node_indices:
+        # pop (not get) so each property dict is freed as it is consumed,
+        # avoiding a transient 2x peak alongside node_cache.
+        all_props = props_batch.pop(int(node_idx), {})
+        # TRAPI 2.0 admits no nulls and requires at least one category on
+        # every Node, so a missing name yields no "name" key and a node
+        # with no stored category falls back to NamedThing.  (Node
+        # attributes may legitimately be an empty list.)
+        node_props: NodeDict
+        if lightweight and bmt is not None:
+            categories = tuple(all_props.get("categories", []))
+            specific = specific_categories.get(categories)
+            if specific is None:
+                specific = _get_most_specific_category(list(categories), bmt)
+                specific_categories[categories] = specific
+            # A list of its own per node, so no response code that
+            # edits one node's categories can reach another's.
+            node_props = {"categories": list(specific)}
+            name = all_props.get("name")
+            if name is not None:
+                node_props["name"] = name
+        else:
+            node_props = cast("NodeDict", all_props.copy())
+            if node_props.get("name") is None:
+                node_props.pop("name", None)
+            if "attributes" not in node_props:
+                node_props["attributes"] = []
+        node_cache[node_idx] = ensure_node_category(node_props)
+        node_id_cache[node_idx] = id_batch.get(int(node_idx))
+
+
+def _dehydrated_node_cache(
+    graph,
+    bmt,
+    unique_node_indices,
+    name_store,
+    category_index,
+    node_cache,
+    node_id_cache,
+) -> None:
+    """Fill the node caches of a dehydrated response without node records.
+
+    What :func:`_node_cache_from_records` builds in lightweight mode -- each
+    node's most specific categories and its name -- read from the graph's
+    memory-mapped names and category index instead of decoding each node's
+    whole record.  The most specific categories of each distinct category
+    list are resolved once per graph (``graph.most_specific_categories``).
+    """
+    names = name_store.get_batch(unique_node_indices)
+    id_batch = graph.get_node_ids_batch(unique_node_indices)
+    category_sets = category_index.category_sets
+    set_of_node = category_index.set_of_node[unique_node_indices].tolist()
+    specific_of = graph.most_specific_categories(bmt)
+    for node_idx, set_idx in zip(unique_node_indices, set_of_node):
+        specific = specific_of.get(set_idx)
+        if specific is None:
+            specific = _get_most_specific_category(list(category_sets[set_idx]), bmt)
+            specific_of[set_idx] = specific
+        # A list of its own per node, so no response code that edits one
+        # node's categories can reach another's.
+        node_props: NodeDict = {"categories": list(specific)}
+        name = names.get(int(node_idx))
+        if name is not None:
+            node_props["name"] = name
+        node_cache[node_idx] = ensure_node_category(node_props)
+        node_id_cache[node_idx] = id_batch.get(int(node_idx))

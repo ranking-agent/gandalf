@@ -124,7 +124,8 @@ graph.save_mmap("data/processed/gandalf_mmap")
 > **Rebuild to filter on attributes faster.**  `gandalf-build` now also
 > writes memory-mapped columns of the attribute values filters read most --
 > each node's `information_content` and each edge's PubMed
-> `publications` -- plus the node IDs as a memory-mapped file.  Node and
+> `publications` -- plus the node IDs and names as memory-mapped files,
+> so a dehydrated response reads no node records at all.  Node and
 > edge attribute constraints on them, and `min_information_content`, no
 > longer read and decode every candidate's record; answers are unchanged.
 > An old graph still loads and answers the same, the slower way.  To add

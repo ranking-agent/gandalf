@@ -17,6 +17,7 @@ from gandalf.edge_id_store import (
     OFFSETS_FILE,
     EdgeIdStore,
     NodeIdStore,
+    NodeNameStore,
 )
 from gandalf.memory import MemoryLedger
 from gandalf.lmdb_store import EDGE_ATTRIBUTES_FORMAT, LMDBPropertyStore
@@ -540,6 +541,10 @@ class CSRGraph:
         # response — written by save_mmap, mapped by load_mmap; None when
         # absent, and the node store's LMDB answers instead.
         self.node_id_store: Optional[NodeIdStore] = None
+
+        # Node names by index, memory-mapped the same way; with the
+        # category index, a dehydrated response reads no node records.
+        self.node_name_store: Optional[NodeNameStore] = None
 
         # LMDB store (cold path) — set later by loader or load_mmap
         self.lmdb_store = None
@@ -1231,6 +1236,22 @@ class CSRGraph:
             return self.node_store.get_node_id(node_idx)
         return self.idx_to_node_id.get(node_idx)
 
+    def most_specific_categories(self, bmt) -> dict:
+        """Per-graph cache of each category list's most specific categories.
+
+        Keyed by index into ``node_categories.category_sets``, filled lazily
+        by the caller, and reset when a different *bmt* asks: the answer
+        depends on the Biolink model.  Resolving a list costs BMT calls, so
+        across queries each distinct list is resolved once, not once per
+        query.
+        """
+        cached = getattr(self, "_most_specific_categories", None)
+        if cached is None or cached[0] is not bmt:
+            cached = (bmt, {})
+            self._most_specific_categories: tuple = cached
+        table: dict = cached[1]
+        return table
+
     def get_predicate_stats(self):
         """Get statistics about predicate usage"""
         pred_counts = {}
@@ -1551,6 +1572,12 @@ class CSRGraph:
         node_id_store = NodeIdStore.from_id_map(node_id_to_idx, self.num_nodes)
         node_id_store.save(directory)
         columns_metadata.update(node_id_store.metadata())
+        node_name_store = NodeNameStore.from_names(
+            [node_properties.get(idx, {}).get("name") for idx in range(self.num_nodes)]
+        )
+        if node_name_store is not None:
+            node_name_store.save(directory)
+            columns_metadata.update(node_name_store.metadata())
         logger.info(
             "  Attribute columns: %.1f MB in %.1fs",
             attribute_columns.nbytes() / 2**20,
@@ -1780,6 +1807,15 @@ class CSRGraph:
             )
             if node_ids_key in metadata
             and (directory / NodeIdStore.offsets_file).exists()
+            else None
+        )
+        node_names_key = f"{NodeNameStore.metadata_prefix}_unique"
+        graph.node_name_store = (
+            NodeNameStore.load(
+                directory, metadata, in_memory=settings.load_mmaps_into_memory
+            )
+            if node_names_key in metadata
+            and (directory / NodeNameStore.offsets_file).exists()
             else None
         )
         if graph.attribute_columns is None:

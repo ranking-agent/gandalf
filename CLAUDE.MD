@@ -156,8 +156,15 @@ Keep it that way:
   change an answer -- `tests/test_attribute_columns.py` checks that on
   randomized awkward values; extend it with any new column.  `save_mmap`
   writes them, and `python -m gandalf.attribute_columns GRAPH_DIR` adds them
-  (and `NodeIdStore`, the node IDs as a memory-mapped blob for responses) to
-  a graph already built.
+  (and `NodeIdStore` / `NodeNameStore`, the node IDs and names as
+  memory-mapped blobs for responses) to a graph already built.
+- **Dehydrated responses read no node records.**  Each node's name comes
+  from `graph.node_name_store` and its most specific categories from the
+  category index, resolved once per distinct category list per graph
+  (`graph.most_specific_categories`), in `_dehydrated_node_cache`
+  (`search/reconstruct.py`).  A graph without either file falls back to
+  `_node_cache_from_records`.  `tests/test_dehydrated_nodes.py` checks the
+  two give byte-identical responses.
 - **Node filter plugins may judge a batch**: a filter with a
   `mask(graph, node_idxes)` method is called once per step
   (`node_filter_mask`) instead of once per node.

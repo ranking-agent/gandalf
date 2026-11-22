@@ -125,6 +125,8 @@ class EdgeIdStore:
     blob_file = BLOB_FILE
     offsets_file = OFFSETS_FILE
     metadata_prefix = "edge_ids"
+    #: Encodes one value as stored; an empty span means none.
+    _encode = staticmethod(_encode_id)
 
     def __init__(
         self, blob: Blob, offsets: np.ndarray, unique: bool, escaped: bool = True
@@ -151,7 +153,7 @@ class EdgeIdStore:
         offsets = np.zeros(len(ids) + 1, dtype=np.int64)
         pieces = []
         for start in range(0, len(ids), chunk):
-            encoded = [_encode_id(i) for i in ids[start : start + chunk]]
+            encoded = [cls._encode(i) for i in ids[start : start + chunk]]
             offsets[start + 1 : start + 1 + len(encoded)] = np.fromiter(
                 map(len, encoded), dtype=np.int64, count=len(encoded)
             )
@@ -283,3 +285,45 @@ class NodeIdStore(EdgeIdStore):
         for node_id, idx in items:
             ids[idx] = node_id
         return cls.from_ids(ids)
+
+
+def _encode_name(edge_id) -> bytes:
+    """Encode one node name as stored: a JSON string, or empty for none.
+
+    Unlike an ID, an empty name is kept (``b'""'``): a node whose name is
+    ``""`` has a ``name`` in its response, one with no name does not.
+
+    >>> _encode_name("aspirin"), _encode_name(""), _encode_name(None)
+    (b'"aspirin"', b'""', b'')
+    """
+    # (The parameter is named as in ``_encode_id``, which this replaces.)
+    return b"" if edge_id is None else orjson.dumps(edge_id)
+
+
+class NodeNameStore(EdgeIdStore):
+    """Node names by node index, stored the same way as edge IDs.
+
+    A dehydrated response needs only each node's name and categories; with
+    this and the category index it reads neither from the node store.
+    Written to ``node_names.bin`` and ``node_name_offsets.npy``.
+
+    >>> store = NodeNameStore.from_names(["aspirin", None, ""])
+    >>> store.get_batch(np.array([0, 1, 2]))
+    {0: 'aspirin', 2: ''}
+    >>> NodeNameStore.from_names(["aspirin", 5]) is None
+    True
+    """
+
+    blob_file = "node_names.bin"
+    offsets_file = "node_name_offsets.npy"
+    metadata_prefix = "node_names"
+    _encode = staticmethod(_encode_name)
+
+    @classmethod
+    def from_names(cls, names: Sequence) -> Optional["NodeNameStore"]:
+        """Build from one name (or None) per node, or return None when a name
+        is not a string: the store holds strings only, and a graph without
+        it reads names from the node store, whatever their type."""
+        if any(name is not None and not isinstance(name, str) for name in names):
+            return None
+        return cls.from_ids(names)

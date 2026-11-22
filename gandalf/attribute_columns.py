@@ -25,10 +25,11 @@ operators, other attributes, a non-PubMed value) are not served at all.
 Either way the caller falls back to the record in LMDB, so a column only ever
 changes how fast a filter runs, never what it returns.
 
-``gandalf-build`` writes the columns, along with the node IDs as a
-memory-mapped file (:class:`gandalf.edge_id_store.NodeIdStore`) for building
-responses.  A graph built before they existed works without them, and can be
-given them without a rebuild::
+``gandalf-build`` writes the columns, along with the node IDs and names as
+memory-mapped files (:class:`gandalf.edge_id_store.NodeIdStore`,
+:class:`~gandalf.edge_id_store.NodeNameStore`) for building responses.
+A graph built before they existed works without them, and can be given
+them without a rebuild::
 
     python -m gandalf.attribute_columns /data/graph_mmap
 """
@@ -386,9 +387,10 @@ class AttributeColumns:
         Args:
             node_items / edge_items: Each returns a fresh iterable of
                 ``(index, attributes list)``, read once per column; edges
-                must come in ascending index order.  *edge_items* is None for a graph without
-                stored edge attributes: it gets no edge columns, since every
-                edge attribute constraint then fails whatever its ``not``.
+                must come in ascending index order.  *edge_items* is None
+                for a graph without stored edge attributes: it gets no edge
+                columns, since every edge attribute constraint then fails
+                whatever its ``not``.
         """
         return cls(
             {
@@ -521,11 +523,12 @@ def add_to_graph(directory: Path) -> AttributeColumns:
     """Give an already-built graph its attribute columns, without a rebuild.
 
     Reads every node record and every edge's attributes, then writes the
-    column files, the memory-mapped node IDs (``NodeIdStore``) and their
-    ``metadata.pkl`` entries, as ``save_mmap`` does for a new graph.  Running it again rewrites them.  Processes serving the graph
-    pick them up when they next load it.
+    column files, the memory-mapped node IDs and names (``NodeIdStore``,
+    ``NodeNameStore``) and their ``metadata.pkl`` entries, as ``save_mmap``
+    does for a new graph.  Running it again rewrites them.  Processes
+    serving the graph pick them up when they next load it.
     """
-    from gandalf.edge_id_store import NodeIdStore
+    from gandalf.edge_id_store import NodeIdStore, NodeNameStore
     from gandalf.lmdb_store import LMDBPropertyStore
     from gandalf.node_store import NodeStore
 
@@ -554,6 +557,16 @@ def add_to_graph(directory: Path) -> AttributeColumns:
         )
     node_ids.save(directory)
     metadata.update(node_ids.metadata())
+    # The node names, for dehydrated responses
+    names: list = [None] * metadata["num_nodes"]
+    with NodeStore(directory / "node_store.lmdb", readonly=True) as node_store:
+        for idx, props in node_store.iter_properties():
+            names[idx] = props.get("name")
+    node_names = NodeNameStore.from_names(names)
+    del names
+    if node_names is not None:
+        node_names.save(directory)
+        metadata.update(node_names.metadata())
     with open(directory / "metadata.pkl", "wb") as f:
         pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
     return columns
