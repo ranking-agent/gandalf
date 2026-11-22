@@ -43,6 +43,7 @@ import uuid
 import httpx
 
 from gandalf.config import settings
+from gandalf.trapi import node_attributes
 from gandalf.search.response_annotators import register_response_annotator
 
 logger = logging.getLogger(__name__)
@@ -149,7 +150,7 @@ def _attach_node_counts(nodes: dict, node_counts: dict, infores_id: str) -> None
         node = nodes.get(curie)
         if node is None:
             continue
-        attrs = node.setdefault("attributes", [])
+        attrs = node_attributes(node)
         attrs.append(
             {
                 "attribute_type_id": _NODE_ATTRIBUTE_TYPE,

@@ -1183,15 +1183,19 @@ class CSRGraph:
             return self.node_store.get_properties(node_idx)
         return self.node_properties.get(node_idx, {})
 
-    def get_all_node_properties_batch(self, node_indices):
+    def get_all_node_properties_batch(self, node_indices, attributes_as_json=False):
         """Batch-fetch properties for many nodes in one LMDB transaction.
 
         Returns dict mapping node_idx -> properties dict.  Falls back to
         the in-memory node_properties dict when the graph was loaded
-        without a NodeStore.
+        without a NodeStore.  With *attributes_as_json*, each node's
+        ``attributes`` may be the JSON stored in the node store (``bytes``)
+        rather than a list (see ``NodeStore.get_batch``).
         """
         if self.node_store is not None:
-            return self.node_store.get_batch(node_indices)
+            return self.node_store.get_batch(
+                node_indices, attributes_as_json=attributes_as_json
+            )
         return {int(n): self.node_properties.get(int(n), {}) for n in node_indices}
 
     def get_node_ids_batch(self, node_indices):

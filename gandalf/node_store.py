@@ -6,7 +6,15 @@ node_properties) that previously consumed ~5-10 GB of RAM for large graphs.
 Uses a single LMDB environment with three named sub-databases:
 - id_to_idx: node_id (UTF-8 string) -> node_idx (4-byte big-endian uint32)
 - idx_to_id: node_idx (4-byte big-endian uint32) -> node_id (UTF-8 string)
-- properties: node_idx (4-byte big-endian uint32) -> msgpack({name, categories, attributes})
+- properties: node_idx (4-byte big-endian uint32) -> msgpack({name, categories,
+  attributes}), where ``attributes`` is the JSON array a TRAPI response
+  carries, as msgpack ``bin`` (see ``encode_properties``)
+
+Storing a node's attributes as their response JSON lets a full response hand
+them to the serializer as they are (``get_batch(attributes_as_json=True)``)
+rather than decoding them into Python objects only to encode them again.
+Every other reader gets them decoded.  A store written before this keeps the
+attributes as a msgpack array; each record is read correctly either way.
 
 LMDB is memory-mapped by the OS — multiple worker processes reading the same
 file share physical memory pages automatically, with no per-process duplication.
@@ -20,6 +28,7 @@ from typing import Iterator, Optional, Tuple
 
 import lmdb
 import msgpack
+import orjson
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +64,41 @@ def _put_with_resize(env, txn, db, key, val, pending):
         txn.put(key, val, db=db)
         pending.append((db, key, val))
         return txn
+
+
+def encode_properties(props: dict) -> bytes:
+    """A node's stored value: its properties, attributes as response JSON.
+
+    >>> value = encode_properties({"name": "x", "attributes": [{"value": 1}]})
+    >>> msgpack.unpackb(value)
+    {'name': 'x', 'attributes': b'[{"value":1}]'}
+    >>> decode_properties(value)
+    {'name': 'x', 'attributes': [{'value': 1}]}
+    """
+    stored = dict(props)
+    if "attributes" in stored:
+        stored["attributes"] = orjson.dumps(stored["attributes"])
+    data: bytes = msgpack.packb(stored, use_bin_type=True)
+    return data
+
+
+def decode_properties(value, attributes_as_json: bool = False) -> dict:
+    """A node's properties from its stored value.
+
+    With *attributes_as_json*, attributes stored as JSON stay ``bytes`` (a
+    record from an older store still yields its list).
+
+    >>> decode_properties(encode_properties({"attributes": []}), True)
+    {'attributes': b'[]'}
+    >>> decode_properties(msgpack.packb({"attributes": [1]}), True)
+    {'attributes': [1]}
+    """
+    props: dict = msgpack.unpackb(value, raw=False)
+    if not attributes_as_json:
+        attributes = props.get("attributes")
+        if type(attributes) is bytes:
+            props["attributes"] = orjson.loads(attributes)
+    return props
 
 
 def _encode_idx(idx: int) -> bytes:
@@ -109,15 +153,14 @@ class NodeStore:
             val = txn.get(_encode_idx(node_idx))
             if val is None:
                 return {}
-            result: dict = msgpack.unpackb(val, raw=False)
-            return result
+            return decode_properties(val)
 
     def get_property(self, node_idx: int, key: str, default=None):
         """Get a specific property for a node."""
         props = self.get_properties(node_idx)
         return props.get(key, default)
 
-    def get_batch(self, node_indices) -> dict:
+    def get_batch(self, node_indices, attributes_as_json: bool = False) -> dict:
         """Get properties for many nodes in a single transaction.
 
         Indices are read in sorted order so the LMDB B-tree is walked in
@@ -126,14 +169,16 @@ class NodeStore:
         page cache is cold.
 
         Returns dict mapping node_idx -> properties dict (missing nodes
-        are simply absent).
+        are simply absent).  With *attributes_as_json*, each node's
+        ``attributes`` is the stored JSON ``bytes`` (see
+        :func:`decode_properties`).
         """
         results: dict = {}
         with self._env.begin(db=self._db_properties, buffers=True) as txn:
             for idx in sorted({int(i) for i in node_indices}):
                 val = txn.get(_encode_idx(idx))
                 if val is not None:
-                    results[idx] = msgpack.unpackb(val, raw=False)
+                    results[idx] = decode_properties(val, attributes_as_json)
         return results
 
     def get_node_ids_batch(self, node_indices) -> dict:
@@ -165,8 +210,7 @@ class NodeStore:
             cursor = txn.cursor()
             for key_buf, val_buf in cursor:
                 node_idx = _decode_idx(bytes(key_buf))
-                props = msgpack.unpackb(val_buf, raw=False)
-                yield node_idx, props
+                yield node_idx, decode_properties(val_buf)
 
     def close(self):
         if self._env is not None:
@@ -252,7 +296,7 @@ class NodeStore:
         try:
             for node_idx, props in node_properties.items():
                 key = _encode_idx(node_idx)
-                val = msgpack.packb(props, use_bin_type=True)
+                val = encode_properties(props)
                 txn = _put_with_resize(env, txn, db_properties, key, val, pending)
                 count += 1
                 if count % commit_every == 0:
@@ -268,3 +312,64 @@ class NodeStore:
         env.close()
         logger.debug("  NodeStore: built %s", db_path)
         return NodeStore(db_path, readonly=True)
+
+
+def rewrite_attributes_as_json(path, commit_every=50_000) -> int:
+    """Rewrite a node store in place so every node's attributes are stored
+    as JSON, as :meth:`NodeStore.build` now writes them.
+
+    Copies the store into a new LMDB beside it, then swaps the directories,
+    so a process still reading the old one keeps reading it until it reopens
+    the graph.  Records already in the new form are copied as they are.
+
+    Returns:
+        How many records were converted.
+    """
+    path = Path(path)
+    new_path = path.with_name(path.name + ".rewrite")
+    old_path = path.with_name(path.name + ".old")
+    for leftover in (new_path, old_path):
+        if leftover.exists():
+            shutil.rmtree(leftover)
+    new_path.mkdir(parents=True)
+    converted = 0
+    src = lmdb.open(
+        str(path),
+        readonly=True,
+        max_dbs=3,
+        lock=False,
+        readahead=False,
+        map_size=_DEFAULT_READ_MAP_SIZE,
+    )
+    dst = lmdb.open(
+        str(new_path), max_dbs=3, readahead=False, map_size=_INITIAL_WRITE_MAP_SIZE
+    )
+    try:
+        for name in (b"id_to_idx", b"idx_to_id", b"properties"):
+            src_db = src.open_db(name, create=False)
+            dst_db = dst.open_db(name, create=True)
+            pending: list = []
+            txn = dst.begin(write=True)
+            count = 0
+            with src.begin(db=src_db, buffers=True) as read:
+                for key, stored in read.cursor():
+                    value = bytes(stored)
+                    if name == b"properties":
+                        props = msgpack.unpackb(value, raw=False)
+                        if type(props.get("attributes", b"")) is not bytes:
+                            value = encode_properties(props)
+                            converted += 1
+                    txn = _put_with_resize(dst, txn, dst_db, bytes(key), value, pending)
+                    count += 1
+                    if count % commit_every == 0:
+                        txn.commit()
+                        pending.clear()
+                        txn = dst.begin(write=True)
+            txn.commit()
+    finally:
+        src.close()
+        dst.close()
+    path.rename(old_path)
+    new_path.rename(path)
+    shutil.rmtree(old_path)
+    return converted

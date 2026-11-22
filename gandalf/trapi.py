@@ -314,6 +314,32 @@ def edge_attributes(edge: Any) -> list:
     return attributes if attributes is not None else []
 
 
+def node_attributes(node: Any) -> list:
+    """A node's attributes as a list, decoding them in place if they are
+    still the JSON stored in the graph, so the caller may change the list.
+
+    The node counterpart of :func:`edge_attributes`: a full response built
+    for the server carries each node's attributes as the ``bytes`` of the
+    JSON array in the node store.  A response annotator that reads or adds
+    node attributes calls this first.
+
+    >>> node = {"attributes": b'[{"attribute_type_id": "biolink:x"}]'}
+    >>> node_attributes(node).append({"attribute_type_id": "biolink:y"})
+    >>> node["attributes"]
+    [{'attribute_type_id': 'biolink:x'}, {'attribute_type_id': 'biolink:y'}]
+    >>> node = {}
+    >>> node_attributes(node).append(1)  # none yet: attached, so it sticks
+    >>> node
+    {'attributes': [1]}
+    """
+    attributes = node.get("attributes")
+    if type(attributes) is bytes:
+        attributes = node["attributes"] = orjson.loads(attributes)
+    elif attributes is None:
+        attributes = node["attributes"] = []
+    return cast(list, attributes)
+
+
 def response_results(response: Any) -> list:
     """A response's results as a list of Result dicts, decoding in place any
     still written as JSON, so the caller may read and change them.
@@ -353,8 +379,8 @@ def response_results(response: Any) -> list:
 def to_fragments(response: Any) -> None:
     """Hand everything still stored as JSON in a response to orjson as
     :class:`orjson.Fragment`, in place: results written as JSON (see
-    :func:`response_results`) and edge attributes (see
-    :func:`edge_attributes`).
+    :func:`response_results`) and edge and node attributes (see
+    :func:`edge_attributes`, :func:`node_attributes`).
 
     The last step before serializing: orjson copies a Fragment's bytes into
     its output as they are, where going through a ``default`` hook per entry
@@ -368,11 +394,12 @@ def to_fragments(response: Any) -> None:
     for i, entry in enumerate(results):
         if type(entry) is bytes:
             results[i] = fragment(entry)
-    edges = (message.get("knowledge_graph") or {}).get("edges") or {}
-    for edge in edges.values():
-        attributes = edge.get("attributes")
-        if type(attributes) is bytes:
-            edge["attributes"] = fragment(attributes)
+    knowledge_graph = message.get("knowledge_graph") or {}
+    for elements in (knowledge_graph.get("edges"), knowledge_graph.get("nodes")):
+        for element in (elements or {}).values():
+            attributes = element.get("attributes")
+            if type(attributes) is bytes:
+                element["attributes"] = fragment(attributes)
 
 
 class InFlightEdge(TypedDict):

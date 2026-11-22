@@ -86,14 +86,16 @@ def lookup(
             If False, force full enrichment.  If None (default), automatically
             enable lightweight mode when path count exceeds the large result
             threshold.
-        attributes_as_json: If True, each real edge's ``attributes`` in a
-            full response is ``bytes`` -- the JSON stored in the graph, not
-            decoded -- for a caller that serializes with orjson after
-            :func:`~gandalf.trapi.to_fragments`, as the server does.
-            Decoding and re-encoding them costs more than any other step of a
-            large full response.  Read one through
-            :func:`~gandalf.trapi.edge_attributes`.  If False (default), they
-            are plain lists.
+        attributes_as_json: If True, each real edge's and each node's
+            ``attributes`` in a full response is ``bytes`` -- the JSON stored
+            in the graph, not decoded -- for a caller that serializes with
+            orjson after :func:`~gandalf.trapi.to_fragments`, as the server
+            does.  Decoding and re-encoding them costs more than any other
+            step of a large full response.  Read one through
+            :func:`~gandalf.trapi.edge_attributes` /
+            :func:`~gandalf.trapi.node_attributes`.  (A node store written
+            before node attributes were stored as JSON still gives lists.)
+            If False (default), they are plain lists.
         results_as_json: If True, results built from a single path whose
             edges all have IDs -- nearly all of them on a large query -- are
             written straight to JSON, all at once, rather than built one by
@@ -491,6 +493,7 @@ def _lookup_inner(
             dehydrated=dehydrated,
             bmt=bmt,
             logger=logger,
+            attributes_as_json=attributes_as_json,
         )
 
     num_paths = len(path_data) if path_data is not None else 0

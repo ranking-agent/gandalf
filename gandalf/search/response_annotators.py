@@ -25,8 +25,11 @@ keeps some of itself as JSON, so the server can serialize it as it is:
   through ``gandalf.trapi.response_results(response)``, which decodes them
   in place and returns the list of Result dicts.
 
-Node attributes, and edges and results an annotator adds, are plain Python
-objects as always.
+* a knowledge-graph node's ``attributes`` is likewise the stored JSON
+  ``bytes``: read (and change) them through
+  ``gandalf.trapi.node_attributes(node)``.
+
+Edges and results an annotator adds are plain Python objects as always.
 """
 
 from typing import Any, Callable, Optional

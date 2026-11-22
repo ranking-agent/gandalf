@@ -125,7 +125,9 @@ graph.save_mmap("data/processed/gandalf_mmap")
 > writes memory-mapped columns of the attribute values filters read most --
 > each node's `information_content` and each edge's PubMed
 > `publications` -- plus the node IDs and names as memory-mapped files,
-> so a dehydrated response reads no node records at all.  Node and
+> so a dehydrated response reads no node records at all -- and stores node
+> attributes as the JSON a response carries, so a full response passes them
+> through without decoding them.  Node and
 > edge attribute constraints on them, and `min_information_content`, no
 > longer read and decode every candidate's record; answers are unchanged.
 > An old graph still loads and answers the same, the slower way.  To add
@@ -135,6 +137,11 @@ graph.save_mmap("data/processed/gandalf_mmap")
 > ```bash
 > python -m gandalf.attribute_columns data/processed/gandalf_mmap
 > ```
+>
+> That command also rewrites the node store into the new form.  **Deploy
+> this version before upgrading or rebuilding a graph**: an older gandalf
+> cannot read the new node store (node attribute filters would break), so
+> keep a copy of the old graph if you may need to roll back.
 
 ### Annotating nodes at build time
 

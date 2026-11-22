@@ -525,10 +525,13 @@ def add_to_graph(directory: Path) -> AttributeColumns:
     Reads every node record and every edge's attributes, then writes the
     column files, the memory-mapped node IDs and names (``NodeIdStore``,
     ``NodeNameStore``) and their ``metadata.pkl`` entries, as ``save_mmap``
-    does for a new graph.  Running it again rewrites them.  Processes
+    does for a new graph; and rewrites the node store so node attributes are
+    stored as response JSON (``rewrite_attributes_as_json``), as
+    ``NodeStore.build`` now writes them.  Running it again rewrites them.  Processes
     serving the graph pick them up when they next load it.
     """
     from gandalf.edge_id_store import NodeIdStore, NodeNameStore
+    from gandalf.node_store import rewrite_attributes_as_json
     from gandalf.lmdb_store import LMDBPropertyStore
     from gandalf.node_store import NodeStore
 
@@ -569,13 +572,19 @@ def add_to_graph(directory: Path) -> AttributeColumns:
         metadata.update(node_names.metadata())
     with open(directory / "metadata.pkl", "wb") as f:
         pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
+    # Node attributes as response JSON, as gandalf-build now stores them
+    rewrite_attributes_as_json(directory / "node_store.lmdb")
     return columns
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Command line for :func:`add_to_graph`."""
     parser = argparse.ArgumentParser(
-        description="Add the attribute columns to an already-built graph."
+        description=(
+            "Bring an already-built graph up to date: add the attribute "
+            "columns and the node ID and name files, and store node "
+            "attributes as response JSON."
+        )
     )
     parser.add_argument("graph", type=Path, help="graph directory (gandalf-build)")
     args = parser.parse_args(argv)

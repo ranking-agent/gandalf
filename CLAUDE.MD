@@ -165,6 +165,15 @@ Keep it that way:
   (`search/reconstruct.py`).  A graph without either file falls back to
   `_node_cache_from_records`.  `tests/test_dehydrated_nodes.py` checks the
   two give byte-identical responses.
+- **Node attributes are stored as response JSON** (`node_store.py`,
+  `encode_properties`), as edge attributes are: a full response built with
+  `attributes_as_json=True` (the server) carries each node's `attributes`
+  as those `bytes`, and `to_fragments` hands them to orjson.  Every other
+  node-store reader gets lists.  Code that touches a response node's
+  attributes -- annotator plugins -- goes through
+  `gandalf.trapi.node_attributes(node)`.  A record in the older msgpack form
+  still reads correctly; `tests/test_node_attributes_json.py` checks full
+  responses are byte-identical from either form.
 - **Node filter plugins may judge a batch**: a filter with a
   `mask(graph, node_idxes)` method is called once per step
   (`node_filter_mask`) instead of once per node.

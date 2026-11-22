@@ -68,6 +68,7 @@ def reconstruct_paths(
     dehydrated=None,
     bmt=None,
     logger: Optional[logging.Logger] = None,
+    attributes_as_json: bool = False,
 ):
     """Reconstruct complete paths by iteratively joining edge results.
 
@@ -83,6 +84,9 @@ def reconstruct_paths(
         logger: Logger to emit this query's records to.  ``lookup`` passes the
             query's own logger so that entries reach that query's TRAPI logs
             and no other's.  Defaults to the module logger.
+        attributes_as_json: In a full response, give each node's
+            ``attributes`` as the JSON stored in the graph (``bytes``), as
+            ``lookup(attributes_as_json=True)`` does for edges.
 
     Returns:
         PathArrays object, or None if no paths found
@@ -299,6 +303,7 @@ def reconstruct_paths(
                 unique_node_indices,
                 node_cache,
                 node_id_cache,
+                attributes_as_json=attributes_as_json and not lightweight,
             )
         prof.add_metric("unique_nodes", int(len(unique_node_indices)))
 
@@ -707,15 +712,28 @@ def compute_join_order(query_graph, edge_results, edge_order):
 
 
 def _node_cache_from_records(
-    graph, bmt, lightweight, unique_node_indices, node_cache, node_id_cache
+    graph,
+    bmt,
+    lightweight,
+    unique_node_indices,
+    node_cache,
+    node_id_cache,
+    attributes_as_json: bool = False,
 ) -> None:
-    """Fill the node caches from each node's record in the node store."""
+    """Fill the node caches from each node's record in the node store.
+
+    With *attributes_as_json*, a node's ``attributes`` is the JSON stored in
+    the node store (``bytes``) where it is stored that way; see
+    :func:`gandalf.trapi.node_attributes`.
+    """
 
     # Fetch all node properties and IDs in two single-transaction batch
     # reads (sorted for B-tree locality) instead of one LMDB lookup per
     # node.  For result sets with hundreds of thousands of unique nodes
     # this collapses ~N transactions into 2.
-    props_batch = graph.get_all_node_properties_batch(unique_node_indices)
+    props_batch = graph.get_all_node_properties_batch(
+        unique_node_indices, attributes_as_json=attributes_as_json
+    )
     id_batch = graph.get_node_ids_batch(unique_node_indices)
 
     # Nodes share a few dozen distinct category lists, and resolving the
