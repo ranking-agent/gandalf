@@ -60,6 +60,7 @@ gandalf/
 ├── loader.py         # JSONL to graph conversion
 ├── edge_id_store.py  # Original edge IDs (memory-mapped JSON blob)
 ├── node_categories.py  # Per-node category index (memory-mapped)
+├── attribute_columns.py  # Columns of filtered attribute values (memory-mapped)
 ├── node_annotations.py  # Build-time node annotation (biothings_annotator)
 ├── trapi.py          # TRAPI 2.0 envelope, query parameters, timeouts
 ├── search/           # Search & path finding (package)
@@ -131,8 +132,9 @@ Keep it that way:
   Qualifiers, sources and knowledge_level / agent_type are interned, so
   `EdgeConstraints.permits_mask` tests each once per *distinct value* among
   the edges (`EdgePropertyStore.pool_mask`) and indexes the verdicts back
-  out.  Only edge attribute constraints, whose data is unique to an edge,
-  are read edge by edge, last, on what passed everything else.
+  out.  Edge attribute constraints, whose data is unique to an edge, come
+  last, on what passed everything else: from the attribute columns where
+  they can answer, else read from LMDB in one transaction per step.
 - **A QNode's categories are checked against the category index**
   (`graph.node_categories`, `gandalf/node_categories.py`): one small integer
   per node naming which of the few hundred distinct category lists it has,
@@ -141,8 +143,24 @@ Keep it that way:
   `python -m gandalf.node_categories GRAPH_DIR` adds it to a graph already
   built.  A graph saved before it existed loads without it and falls back to reading each candidate node's record
   from the node store (once per node per edge query, batched per step) --
-  the same answers, slower.  Node filters and node attribute constraints
-  always take that per-node route, on the nodes whose categories passed.
+  the same answers, slower.
+- **Filtered attribute values are columns** (`graph.attribute_columns`,
+  `gandalf/attribute_columns.py`): `biolink:information_content` as one
+  float64 per node, and each edge's `biolink:publications` as integer PubMed
+  accessions (offsets + values, like a CSR), memory-mapped next to the CSR.
+  Node and edge attribute constraints and the `min_information_content`
+  filter read them instead of decoding records.  A column only serves what
+  it answers *exactly* as `matches_attribute_constraints` would; other
+  operators, attributes or values, and the records it lists as
+  `irregular`, fall back to the record (`prefilter`).  So a column can never
+  change an answer -- `tests/test_attribute_columns.py` checks that on
+  randomized awkward values; extend it with any new column.  `save_mmap`
+  writes them, and `python -m gandalf.attribute_columns GRAPH_DIR` adds them
+  (and `NodeIdStore`, the node IDs as a memory-mapped blob for responses) to
+  a graph already built.
+- **Node filter plugins may judge a batch**: a filter with a
+  `mask(graph, node_idxes)` method is called once per step
+  (`node_filter_mask`) instead of once per node.
 - **Steps are bounded.**  Pinned nodes are read in runs of about
   `TRAVERSAL_CHUNK_EDGES` candidate edges, so the working arrays stay a few
   megabytes however many nodes are pinned.

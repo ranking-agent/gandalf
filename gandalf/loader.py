@@ -371,6 +371,8 @@ def _build_graph_from_source(
     graph.node_properties = node_properties
     graph.node_store = None
     graph.node_categories = None  # written by save_mmap
+    graph.attribute_columns = None  # written by save_mmap
+    graph.node_id_store = None  # written by save_mmap
 
     graph.fwd_targets = dst_sorted
     graph.fwd_predicates = pred_sorted

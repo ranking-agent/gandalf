@@ -22,7 +22,7 @@ the usual case, each ID decodes as the UTF-8 between its quotes.
 
 import mmap
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Union
+from typing import Iterable, Optional, Sequence, TypeVar, Union
 
 import numpy as np
 import orjson
@@ -35,6 +35,8 @@ BLOB_FILE = "edge_ids.bin"
 OFFSETS_FILE = "edge_id_offsets.npy"
 
 Blob = Union[bytes, mmap.mmap]
+
+_Store = TypeVar("_Store", bound="EdgeIdStore")
 
 
 def _encode_id(edge_id) -> bytes:
@@ -118,6 +120,12 @@ class EdgeIdStore:
     {'edge_ids_unique': True, 'edge_ids_escaped': True}
     """
 
+    #: Where :meth:`save` writes the store, and the ``metadata.pkl`` keys
+    #: :meth:`metadata` uses (``<prefix>_unique``, ``<prefix>_escaped``).
+    blob_file = BLOB_FILE
+    offsets_file = OFFSETS_FILE
+    metadata_prefix = "edge_ids"
+
     def __init__(
         self, blob: Blob, offsets: np.ndarray, unique: bool, escaped: bool = True
     ):
@@ -133,8 +141,8 @@ class EdgeIdStore:
 
     @classmethod
     def from_ids(
-        cls, ids: Sequence[Optional[str]], chunk: int = 1_000_000
-    ) -> "EdgeIdStore":
+        cls: type[_Store], ids: Sequence[Optional[str]], chunk: int = 1_000_000
+    ) -> _Store:
         """Build from one ID (or None) per edge, in forward-CSR order.
 
         IDs are encoded *chunk* at a time, so a build holds at most that many
@@ -155,24 +163,25 @@ class EdgeIdStore:
 
     def metadata(self) -> dict:
         """What :meth:`load` needs back, for the graph's ``metadata.pkl``."""
-        return {"edge_ids_unique": self.unique, "edge_ids_escaped": self.escaped}
+        prefix = self.metadata_prefix
+        return {f"{prefix}_unique": self.unique, f"{prefix}_escaped": self.escaped}
 
     def save(self, directory: Path) -> None:
         """Write ``edge_ids.bin`` and ``edge_id_offsets.npy`` to *directory*."""
-        with open(directory / BLOB_FILE, "wb") as f:
+        with open(directory / self.blob_file, "wb") as f:
             f.write(self._blob)
-        np.save(directory / OFFSETS_FILE, self.offsets)
+        np.save(directory / self.offsets_file, self.offsets)
 
     @classmethod
     def load(
-        cls, directory: Path, metadata: dict, in_memory: bool = False
-    ) -> "EdgeIdStore":
+        cls: type[_Store], directory: Path, metadata: dict, in_memory: bool = False
+    ) -> _Store:
         """Open the files :meth:`save` wrote, memory-mapped unless *in_memory*.
 
         A memory-mapped store is shared by every process that opens it.
         *metadata* holds what :meth:`metadata` returned when it was saved.
         """
-        path = directory / BLOB_FILE
+        path = directory / cls.blob_file
         blob: Blob
         if in_memory or path.stat().st_size == 0:
             # mmap cannot map an empty file (a graph whose edges have no IDs)
@@ -180,13 +189,13 @@ class EdgeIdStore:
         else:
             with open(path, "rb") as f:
                 blob = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        offsets = np.load(directory / OFFSETS_FILE, mmap_mode="r")
+        offsets = np.load(directory / cls.offsets_file, mmap_mode="r")
         offsets = np.array(offsets) if in_memory else np.asarray(offsets)
         return cls(
             blob,
             offsets,
-            metadata["edge_ids_unique"],
-            metadata["edge_ids_escaped"],
+            metadata[f"{cls.metadata_prefix}_unique"],
+            metadata[f"{cls.metadata_prefix}_escaped"],
         )
 
     def spans(self, indices: np.ndarray) -> tuple[list, list]:
@@ -219,7 +228,11 @@ class EdgeIdStore:
 
     def get_batch(self, indices: Iterable[int]) -> dict[int, str]:
         """Map each edge in *indices* that has an ID to it."""
-        idx = np.fromiter(indices, dtype=np.int64)
+        idx = (
+            indices.astype(np.int64, copy=False)
+            if isinstance(indices, np.ndarray)
+            else np.fromiter(indices, dtype=np.int64)
+        )
         if self.escaped:
             return {
                 i: decode_id(span)
@@ -238,3 +251,35 @@ class EdgeIdStore:
         """Release the memory map, if any."""
         if isinstance(self._blob, mmap.mmap):
             self._blob.close()
+
+
+class NodeIdStore(EdgeIdStore):
+    """Node IDs by node index, stored the same way as edge IDs.
+
+    The node store keeps them in LMDB too (``idx_to_id``); a response reads
+    them from here instead, with no B-tree lookup per node.  Written to
+    ``node_ids.bin`` and ``node_id_offsets.npy``.
+
+    >>> store = NodeIdStore.from_ids(["CHEBI:1", "MONDO:2"])
+    >>> store.get_batch([1, 0])
+    {1: 'MONDO:2', 0: 'CHEBI:1'}
+    >>> store.metadata()
+    {'node_ids_unique': True, 'node_ids_escaped': False}
+    """
+
+    blob_file = "node_ids.bin"
+    offsets_file = "node_id_offsets.npy"
+    metadata_prefix = "node_ids"
+
+    @classmethod
+    def from_id_map(cls, node_id_to_idx, num_nodes: int) -> "NodeIdStore":
+        """Build from ``(node_id, node_idx)`` pairs (a mapping or iterable)."""
+        items = (
+            node_id_to_idx.items()
+            if hasattr(node_id_to_idx, "items")
+            else node_id_to_idx
+        )
+        ids: list = [None] * num_nodes
+        for node_id, idx in items:
+            ids[idx] = node_id
+        return cls.from_ids(ids)

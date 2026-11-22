@@ -34,6 +34,7 @@ from typing import Any, Optional
 import numpy as np
 from translator_tom.model_dicts import QEdgeDict
 
+from gandalf.attribute_columns import prefilter
 from gandalf.search.attribute_constraints import matches_attribute_constraints
 from gandalf.search.qualifiers import edge_matches_qualifier_constraints
 
@@ -272,9 +273,9 @@ class EdgeConstraints:
 
         Qualifiers, sources and knowledge_level / agent_type are interned, so
         each is tested once per distinct value among the edges rather than
-        once per edge.  Only the attribute constraints, whose data is unique
-        to an edge, are checked edge by edge, and only on the edges that
-        passed everything else.
+        once per edge.  Attribute constraints are checked last, only on the
+        edges that passed everything else: from the graph's attribute
+        columns where they can answer, else edge by edge from LMDB.
 
         Args:
             graph: The CSRGraph being traversed.
@@ -302,13 +303,23 @@ class EdgeConstraints:
         if self.sources is not None:
             keep &= store.pool_mask("sources", fwd_edge_idx, self.sources.permits)
 
-        # Cold path last: it costs an LMDB read per edge.
+        # Attributes last.  The graph's attribute columns answer what they
+        # can; only the edges they cannot judge cost an LMDB read.
         if self.attributes:
-            for i in np.flatnonzero(keep).tolist():
-                if not _edge_attributes_match(
-                    graph, int(fwd_edge_idx[i]), self.attributes
-                ):
-                    keep[i] = False
+            candidates = np.flatnonzero(keep)
+            edges = fwd_edge_idx[candidates]
+            columns = getattr(graph, "attribute_columns", None)
+            maybe, need_record = prefilter(
+                self.attributes,
+                columns.edge_constraint if columns is not None else None,
+                edges,
+            )
+            keep[candidates] = maybe
+            if need_record.any():
+                read = np.flatnonzero(need_record)
+                keep[candidates[read]] = _edges_attributes_match(
+                    graph, edges[read], self.attributes
+                )
         return keep
 
     def _permits_kl_at(self, kl_at: tuple) -> bool:
@@ -335,6 +346,23 @@ def _parse_allow_deny(raw: Any, field: str) -> Optional[AllowDeny]:
     """Read an allow/deny constraint, or None when the QEdge omits it."""
     value = raw.get(field)
     return None if value is None else AllowDeny.parse(value, field)
+
+
+def _edges_attributes_match(
+    graph, fwd_edge_idx: np.ndarray, attribute_constraints
+) -> np.ndarray:
+    """:func:`_edge_attributes_match` for many edges, read in one transaction."""
+    if graph.lmdb_store is None or len(fwd_edge_idx) == 0:
+        return np.zeros(len(fwd_edge_idx), dtype=np.bool_)
+    attributes = graph.lmdb_store.get_attributes_batch(fwd_edge_idx.tolist())
+    return np.fromiter(
+        (
+            bool(matches_attribute_constraints(attrs, attribute_constraints))
+            for attrs in attributes
+        ),
+        dtype=np.bool_,
+        count=len(attributes),
+    )
 
 
 def _edge_attributes_match(graph, fwd_edge_idx: int, attribute_constraints) -> bool:

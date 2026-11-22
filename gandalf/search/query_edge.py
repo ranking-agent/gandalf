@@ -13,10 +13,11 @@ from typing import Iterator, Optional
 import numpy as np
 
 from gandalf.profiler import current_profiler
+from gandalf.attribute_columns import prefilter
 from gandalf.search.attribute_constraints import matches_attribute_constraints
 from gandalf.search.edge_constraints import EdgeConstraints
 from gandalf.search.edge_matches import EdgeMatches
-from gandalf.search.node_filters import NodeFilter, apply_node_filters
+from gandalf.search.node_filters import NodeFilter, node_filter_mask
 
 #: Candidate edges read per traversal step.  Pinned nodes are taken in runs
 #: whose degrees add up to about this many, so the arrays a step works on
@@ -308,11 +309,12 @@ class _NodeCheck:
 
     Categories are tested for a whole step's nodes at once against the
     graph's category index (``graph.node_categories``), where it has one.
-    Whatever needs the node itself -- the filters, the constraints, and the
-    categories of a graph without the index -- is judged once per node for
-    the whole edge query, since hub nodes are reached from many pinned
-    nodes, with the nodes of one traversal step read from the node store in
-    a single batch.
+    Everything else is judged once per node for the whole edge query, since
+    hub nodes are reached from many pinned nodes: attribute constraints from
+    the graph's attribute columns where they can answer, plugin filters a
+    step's nodes at a time (``node_filter_mask``), and whatever still needs
+    the node's record -- including the categories of a graph without the
+    index -- with the step's nodes read from the node store in one batch.
 
     Falsy when there is nothing to check (every node passes).
     """
@@ -367,24 +369,43 @@ class _NodeCheck:
         graph = self._graph
         categories = self._categories
         constraints = self._attribute_constraints
+        node_arr = np.asarray(nodes, dtype=np.int64)
+        passed = np.ones(len(nodes), dtype=np.bool_)
+        need_record = np.zeros(len(nodes), dtype=np.bool_)
+        # Attribute constraints from the graph's columns where they can
+        # answer; the nodes they cannot judge are read below.
+        if constraints:
+            columns = getattr(graph, "attribute_columns", None)
+            passed, need_record = prefilter(
+                constraints,
+                columns.node_constraint if columns is not None else None,
+                node_arr,
+            )
+        # Plugin filters judge the nodes still standing, in one batch each
+        for node_filter in self._node_filters:
+            standing = np.flatnonzero(passed)
+            if len(standing) == 0:
+                break
+            passed[standing] = node_filter_mask(node_filter, graph, node_arr[standing])
+        need_record &= passed
+        read = passed if categories else need_record
         props_by_node: dict = {}
-        if categories or constraints:
-            props_by_node = graph.get_all_node_properties_batch(nodes)
-        for node in nodes:
-            props = props_by_node.get(node, {})
-            if categories:
-                node_categories = props.get("categories", [])
-                passed = any(cat in node_categories for cat in categories)
-            else:
-                passed = True
-            passed = passed and apply_node_filters(self._node_filters, graph, node)
-            if passed and constraints:
-                passed = bool(
-                    matches_attribute_constraints(
-                        props.get("attributes", []), constraints
+        if read.any():
+            props_by_node = graph.get_all_node_properties_batch(node_arr[read].tolist())
+        verdicts = self._verdicts
+        for node, ok, need in zip(nodes, passed.tolist(), need_record.tolist()):
+            if ok and (categories or need):
+                props = props_by_node.get(node, {})
+                if categories:
+                    node_categories = props.get("categories", [])
+                    ok = any(cat in node_categories for cat in categories)
+                if ok and need:
+                    ok = bool(
+                        matches_attribute_constraints(
+                            props.get("attributes", []), constraints
+                        )
                     )
-                )
-            self._verdicts[node] = passed
+            verdicts[node] = ok
 
 
 def _unique_in_order(node_idxes) -> np.ndarray:

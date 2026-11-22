@@ -144,6 +144,23 @@ class LMDBPropertyStore:
                     results[idx] = {"attributes": orjson.loads(val)}
         return results
 
+    def get_attributes_batch(self, edge_indices):
+        """Each edge's decoded attributes list, in the order given.
+
+        One read transaction for the whole batch, where calling :meth:`get`
+        per edge opens one each.  An edge with no stored detail gets ``[]``.
+
+        Returns:
+            A list parallel to *edge_indices*.
+        """
+        out = []
+        with self._env.begin(buffers=True) as txn:
+            get = txn.get
+            for idx in edge_indices:
+                val = get(_encode_key(int(idx)))
+                out.append([] if val is None else orjson.loads(val))
+        return out
+
     def get_json_batch(self, edge_indices):
         """Each edge's attributes as the stored JSON bytes, undecoded.
 

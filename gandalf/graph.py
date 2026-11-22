@@ -12,11 +12,21 @@ import orjson
 import numpy as np
 
 from gandalf.config import settings
-from gandalf.edge_id_store import EDGE_IDS_FORMAT, OFFSETS_FILE, EdgeIdStore
+from gandalf.edge_id_store import (
+    EDGE_IDS_FORMAT,
+    OFFSETS_FILE,
+    EdgeIdStore,
+    NodeIdStore,
+)
 from gandalf.memory import MemoryLedger
 from gandalf.lmdb_store import EDGE_ATTRIBUTES_FORMAT, LMDBPropertyStore
 from gandalf.node_categories import METADATA_KEY as NODE_CATEGORY_SETS_KEY
 from gandalf.node_categories import NODE_SETS_FILE, NodeCategoryIndex
+from gandalf.attribute_columns import (
+    AttributeColumns,
+    edge_items_from_lmdb,
+    node_items_from_dict,
+)
 from gandalf.node_store import NodeStore
 
 logger = logging.getLogger(__name__)
@@ -520,6 +530,16 @@ class CSRGraph:
         # load_mmap; None for a graph still held in memory (its node
         # properties may yet change) or saved before the index existed.
         self.node_categories: Optional[NodeCategoryIndex] = None
+
+        # Columns of the attribute values filters read (see
+        # gandalf.attribute_columns) — written by save_mmap, mapped by
+        # load_mmap; None when absent, and filters then read the records.
+        self.attribute_columns: Optional[AttributeColumns] = None
+
+        # Node IDs by index as a memory-mapped blob, read when building a
+        # response — written by save_mmap, mapped by load_mmap; None when
+        # absent, and the node store's LMDB answers instead.
+        self.node_id_store: Optional[NodeIdStore] = None
 
         # LMDB store (cold path) — set later by loader or load_mmap
         self.lmdb_store = None
@@ -1175,6 +1195,14 @@ class CSRGraph:
         Returns dict mapping node_idx -> node_id string.  Falls back to
         the in-memory idx_to_node_id dict when loaded without a NodeStore.
         """
+        node_id_store = getattr(self, "node_id_store", None)
+        if node_id_store is not None:
+            idx = (
+                node_indices
+                if isinstance(node_indices, np.ndarray)
+                else np.fromiter(node_indices, dtype=np.int64)
+            )
+            return node_id_store.get_batch(np.unique(idx))
         if self.node_store is not None:
             return self.node_store.get_node_ids_batch(node_indices)
         return {int(n): self.idx_to_node_id.get(int(n)) for n in node_indices}
@@ -1194,6 +1222,11 @@ class CSRGraph:
 
     def get_node_id(self, node_idx):
         """Convert internal index to original node ID"""
+        node_id_store = getattr(self, "node_id_store", None)
+        if node_id_store is not None:
+            if not 0 <= node_idx < len(node_id_store):
+                return None
+            return node_id_store.get(int(node_idx))
         if self.node_store is not None:
             return self.node_store.get_node_id(node_idx)
         return self.idx_to_node_id.get(node_idx)
@@ -1501,6 +1534,29 @@ class CSRGraph:
         node_categories = NodeCategoryIndex.build(self.num_nodes, node_properties)
         node_categories.save(directory)
 
+        # The attribute values filters read, as memory-mapped columns
+        # (see gandalf.attribute_columns)
+        t_columns = time.perf_counter()
+        attribute_columns = AttributeColumns.build(
+            self.num_nodes,
+            node_items_from_dict(node_properties),
+            len(self.fwd_targets),
+            (
+                edge_items_from_lmdb(self.lmdb_store)
+                if self.lmdb_store is not None
+                else None
+            ),
+        )
+        columns_metadata = attribute_columns.save(directory)
+        node_id_store = NodeIdStore.from_id_map(node_id_to_idx, self.num_nodes)
+        node_id_store.save(directory)
+        columns_metadata.update(node_id_store.metadata())
+        logger.info(
+            "  Attribute columns: %.1f MB in %.1fs",
+            attribute_columns.nbytes() / 2**20,
+            time.perf_counter() - t_columns,
+        )
+
         # Save small metadata as pickle (predicates + num_nodes only)
         metadata = {
             "num_nodes": self.num_nodes,
@@ -1508,6 +1564,7 @@ class CSRGraph:
             "edge_attributes_format": EDGE_ATTRIBUTES_FORMAT,
             "edge_ids_format": EDGE_IDS_FORMAT,
             **node_categories.metadata(),
+            **columns_metadata,
         }
         if self.edge_id_store is not None:
             metadata.update(self.edge_id_store.metadata())
@@ -1713,6 +1770,25 @@ class CSRGraph:
                 NODE_SETS_FILE,
             )
             graph.node_categories = None
+        graph.attribute_columns = AttributeColumns.load(
+            directory, metadata, lambda path: _load_npy(path, mmap_mode=mmap_mode)
+        )
+        node_ids_key = f"{NodeIdStore.metadata_prefix}_unique"
+        graph.node_id_store = (
+            NodeIdStore.load(
+                directory, metadata, in_memory=settings.load_mmaps_into_memory
+            )
+            if node_ids_key in metadata
+            and (directory / NodeIdStore.offsets_file).exists()
+            else None
+        )
+        if graph.attribute_columns is None:
+            logger.info(
+                "  %s has no attribute columns: attribute filters read each "
+                "candidate's record. Run python -m gandalf.attribute_columns "
+                "on it, or rebuild it with gandalf-build, to add them.",
+                directory,
+            )
         ledger.mark("node store")
 
         # Load edge properties - detect format
